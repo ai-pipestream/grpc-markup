@@ -30,6 +30,9 @@ tonic = { version = "0.14.6", features = ["gzip", "zstd"] }
 tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-reflection = "0.14.6"
+# YAML front matter in the markdown fold. Pure Rust, no C dependency; the
+# maintained fork of yaml-rust.
+yaml-rust2 = "0.11"
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"
