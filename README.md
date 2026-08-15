@@ -10,8 +10,8 @@ heading node, a table streams as `TableStart` / `TableRow` / `TableEnd`
 whichever source wrote it, and an optional fold turns the whole parse into
 one `ai.pipestream.document.v1.Document` a coordinator can merge with
 another collector's parse of the same work. LaTeX is in the contract but
-not in this build; asking for it is `UNIMPLEMENTED` with the format named. It is not PipeStream core and not a Docling Python
-wrapper.
+not in this build; asking for it is `UNIMPLEMENTED` with the format named.
+It is not PipeStream core.
 
 ## Build and run
 
@@ -106,8 +106,8 @@ one warning with a count.
 | BoxNote | JSON with a ProseMirror `doc` tree (or legacy `atext`, refused) | headings, styled paragraphs, nested/check lists, code, quotes, spanned tables, images, safe-scheme links |
 | Docling JSON | JSON whose `schema_name` names a DoclingDocument | field-by-field re-ingestion of the core arrays; typed events are a projection of the body in reading order; unconsumed keys warn per key path |
 | HTML | `<!DOCTYPE html` or `<html` signature | whole documents and body-only fragments (html5ever); head title and `meta.*` metadata, h1-h6 ladder (first h1 = title), paragraphs, blockquotes, ul/ol/dl nesting, spanned tables with captions, `pre` code with `language-*` classes, figures and images, whole-block links; script/style/head never become text; tree-builder repairs warn as malformed structure |
-| AsciiDoc | Heuristic only (`= ` title, `== ` sections, `:name: value` entries, `----` fences) | attribute entries to metadata, `= `/`== ` title and section ladder (docling's levels), multiline paragraphs, admonitions as `role: "admonition"`, `*`/`.` lists nested by marker depth with markers as written, `|===` tables with the first row as header and cell specifiers stripped, `[source,lang]` + `----` listings as code, `image::` macros with `.Caption` lines |
-| LaTeX | `\documentclass` or `\begin{document}` | preamble skipped with `\title`/`\author`/`\date` surfaced, section ladder at docling's levels, inline commands flattened (`\cite`/`\ref` to `[key]`), itemize/enumerate/description nesting, tabular with `\multicolumn`/`\multirow` spans and rules dropped, verbatim/lstlisting/tikz as code, equation family and `$$`/`\[..\]` as formulas, `\includegraphics` by reference, quotes, theorems, bibliographies; unknown environments descend with one aggregated warning |
+| AsciiDoc | Heuristic only (`= ` title, `== ` sections, `:name: value` entries, `----` fences) | attribute entries to metadata, `= `/`== ` title and section ladder (level is marker length minus one), multiline paragraphs, admonitions as `role: "admonition"`, `*`/`.` lists nested by marker depth with markers as written, `|===` tables with the first row as header and cell specifiers stripped, `[source,lang]` + `----` listings as code, `image::` macros with `.Caption` lines |
+| LaTeX | `\documentclass` or `\begin{document}` | preamble skipped with `\title`/`\author`/`\date` surfaced, section ladder (part/chapter/section 1 through subparagraph 5), inline commands flattened (`\cite`/`\ref` to `[key]`), itemize/enumerate/description nesting, tabular with `\multicolumn`/`\multirow` spans and rules dropped, verbatim/lstlisting/tikz as code, equation family and `$$`/`\[..\]` as formulas, `\includegraphics` by reference, quotes, theorems, bibliographies; unknown environments descend with one aggregated warning |
 
 Sniffing order is the one [`docs/design.md`](docs/design.md) fixes: an
 explicit request wins outright, then unambiguous signatures, and only then a
@@ -142,7 +142,7 @@ document is carried over item for item, with this collector's
 `CollectorSource` appended to each item's sources (attribution is additive;
 sources never overwrite each other).
 
-Structure follows docling's idioms: a section header of level N is parented
+Structure is a heading-as-parent ladder: a section header of level N is parented
 to the nearest open header of a lower level (`#/body` when there is none)
 and the content after it hangs off that header. Refs are dense and local
 (`#/texts/0`, `#/tables/1`) with `parent` and `children` reciprocal, which
@@ -150,7 +150,7 @@ is what lets the coordinator merge the fragment additively;
 `document_fold::integrity_errors` is that contract as a check, and every
 fold test asserts it is empty. Markup has no pages and no boxes, so no item
 carries `prov` — except cues, whose track timing is real provenance, and
-ingested Docling documents, whose provenance passes through untouched.
+ingested Docling JSON payloads, whose provenance passes through untouched.
 
 ## Security and bounds
 
@@ -195,7 +195,7 @@ src/sniff.rs                      format resolution and its evidence
 src/parse.rs                      the shared driver: emitter, envelope, fold registry
 src/markdown.rs                   the Markdown fold (pulldown-cmark)
 src/html.rs                       the HTML fold (html5ever via scraper)
-src/asciidoc.rs                   the AsciiDoc fold (line-oriented, docling parity)
+src/asciidoc.rs                   the AsciiDoc fold (line-oriented)
 src/latex.rs                      the LaTeX fold (hand-rolled tolerant reader)
 src/vtt.rs                        the WebVTT fold (hand-written cue parser)
 src/boxnote.rs                    the BoxNote fold (doc-tree walk)

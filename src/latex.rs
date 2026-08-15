@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The LaTeX fold: a hand-rolled, tolerant LaTeX reader mapping the same
-//! constructs docling's `latex` backend maps (pylatexenc has no Rust
-//! counterpart, so the node model is built here), onto the shared block
-//! vocabulary.
+//! The LaTeX fold: a hand-rolled, tolerant LaTeX reader (pylatexenc has no
+//! Rust counterpart, so the node model is built here) mapping the
+//! constructs below onto the shared block vocabulary.
 //!
 //! Shape of the mapping:
 //!
@@ -14,7 +13,8 @@
 //!   author and date as paragraphs with their macro name as `role`.
 //! - `\section` / `\subsection` / `\subsubsection` (and `\part`,
 //!   `\chapter`, `\paragraph`, `\subparagraph`) ladder onto
-//!   `BLOCK_LABEL_SECTION_HEADER` with docling's own level table.
+//!   `BLOCK_LABEL_SECTION_HEADER` with a fixed level table
+//!   (part/chapter/section 1 through subparagraph 5).
 //! - Text runs split into paragraphs at blank lines; inline commands
 //!   flatten (`\textbf{x}` to its text, `\cite`/`\ref` to a bracketed
 //!   `[key]` placeholder, `\href{u}{t}` to `[t](u)`, `~` to a space,
@@ -22,8 +22,7 @@
 //!   `\%` respected.
 //! - `itemize` / `enumerate` / `description` nest; every flushed run
 //!   inside an item is a `BLOCK_LABEL_LIST_ITEM`, `enumerated` for
-//!   `enumerate`, a `description` term prefixed `term: ` as docling
-//!   prefixes it.
+//!   `enumerate`, a `description` term prefixed `term: `.
 //! - `tabular` becomes table events: `&` splits cells, `\\` ends rows,
 //!   rule macros (`\hline`, `\toprule`, ...) are dropped, `\multicolumn`
 //!   carries `column_span` and `\multirow` `row_span`.
@@ -41,11 +40,10 @@
 //!   per `\bibitem`, `[key]` first.
 //! - An unknown environment is descended into and flattened, with one
 //!   aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per environment name —
-//!   docling's tolerance, made visible.
+//!   tolerance, made visible.
 //!
-//! Zero-argument `\newcommand` macros are expanded, one level, the way
-//! docling expands them; parameterized custom macros are not (see
-//! `docs/design.md`).
+//! Zero-argument `\newcommand` macros are expanded, one level;
+//! parameterized custom macros are not (see `docs/design.md`).
 
 use std::collections::HashMap;
 

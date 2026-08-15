@@ -11,9 +11,9 @@ option java_package = "ai.pipestream.document.v1";
 // Pipestream document structure.
 //
 // This proto defines the complete structure of a parsed document. The schema
-// tracks field-for-field parity with the docling-core v2 JSON schema so that
-// documents interoperate with that ecosystem; parity is maintained by review,
-// and "upstream" in comments below refers to that schema.
+// mirrors the DoclingDocument v2 JSON schema field for field so that
+// documents interoperate with that ecosystem; the mirror is maintained by
+// review, and "upstream" in comments below refers to that schema.
 //
 // Document Structure Overview:
 // ===========================
@@ -175,7 +175,7 @@ message TrackSource {
 }
 
 // CollectorSource attributes an item to the parser collector that produced
-// it. This is a pipestream extension over the upstream docling schema:
+// it. This is a pipestream extension over the upstream schema:
 // upstream SourceType carries only media-track cues, while the
 // scatter-gather pipeline needs every collector's output attributable so
 // additive merges never collide silently. Sources never overwrite each

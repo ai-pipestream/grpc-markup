@@ -3,8 +3,8 @@
 //! The Docling JSON fold: a `DoclingDocument` serialized as JSON,
 //! re-ingested into the Document plane.
 //!
-//! The vendored `document.proto` deliberately mirrors docling-core's
-//! `docling_document` v2 schema, so this is a field-by-field mapping of the
+//! The vendored `document.proto` deliberately mirrors the DoclingDocument
+//! v2 schema, so this is a field-by-field mapping of the
 //! core arrays — `schema_name`, `version`, `name`, `origin`, `body`,
 //! `furniture`, `groups`, `texts`, `tables`, `pictures`, `pages` — with the
 //! `self_ref` / `parent` / `children` wiring carried over as written. Every
@@ -25,8 +25,8 @@
 //! Validation is strict about identity and lenient about everything else:
 //! bytes that are not JSON, or JSON whose `schema_name` does not name a
 //! `DoclingDocument`, are `INVALID_ARGUMENT`; unknown labels and layers
-//! degrade to defaults with a warning rather than failing a document that
-//! is recognizably docling's.
+//! degrade to defaults with a warning rather than failing a document whose
+//! `schema_name` already identified it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 

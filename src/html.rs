@@ -2,9 +2,9 @@
 
 //! The HTML fold: whole documents and body-only fragments, parsed with
 //! html5ever (via `scraper`) and mapped onto the shared block vocabulary.
-//! The mapping ports docling's `html_backend.py` decisions — which elements
-//! become items and which flatten — without its rendering, form and
-//! provenance machinery.
+//! The mapping decides which elements become items and which flatten into
+//! the enclosing text; rendering, form and provenance machinery are out of
+//! scope by construction.
 //!
 //! Shape of the mapping, in DOM order:
 //!
@@ -19,7 +19,7 @@
 //!   `BLOCK_LABEL_QUOTE`, nesting flattened.
 //! - `ul` / `ol` nest through `li`, `enumerated` for `ol`; the marker is
 //!   written out only when the source numbered the list itself (an `ol
-//!   start` attribute), matching docling. `dl` maps `dt` / `dd` to list
+//!   start` attribute). `dl` maps `dt` / `dd` to list
 //!   items with the proto's own `definition-term` role vocabulary.
 //! - `table` streams with `thead` cells and `th` flagged as headers,
 //!   `rowspan` / `colspan` honored through an occupancy grid, and the

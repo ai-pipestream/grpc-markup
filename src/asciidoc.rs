@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The AsciiDoc fold: a line-oriented parser mirroring docling's
-//! `asciidoc_backend.py`, with the three constructs this fleet needs on
-//! top of it — delimited listing blocks as code, attribute entries as
-//! metadata, and admonition paragraphs. It is a parity fold, not a full
+//! The AsciiDoc fold: a line-oriented parser mapping the structural core
+//! of the format plus the three constructs this fleet needs most —
+//! delimited listing blocks as code, attribute entries as
+//! metadata, and admonition paragraphs. It is a line machine, not a full
 //! AsciiDoc implementation; what it deliberately skips is listed in
 //! `docs/design.md`.
 //!
@@ -12,8 +12,7 @@
 //! - `:name: value` attribute entries become `MarkupInfo.metadata`.
 //! - `= Title` is `BLOCK_LABEL_TITLE` (first one; later ones are level-1
 //!   section headers); `== Section` and deeper are
-//!   `BLOCK_LABEL_SECTION_HEADER` at marker length minus one, docling's
-//!   own level rule.
+//!   `BLOCK_LABEL_SECTION_HEADER` at marker length minus one.
 //! - Consecutive non-empty lines join into one paragraph, flushed at a
 //!   blank line. A paragraph opening with `NOTE:` / `TIP:` / `IMPORTANT:`
 //!   / `WARNING:` / `CAUTION:` carries `role: "admonition"`.
@@ -21,8 +20,8 @@
 //!   `-` and `1.` are depth-1 items; `.`-markers and numbered markers are
 //!   `enumerated`; the marker rides verbatim.
 //! - `|===` delimits a table; each `|` line inside is one row, cells split
-//!   on `|` with AsciiDoc cell specifiers (`2+`, `^.^h`) stripped the way
-//!   docling strips them — spans are not expanded. The first row is the
+//!   on `|` with AsciiDoc cell specifiers (`2+`, `^.^h`) stripped —
+//!   spans are not expanded. The first row is the
 //!   header row. A `.Caption` line before the table lands on `TableStart`.
 //! - `image::path[alt, k=v]` is an `ImageBlock`, the path verbatim (no
 //!   `file:` URI mangling — this service never dereferences); a pending

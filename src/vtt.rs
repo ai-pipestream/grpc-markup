@@ -22,9 +22,9 @@
 //!   skipped, the parse continues, and the trailer aggregates one
 //!   `WARNING_CODE_MALFORMED_STRUCTURE` per distinct reason.
 //!
-//! This mirrors docling's `webvtt_backend.py` in effect — each cue one text
-//! unit, its timings carried as track provenance — without the inline
-//! formatting model this wire deliberately flattens away.
+//! Each cue is one text unit, its timings carried as track provenance —
+//! the inline formatting model is deliberately flattened away, as
+//! everywhere else on this wire.
 
 use std::collections::HashMap;
 

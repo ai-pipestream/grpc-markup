@@ -32,7 +32,7 @@
 //!   (`markdown.`, `vtt.`, …), where they are data rather than a fabricated
 //!   coordinate.
 //!
-//! Structure follows docling's idioms: a section header of level N is
+//! Structure is a heading-as-parent ladder: a section header of level N is
 //! parented to the nearest open header of a lower level (`#/body` when
 //! there is none) and the content after it hangs off that header; each
 //! contiguous list becomes a `GROUP_LABEL_LIST` / `GROUP_LABEL_ORDERED_LIST`

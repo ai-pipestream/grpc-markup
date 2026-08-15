@@ -2,8 +2,7 @@
 
 //! The BoxNote fold: the JSON note format Box has exported since August
 //! 2022 — a ProseMirror-style `doc` node tree — mapped onto the shared
-//! block vocabulary. The walk mirrors docling's `boxnote_backend.py` node
-//! for node.
+//! block vocabulary, node for node.
 //!
 //! Shape of the mapping:
 //!
@@ -28,7 +27,7 @@
 //!
 //! Notes saved before the August 2022 release use the legacy `atext`/`pool`
 //! model and are refused as `INVALID_ARGUMENT` rather than silently
-//! mis-parsed, exactly as the docling backend refuses them.
+//! mis-parsed.
 
 use serde_json::Value;
 
