@@ -2,9 +2,9 @@
 
 ## 1. Goals
 
-- One block vocabulary for lightweight text markup: Markdown, HTML, WebVTT,
-  BoxNote and serialized Docling JSON in this build; AsciiDoc and LaTeX
-  reserved in the contract for later builds.
+- One block vocabulary for lightweight text markup: Markdown, HTML,
+  AsciiDoc, WebVTT, BoxNote and serialized Docling JSON in this build;
+  LaTeX reserved in the contract for a later build.
 - One process, one port, format selected on the request, sniffed when
   unspecified.
 - Typed events in document order as each fold produces them, and an
@@ -98,7 +98,36 @@ boxes, form/key-value extraction, checkbox recognition, rich table cells
 (nested structure inside a cell flattens to its text), the `<inline-formula>`
 JATS-ism, and image fetching.
 
-### 4.3 WebVTT (hand-written parser)
+### 4.3 AsciiDoc (line-oriented, docling parity)
+
+A parity fold: it mirrors docling's `asciidoc_backend.py` — a line
+machine, not an AsciiDoc implementation — plus the three constructs the
+fleet needs that docling skips (listing blocks, attribute entries,
+admonitions).
+
+| Source construct | Wire |
+|---|---|
+| `:name: value` attribute entries | `MarkupInfo.metadata`, gathered wherever they appear |
+| `= Title` | `BLOCK_LABEL_TITLE` (first; later ones level-1 headers) |
+| `== `..`====== ` | `BLOCK_LABEL_SECTION_HEADER` at marker length minus one — docling's own level rule |
+| consecutive non-empty lines | one `BLOCK_LABEL_PARAGRAPH`, joined with spaces, flushed at a blank line |
+| `NOTE:` / `TIP:` / `IMPORTANT:` / `WARNING:` / `CAUTION:` paragraphs | `role: "admonition"`, the label stripped |
+| `*`/`**`/`.`/`..`/`-`/`1.` items | `BLOCK_LABEL_LIST_ITEM`, nesting by marker repetition, `enumerated` for dot and numbered markers, marker verbatim |
+| `|===` blocks | streamed table; each `|` line is a row, cells split on `|`, docling's cell-specifier grammar (`2+`, `^.^h`) stripped, spans **not** expanded, first row flagged as header; a preceding `.Caption` lands on `TableStart` |
+| `[source,lang]` + `----` fences | `BLOCK_LABEL_CODE`, verbatim, with the declared language; an unclosed fence keeps its content and warns `MALFORMED_STRUCTURE` |
+| `image::path[alt, k=v]` | `ImageBlock` with the path verbatim (docling's `file:` URI mangling is deliberately not ported — this service never dereferences); a pending `.Caption` follows as a `CAPTION` block |
+
+Deliberately skipped, matching docling's thin coverage where the format is
+richer: block quotes (`____`), sidebars (`****`), literal blocks (`....`),
+description lists, cell spans and per-cell styles in tables (specifiers are
+stripped, not honored), includes and conditional directives, inline
+formatting, and comment lines (`//` lines join paragraphs as text, exactly
+as they do in docling). Two small divergences from docling, both kinder to
+the author: nesting follows marker depth (`**`) rather than leading
+indentation, and single-cell `|` rows inside `|===` are kept (docling's
+two-pipe regex drops them).
+
+### 4.4 WebVTT (hand-written parser)
 
 Mirrors `webvtt_backend.py` in effect: the `WEBVTT` header is mandatory
 (`INVALID_ARGUMENT` without it, empty input included), header title and
@@ -111,7 +140,7 @@ timings line, unparseable timestamps, end before start — is skipped with
 one aggregated `WARNING_CODE_MALFORMED_STRUCTURE`, which is WebVTT's own
 error recovery.
 
-### 4.4 BoxNote (ProseMirror `doc` tree)
+### 4.5 BoxNote (ProseMirror `doc` tree)
 
 Mirrors `boxnote_backend.py` node for node: headings (first level-1 is the
 title), paragraphs from styled runs (a single run keeps its safe-scheme
@@ -125,7 +154,7 @@ refused as `INVALID_ARGUMENT`, exactly as the docling backend refuses them.
 An unknown node type with nothing inside warns `UNMAPPED_CONSTRUCT` naming
 it.
 
-### 4.5 Docling JSON (field-by-field ingestion)
+### 4.6 Docling JSON (field-by-field ingestion)
 
 The vendored `document.proto` mirrors docling-core's `docling_document` v2
 schema, so ingestion is a mapping, not an interpretation: `schema_name`,
@@ -171,6 +200,9 @@ Dropped or demoted per format, deliberately:
   boxes, visibility, forms) never existed here; nested structure inside a
   table cell survives only as the cell's flattened text; `hr` and unmapped
   elements survive only as warnings.
+- **AsciiDoc:** table cell specifiers vanish (they are neither spans nor
+  styles downstream); admonition kinds collapse into one `admonition` role;
+  attribute entries live only on the body meta.
 - **Markdown:** the distinction between quote and plain text is demoted to
   a custom field (`DocItemLabel` has no quote); an unknown code language
   survives only as `code_language_raw`; image `alt` / `title` become custom

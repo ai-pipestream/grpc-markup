@@ -194,6 +194,40 @@ async fn the_html_fold_is_a_merge_safe_fragment_with_docling_structure() {
 }
 
 #[tokio::test]
+async fn the_asciidoc_fold_is_a_merge_safe_fragment() {
+    let client = client().await;
+    let adoc = ":author: Ada\n\n= The Title\n\n== Section\n\nunder it\n\n* one\n** two\n\n[source,rust]\n----\nfn x() {}\n----\n\nimage::img.png[a]\n";
+    let events = parse_ok(&client, adoc, with_document(pb::MarkupFormat::Asciidoc)).await;
+    let document = document(&events).expect("the fold was requested");
+    assert_eq!(integrity_errors(document), Vec::<String>::new());
+    assert_eq!(document.name, "The Title", "named after its title item");
+    assert_eq!(document.origin.as_ref().unwrap().mimetype, "text/asciidoc");
+    let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
+    assert_eq!(
+        meta.custom_fields["asciidoc.author"].kind,
+        Some(prost_types::value::Kind::StringValue("Ada".to_owned()))
+    );
+    assert_eq!(document.groups.len(), 2, "outer list and its nested list");
+    assert_eq!(
+        document.groups[1].parent.as_ref().unwrap().r#ref,
+        "#/groups/0"
+    );
+    let code = document
+        .texts
+        .iter()
+        .find_map(|item| match item.item.as_ref() {
+            Some(doc::base_text_item::Item::Code(code)) => Some(code),
+            _ => None,
+        })
+        .expect("a code item");
+    assert_eq!(
+        code.code_language,
+        Some(doc::CodeLanguageLabel::Rust as i32)
+    );
+    assert_eq!(document.pictures[0].image.as_ref().unwrap().uri, "img.png");
+}
+
+#[tokio::test]
 async fn the_vtt_fold_carries_cue_timings_as_track_provenance() {
     let client = client().await;
     let vtt = "WEBVTT\n\nintro\n00:00:01.000 --> 00:00:02.500\n<v Ada>Hello\n\n00:03.000 --> 00:04.000\nSecond\n";

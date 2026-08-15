@@ -1,17 +1,16 @@
 # grpc-markup
 
-gRPC collector for lightweight text markup — Markdown, HTML, WebVTT,
-BoxNote and serialized Docling JSON in this build — projecting into the
-gRParse Document data plane.
+gRPC collector for lightweight text markup — Markdown, HTML, AsciiDoc,
+WebVTT, BoxNote and serialized Docling JSON in this build — projecting into
+the gRParse Document data plane.
 
 One Rust process maps every format onto one shared block vocabulary: a
 heading is the same `TextBlock` whether it was `# Title` or a BoxNote
 heading node, a table streams as `TableStart` / `TableRow` / `TableEnd`
 whichever source wrote it, and an optional fold turns the whole parse into
 one `ai.pipestream.document.v1.Document` a coordinator can merge with
-another collector's parse of the same work. AsciiDoc and LaTeX are in the
-contract but not in this build; asking for them is `UNIMPLEMENTED` with the
-format named. It is not PipeStream core and not a Docling Python
+another collector's parse of the same work. LaTeX is in the contract but
+not in this build; asking for it is `UNIMPLEMENTED` with the format named. It is not PipeStream core and not a Docling Python
 wrapper.
 
 ## Build and run
@@ -62,7 +61,7 @@ a frame with neither field, is `INVALID_ARGUMENT`.
 
 | Option | Meaning |
 |---|---|
-| `format` | `MARKDOWN` / `HTML` / `VTT` / `BOXNOTE` / `DOCLING_JSON` (this build), or unset to sniff |
+| `format` | `MARKDOWN` / `HTML` / `ASCIIDOC` / `VTT` / `BOXNOTE` / `DOCLING_JSON` (this build), or unset to sniff |
 | `max_document_mib` | Per-request byte cap; 0 takes the server default, over the ceiling clamps |
 | `emit_document` | Also fold the parse into one `ai.pipestream.document.v1.Document`, sent just before the trailer (see below) |
 
@@ -107,7 +106,8 @@ one warning with a count.
 | BoxNote | JSON with a ProseMirror `doc` tree (or legacy `atext`, refused) | headings, styled paragraphs, nested/check lists, code, quotes, spanned tables, images, safe-scheme links |
 | Docling JSON | JSON whose `schema_name` names a DoclingDocument | field-by-field re-ingestion of the core arrays; typed events are a projection of the body in reading order; unconsumed keys warn per key path |
 | HTML | `<!DOCTYPE html` or `<html` signature | whole documents and body-only fragments (html5ever); head title and `meta.*` metadata, h1-h6 ladder (first h1 = title), paragraphs, blockquotes, ul/ol/dl nesting, spanned tables with captions, `pre` code with `language-*` classes, figures and images, whole-block links; script/style/head never become text; tree-builder repairs warn as malformed structure |
-| AsciiDoc / LaTeX | texture, `\documentclass` | **not in this build** — recognized so the refusal can name them |
+| AsciiDoc | Heuristic only (`= ` title, `== ` sections, `:name: value` entries, `----` fences) | attribute entries to metadata, `= `/`== ` title and section ladder (docling's levels), multiline paragraphs, admonitions as `role: "admonition"`, `*`/`.` lists nested by marker depth with markers as written, `|===` tables with the first row as header and cell specifiers stripped, `[source,lang]` + `----` listings as code, `image::` macros with `.Caption` lines |
+| LaTeX | `\documentclass` | **not in this build** — recognized so the refusal can name it |
 
 Sniffing order is the one [`docs/design.md`](docs/design.md) fixes: an
 explicit request wins outright, then unambiguous signatures, and only then a
@@ -195,6 +195,7 @@ src/sniff.rs                      format resolution and its evidence
 src/parse.rs                      the shared driver: emitter, envelope, fold registry
 src/markdown.rs                   the Markdown fold (pulldown-cmark)
 src/html.rs                       the HTML fold (html5ever via scraper)
+src/asciidoc.rs                   the AsciiDoc fold (line-oriented, docling parity)
 src/vtt.rs                        the WebVTT fold (hand-written cue parser)
 src/boxnote.rs                    the BoxNote fold (doc-tree walk)
 src/docling_json.rs               the Docling JSON fold (field-by-field ingestion)
@@ -203,6 +204,7 @@ src/service.rs                    tonic wiring, framing, byte cap, admission con
 src/metrics.rs                    counters and the interval line
 tests/markdown.rs                 golden mappings for the Markdown fold
 tests/html.rs                     golden mappings for the HTML fold
+tests/asciidoc.rs                 golden mappings for the AsciiDoc fold
 tests/vtt.rs                      golden mappings for the WebVTT fold
 tests/json_formats.rs             golden mappings for BoxNote and Docling JSON
 tests/document.rs                 the Document fold per format, placement, integrity

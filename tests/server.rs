@@ -197,10 +197,7 @@ async fn past_the_concurrency_limit_requests_are_refused_not_queued() {
 #[tokio::test]
 async fn formats_outside_this_build_are_unimplemented_and_named() {
     let client = client().await;
-    for (format, name) in [
-        (pb::MarkupFormat::Asciidoc, "asciidoc"),
-        (pb::MarkupFormat::Latex, "latex"),
-    ] {
+    for (format, name) in [(pb::MarkupFormat::Latex, "latex")] {
         let error = parse(&client, "content\n", options(format))
             .await
             .expect_err("outside the build");
@@ -324,6 +321,7 @@ async fn get_service_info_reports_identity_limits_and_formats() {
             pb::MarkupFormat::Boxnote as i32,
             pb::MarkupFormat::DoclingJson as i32,
             pb::MarkupFormat::Html as i32,
+            pb::MarkupFormat::Asciidoc as i32,
         ],
         "exactly the formats this build maps, unspecified excluded"
     );

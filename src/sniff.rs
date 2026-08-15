@@ -22,15 +22,16 @@ use crate::proto::v1 as pb;
 /// A Rust-side mirror of [`pb::MarkupFormat`] minus its unspecified variant,
 /// so the folds can match exhaustively on a value that is known to be real.
 /// Which of these a build actually maps is [`crate::parse::REGISTRY`]'s
-/// business, not this enum's: the sniff recognizes HTML so it can *name* it
-/// in an `UNIMPLEMENTED` message instead of mistaking it for Markdown.
+/// business, not this enum's: the sniff recognizes a format outside the
+/// build so it can *name* it in an `UNIMPLEMENTED` message instead of
+/// mistaking it for Markdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
     /// CommonMark Markdown, with pipe tables and YAML front matter.
     Markdown,
-    /// HTML or XHTML. Recognized by the sniff, not mapped by this build.
+    /// HTML or XHTML, whole documents and fragments alike.
     Html,
-    /// AsciiDoc. Recognized by the sniff, not mapped by this build.
+    /// AsciiDoc.
     Asciidoc,
     /// LaTeX source. Recognized by the sniff, not mapped by this build.
     Latex,
@@ -96,7 +97,8 @@ impl Format {
             Self::Boxnote => Some(2),
             Self::DoclingJson => Some(3),
             Self::Html => Some(4),
-            Self::Asciidoc | Self::Latex => None,
+            Self::Asciidoc => Some(5),
+            Self::Latex => None,
         }
     }
 }

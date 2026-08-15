@@ -20,7 +20,7 @@ use crate::document::v1 as doc;
 use crate::document_fold::DocumentFold;
 use crate::proto::v1 as pb;
 use crate::sniff::{self, Evidence, Format};
-use crate::{COLLECTOR, VERSION, boxnote, docling_json, html, markdown, vtt};
+use crate::{COLLECTOR, VERSION, asciidoc, boxnote, docling_json, html, markdown, vtt};
 
 /// Upper bound on distinct aggregated warnings kept for one parse.
 ///
@@ -49,6 +49,7 @@ pub const REGISTRY: &[(Format, FoldFn)] = &[
     (Format::Boxnote, boxnote::fold),
     (Format::DoclingJson, docling_json::fold),
     (Format::Html, html::fold),
+    (Format::Asciidoc, asciidoc::fold),
 ];
 
 /// The fold for a format, or `None` when this build does not map it.
@@ -143,7 +144,7 @@ fn decode(bytes: &[u8]) -> (String, bool) {
 
 /// The `UNIMPLEMENTED` message for a format outside this build.
 fn unmapped(format: Format, evidence: Evidence) -> String {
-    let mapped = "this build maps markdown, vtt, boxnote, docling-json and html";
+    let mapped = "this build maps markdown, vtt, boxnote, docling-json, html and asciidoc";
     match evidence {
         Evidence::Requested => {
             format!("the {} fold is not in this build; {mapped}", format.model())
@@ -543,24 +544,24 @@ mod tests {
                 Format::Boxnote,
                 Format::DoclingJson,
                 Format::Html,
+                Format::Asciidoc,
             ]
         );
-        for format in [Format::Asciidoc, Format::Latex] {
-            assert!(fold_for(format).is_none(), "{format:?}");
-        }
+        assert!(fold_for(Format::Latex).is_none());
     }
 
     #[test]
     fn an_unmapped_format_is_unsupported_and_names_itself() {
         let config = ParseConfig {
-            format: Some(Format::Asciidoc),
+            format: Some(Format::Latex),
             emit_document: false,
         };
-        let Err(ParseError::Unsupported(message)) = collect(b"= Title\n", &config) else {
-            panic!("requesting asciidoc must be Unsupported");
+        let Err(ParseError::Unsupported(message)) = collect(b"\\documentclass{article}\n", &config)
+        else {
+            panic!("requesting latex must be Unsupported");
         };
         assert!(
-            message.contains("asciidoc fold is not in this build"),
+            message.contains("latex fold is not in this build"),
             "{message}"
         );
     }

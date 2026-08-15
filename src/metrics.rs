@@ -34,7 +34,7 @@ pub struct Metrics {
     pub events_out: AtomicU64,
     /// Successful parses per format this build maps, indexed by
     /// [`Format::slot`].
-    pub by_format: [AtomicU64; 5],
+    pub by_format: [AtomicU64; 6],
 }
 
 impl Metrics {
@@ -61,7 +61,7 @@ impl Metrics {
         let get = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         format!(
             "grpc-markup metrics started={} ok={} failed={} refused={} capped={} bytes_in={} \
-             events_out={} markdown={} vtt={} boxnote={} docling_json={} html={}",
+             events_out={} markdown={} vtt={} boxnote={} docling_json={} html={} asciidoc={}",
             get(&self.parses_started),
             get(&self.parses_ok),
             get(&self.parses_failed),
@@ -74,6 +74,7 @@ impl Metrics {
             get(&self.by_format[2]),
             get(&self.by_format[3]),
             get(&self.by_format[4]),
+            get(&self.by_format[5]),
         )
     }
 }
@@ -119,7 +120,7 @@ mod tests {
     #[test]
     fn a_format_this_build_does_not_map_has_no_slot_and_does_not_panic() {
         let metrics = Metrics::new();
-        metrics.record_success(Format::Asciidoc, 10, 1);
+        metrics.record_success(Format::Latex, 10, 1);
         assert!(metrics.line().contains("ok=1"));
     }
 }
