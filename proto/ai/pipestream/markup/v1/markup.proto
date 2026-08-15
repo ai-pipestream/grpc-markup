@@ -1,0 +1,407 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Shared types for the grpc-markup collector: the format vocabulary, the
+// typed events that make up the response stream, and the trailer that closes
+// it.
+//
+// The collector maps lightweight text markup — Markdown, HTML, AsciiDoc,
+// LaTeX, WebVTT, BoxNote and serialized Docling JSON — into one block
+// vocabulary. Every format lands on the same events, so a downstream reader
+// handles a heading the same way whether it was `# Title`, `<h1>`, `= Title`
+// or `\section{Title}`.
+
+syntax = "proto3";
+
+package ai.pipestream.markup.v1;
+
+option java_multiple_files = true;
+option java_outer_classname = "MarkupTypesProto";
+option java_package = "ai.pipestream.markup.v1";
+
+// MarkupFormat names one input family this collector can map.
+//
+// The enum lists every format the contract knows; the set a given build
+// actually maps is reported by `GetServiceInfoResponse.formats`, and asking
+// for a format outside that set is `UNIMPLEMENTED`.
+enum MarkupFormat {
+  // In ParseOptions: sniff the format from the bytes. Never appears on
+  // MarkupInfo or ParseStatus.
+  MARKUP_FORMAT_UNSPECIFIED = 0;
+
+  // CommonMark Markdown, with pipe tables and YAML front matter.
+  MARKUP_FORMAT_MARKDOWN = 1;
+
+  // HTML or XHTML, whole documents and fragments alike.
+  MARKUP_FORMAT_HTML = 2;
+
+  // AsciiDoc.
+  MARKUP_FORMAT_ASCIIDOC = 3;
+
+  // LaTeX source.
+  MARKUP_FORMAT_LATEX = 4;
+
+  // WebVTT subtitle and caption files.
+  MARKUP_FORMAT_VTT = 5;
+
+  // Box Notes, the JSON note format exported by Box.
+  MARKUP_FORMAT_BOXNOTE = 6;
+
+  // A DoclingDocument serialized as JSON, re-ingested losslessly into the
+  // Document plane.
+  MARKUP_FORMAT_DOCLING_JSON = 7;
+}
+
+// FormatEvidence names the signal that resolved the format.
+enum FormatEvidence {
+  // Never sent. Present because proto3 requires a zero value.
+  FORMAT_EVIDENCE_UNSPECIFIED = 0;
+
+  // The request stated the format.
+  FORMAT_EVIDENCE_REQUESTED = 1;
+
+  // An unambiguous signature matched: the `WEBVTT` header, an HTML doctype
+  // or `<html` root, a JSON payload whose `schema_name` is a
+  // DoclingDocument's, a BoxNote's `atext` structure, or a LaTeX
+  // `\documentclass` preamble.
+  FORMAT_EVIDENCE_SIGNATURE = 2;
+
+  // No signature matched and the bytes were classified by structure. Only
+  // Markdown and AsciiDoc are ever resolved this way, and only when the
+  // request left the format unspecified.
+  FORMAT_EVIDENCE_HEURISTIC = 3;
+}
+
+// CollectorSource is the provenance stamped on every emitted item.
+message CollectorSource {
+  // Always `markup` for this service.
+  string collector = 1;
+
+  // The fold that produced the item: `markdown`, `html`, `asciidoc`,
+  // `latex`, `vtt`, `boxnote` or `docling-json`.
+  optional string model = 2;
+
+  // Version of this server, as reported by `GetServiceInfo`.
+  optional string version = 3;
+
+  // Producer confidence, 0.0 to 1.0. Unset here: a declarative markup
+  // mapping is deterministic, so claiming a confidence would be noise.
+  optional double confidence = 4;
+}
+
+// MarkupInfo is the resolved identity of the document, sent before any
+// content event.
+message MarkupInfo {
+  // The format the rest of the stream is mapped with. Never
+  // `MARKUP_FORMAT_UNSPECIFIED`.
+  MarkupFormat format = 1;
+
+  // How the format was decided, for debugging a surprising mapping.
+  FormatEvidence evidence = 2;
+
+  // Document title, when the format declares one in a position the parser
+  // has already passed: an HTML `<title>`, a front-matter `title:` key, a
+  // BoxNote title. Absent otherwise; a heading-derived title still arrives
+  // as a `TextBlock` with `BLOCK_LABEL_TITLE`.
+  optional string title = 3;
+
+  // Document-level metadata the format declares about itself, flattened to
+  // dotted string keys: Markdown YAML front matter, HTML `<meta>` tags,
+  // AsciiDoc attribute entries. Values that are not scalar strings are
+  // JSON-encoded. Empty when the format carries none.
+  map<string, string> metadata = 4;
+}
+
+// BlockLabel is the structural role of one text block.
+enum BlockLabel {
+  // Never sent. Present because proto3 requires a zero value.
+  BLOCK_LABEL_UNSPECIFIED = 0;
+
+  // The document's title.
+  BLOCK_LABEL_TITLE = 1;
+
+  // A heading below the title. `TextBlock.level` carries its depth.
+  BLOCK_LABEL_SECTION_HEADER = 2;
+
+  // A paragraph of running text.
+  BLOCK_LABEL_PARAGRAPH = 3;
+
+  // One item of a list. `TextBlock.enumerated`, `marker` and `list_depth`
+  // describe the list it belongs to.
+  BLOCK_LABEL_LIST_ITEM = 4;
+
+  // A code block. `TextBlock.language` carries the declared language when
+  // the source names one.
+  BLOCK_LABEL_CODE = 5;
+
+  // A display formula, carried as the source wrote it.
+  BLOCK_LABEL_FORMULA = 6;
+
+  // A caption attached to a table or image.
+  BLOCK_LABEL_CAPTION = 7;
+
+  // A block quotation. Nested quotation depth is not modelled; nested
+  // quotes flatten into one block per paragraph.
+  BLOCK_LABEL_QUOTE = 8;
+
+  // A footnote or endnote body.
+  BLOCK_LABEL_FOOTNOTE = 9;
+}
+
+// TextBlock is one unit of text, in document order.
+message TextBlock {
+  // Zero-based index of this item within the stream, counting every
+  // `TextBlock`, `TableStart`, `ImageBlock` and `Cue`. Stable within one
+  // parse only.
+  uint64 index = 1;
+
+  // Structural label.
+  BlockLabel label = 2;
+
+  // Format-specific refinement of `label`, an open vocabulary: `abstract`,
+  // `admonition`, `definition-term`, `front-matter`. Empty when the label
+  // says everything.
+  string role = 3;
+
+  // The block's text: inline markup flattened away, entity and escape
+  // sequences decoded, runs of whitespace collapsed except inside
+  // `BLOCK_LABEL_CODE` and `BLOCK_LABEL_FORMULA`, which keep their text
+  // verbatim. Never empty.
+  string text = 4;
+
+  // Heading depth for `BLOCK_LABEL_SECTION_HEADER`, starting at 1. Absent
+  // for every other label.
+  optional uint32 level = 5;
+
+  // For `BLOCK_LABEL_LIST_ITEM`: true when the list is numbered.
+  bool enumerated = 6;
+
+  // For `BLOCK_LABEL_LIST_ITEM`: the item's marker as written (`-`, `3.`,
+  // `a)`). Absent when the source leaves numbering implicit.
+  optional string marker = 7;
+
+  // For `BLOCK_LABEL_LIST_ITEM`: nesting depth of the list, starting at 1
+  // for a top-level list.
+  optional uint32 list_depth = 8;
+
+  // For `BLOCK_LABEL_CODE`: the language the source declares on the block,
+  // verbatim (an info string, a `language-*` class, a listing attribute).
+  // Absent when the source declares none.
+  optional string language = 9;
+
+  // Hyperlink target when the entire block is one link. Inline links inside
+  // a larger block are flattened to their text.
+  optional string hyperlink = 10;
+
+  // One-based line in the source where the block starts, when the parser
+  // tracks lines. Markup is line-oriented, so this is the block's address
+  // for diagnostics the way `path` is in an XML collector.
+  optional uint32 source_line = 11;
+
+  // Provenance, always set.
+  CollectorSource source = 12;
+}
+
+// TableStart opens a streamed table. Rows follow, then `TableEnd`.
+message TableStart {
+  // Stream index, in the same series as `TextBlock.index`.
+  uint64 index = 1;
+
+  // Identifier used by the `TableRow` and `TableEnd` events of this table.
+  // Unique within one parse.
+  string table_ref = 2;
+
+  // Caption text, when the source carries one before the table body. A
+  // caption that follows the body arrives as a `TextBlock` with
+  // `BLOCK_LABEL_CAPTION` instead, because the table has already streamed
+  // by then.
+  optional string caption = 3;
+
+  // One-based source line of the table's first row, when tracked.
+  optional uint32 source_line = 4;
+
+  // Provenance, always set.
+  CollectorSource source = 5;
+}
+
+// TableCell is one cell of a streamed table row.
+message TableCell {
+  // Zero-based column index, advanced by the column spans before it.
+  uint32 column_index = 1;
+
+  // Cell text, flattened the same way as `TextBlock.text`. May be empty.
+  string text = 2;
+
+  // Columns this cell spans. At least 1; always 1 in formats without spans.
+  uint32 column_span = 3;
+
+  // Rows this cell spans. At least 1; always 1 in formats without spans.
+  uint32 row_span = 4;
+
+  // True when the source marks the cell as a header: a `th`, a cell in
+  // `thead`, or a cell in a Markdown or AsciiDoc header row.
+  bool is_header = 5;
+}
+
+// TableRow is one row of a table, emitted as soon as it is parsed.
+message TableRow {
+  // The table this row belongs to, matching `TableStart.table_ref`.
+  string table_ref = 1;
+
+  // Zero-based row index within the table.
+  uint32 row_index = 2;
+
+  // True when the row is a header row.
+  bool is_header = 3;
+
+  // The row's cells in column order. Never empty.
+  repeated TableCell cells = 4;
+}
+
+// TableEnd closes a streamed table.
+message TableEnd {
+  // The table being closed, matching `TableStart.table_ref`.
+  string table_ref = 1;
+
+  // Number of `TableRow` events sent for this table.
+  uint32 row_count = 2;
+
+  // Widest row of the table, in columns after span expansion.
+  uint32 column_count = 3;
+}
+
+// ImageBlock is one image reference, in document order.
+//
+// The collector is handed markup, not a container: image bytes are never on
+// this wire, only the reference the source wrote.
+message ImageBlock {
+  // Stream index, in the same series as `TextBlock.index`.
+  uint64 index = 1;
+
+  // The reference as written: a URL, a relative path, or a `data:` URI.
+  // Never dereferenced by this service.
+  string src = 2;
+
+  // Alternative text, empty when the source has none.
+  string alt = 3;
+
+  // Title or tooltip text, empty when the source has none.
+  string title = 4;
+
+  // One-based source line, when tracked.
+  optional uint32 source_line = 5;
+
+  // Provenance, always set.
+  CollectorSource source = 6;
+}
+
+// Cue is one WebVTT cue: a timed span of caption or subtitle text.
+message Cue {
+  // Stream index, in the same series as `TextBlock.index`.
+  uint64 index = 1;
+
+  // The cue identifier line, when the cue has one.
+  optional string cue_id = 2;
+
+  // Cue start, in milliseconds from the start of the media.
+  uint64 start_ms = 3;
+
+  // Cue end, in milliseconds from the start of the media.
+  uint64 end_ms = 4;
+
+  // The speaker named by a `<v>` voice span, empty when the cue has none.
+  string speaker = 5;
+
+  // The cue payload with voice and styling tags flattened away, timestamps
+  // of karaoke spans removed, and lines joined with `\n`.
+  string text = 6;
+
+  // Provenance, always set.
+  CollectorSource source = 7;
+}
+
+// WarningCode names a condition that did not stop the parse.
+enum WarningCode {
+  // Never sent. Present because proto3 requires a zero value.
+  WARNING_CODE_UNSPECIFIED = 0;
+
+  // A construct with no mapping was encountered. Its text, when it had any,
+  // was flattened into the enclosing block rather than dropped; the message
+  // names the construct.
+  WARNING_CODE_UNMAPPED_CONSTRUCT = 1;
+
+  // Document metadata (front matter, `<meta>`, attribute entries) was
+  // present but could not be interpreted, so `MarkupInfo.metadata` is
+  // missing keys the source tried to declare.
+  WARNING_CODE_METADATA = 2;
+
+  // The source was structurally malformed — mis-nested tags, an unclosed
+  // block, a cue whose end precedes its start — and the parser repaired it
+  // the way the format's error-handling rules say to.
+  WARNING_CODE_MALFORMED_STRUCTURE = 3;
+
+  // Bytes were not valid UTF-8 and malformed sequences were replaced with
+  // U+FFFD.
+  WARNING_CODE_ENCODING_SUBSTITUTION = 4;
+
+  // Raw embedded HTML inside a non-HTML format was flattened to its text
+  // rather than parsed.
+  WARNING_CODE_EMBEDDED_HTML_FLATTENED = 5;
+}
+
+// ParseWarning is one non-fatal finding, carried on the trailer.
+message ParseWarning {
+  // What kind of finding this is.
+  WarningCode code = 1;
+
+  // Human-readable detail, safe to log.
+  string message = 2;
+
+  // How many times this exact finding occurred. Findings are aggregated per
+  // (code, message) pair so a document with ten thousand instances produces
+  // one warning, not ten thousand.
+  uint64 count = 3;
+}
+
+// ParseCounts is the tally of what the stream carried.
+message ParseCounts {
+  // `TextBlock` events sent.
+  uint64 text_blocks = 1;
+
+  // `TableStart` events sent, which is the number of tables.
+  uint64 tables = 2;
+
+  // `TableRow` events sent across all tables.
+  uint64 table_rows = 3;
+
+  // `ImageBlock` events sent.
+  uint64 images = 4;
+
+  // `Cue` events sent.
+  uint64 cues = 5;
+}
+
+// ParseStatus is the trailer of a successful parse: the last event of the
+// stream, never the payload.
+//
+// A parse that fails does not send `ParseStatus`; it ends the stream with a
+// gRPC status instead (`INVALID_ARGUMENT` for input the format's own error
+// rules cannot repair, `RESOURCE_EXHAUSTED` past the byte cap,
+// `UNIMPLEMENTED` for a format this build does not map, `INTERNAL` for a
+// parser fault).
+message ParseStatus {
+  // The format the document was mapped with. Never
+  // `MARKUP_FORMAT_UNSPECIFIED`.
+  MarkupFormat format = 1;
+
+  // What the stream carried.
+  ParseCounts counts = 2;
+
+  // Non-fatal findings, aggregated. May be empty.
+  repeated ParseWarning warnings = 3;
+
+  // Bytes consumed from the request stream.
+  uint64 bytes_consumed = 4;
+
+  // Wall-clock milliseconds from the first request frame to this trailer.
+  uint64 elapsed_millis = 5;
+}

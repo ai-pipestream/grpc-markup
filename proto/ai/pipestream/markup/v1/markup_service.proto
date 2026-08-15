@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// gRPC service contract for the grpc-markup collector.
+//
+// The collector parses lightweight text markup — Markdown, HTML, AsciiDoc,
+// LaTeX, WebVTT, BoxNote, and serialized Docling JSON — into one shared
+// block vocabulary, streamed as the parser produces it, with an optional
+// fold of the whole parse into an `ai.pipestream.document.v1.Document`.
+//
+// The server never touches disk and never dereferences anything the
+// document names: images, stylesheets, includes and links stay references.
+
+syntax = "proto3";
+
+package ai.pipestream.markup.v1;
+
+import "ai/pipestream/document/v1/document.proto";
+import "ai/pipestream/markup/v1/markup.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "MarkupServiceProto";
+option java_package = "ai.pipestream.markup.v1";
+
+// MarkupParseService maps text markup formats into the Document plane.
+service MarkupParseService {
+  // Parses one document and streams its blocks as they are produced.
+  //
+  // The first request message must set `options`; every message after it
+  // must set `chunk`, and the chunks concatenate in stream order to form
+  // the document. Sending `options` twice, or a message with neither
+  // field, is `INVALID_ARGUMENT`.
+  //
+  // The response stream is ordered: exactly one `info` event first, then
+  // content events in document order, then exactly one `status` trailer.
+  //
+  // Failures end the stream with a gRPC status and no `status` event:
+  // `RESOURCE_EXHAUSTED` when the document exceeds the byte cap or the
+  // server is at its concurrency limit, `INVALID_ARGUMENT` for input the
+  // format's own error rules cannot repair, `UNIMPLEMENTED` when the
+  // format is not one this build maps or a sniff found nothing,
+  // `INTERNAL` for a parser fault.
+  rpc ParseMarkup(stream ParseMarkupRequest) returns (stream ParseMarkupResponse);
+
+  // Reports the server's identity, limits, and the formats it maps.
+  // Safe to call at any time; it parses nothing.
+  rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
+}
+
+// ParseOptions carries the settings of one parse. It must be the payload of
+// the first `ParseMarkupRequest` message.
+message ParseOptions {
+  // Format to map with. `MARKUP_FORMAT_UNSPECIFIED` asks the server to
+  // sniff it from the bytes; a sniff that finds nothing is `UNIMPLEMENTED`.
+  // The server never guesses between two candidates it cannot separate.
+  MarkupFormat format = 1;
+
+  // Upper bound on the document in mebibytes. Exceeding it ends the stream
+  // with `RESOURCE_EXHAUSTED` as soon as the byte that crosses the line is
+  // received. 0 selects the server default; the server also enforces its
+  // own ceiling, so a larger value is clamped.
+  uint32 max_document_mib = 2;
+
+  // Also fold this parse into one `ai.pipestream.document.v1.Document` and
+  // send it as a `document` event just before the trailer. Default false,
+  // which costs nothing: the fold is not constructed and no item is
+  // retained.
+  //
+  // The typed event stream stays the primary wire; the Document is a
+  // structural projection of it, self-contained so a coordinator can merge
+  // it additively with another collector's parse of the same work. For
+  // `MARKUP_FORMAT_DOCLING_JSON` the projection is the point: the payload
+  // already is a Document, and the fold carries it over losslessly.
+  bool emit_document = 3;
+}
+
+// ParseMarkupRequest is one frame of the upload.
+message ParseMarkupRequest {
+  // Frame payload. The first frame sets `options`; all later frames set
+  // `chunk`.
+  oneof payload {
+    // Parse settings. First frame only.
+    ParseOptions options = 1;
+
+    // A slice of the document bytes, concatenated in stream order. An
+    // empty chunk is legal and ignored.
+    bytes chunk = 2;
+  }
+}
+
+// ParseMarkupResponse is one event of the parse stream.
+message ParseMarkupResponse {
+  // Exactly one event kind is set per message.
+  oneof event {
+    // Resolved document identity. Always the first event, sent once.
+    MarkupInfo info = 1;
+
+    // One unit of text, in document order.
+    TextBlock text_block = 2;
+
+    // A table opens. Its rows follow.
+    TableStart table_start = 3;
+
+    // One row of the table opened by the preceding `table_start`.
+    TableRow table_row = 4;
+
+    // The table closes.
+    TableEnd table_end = 5;
+
+    // One image reference, in document order.
+    ImageBlock image = 6;
+
+    // One WebVTT cue, in document order.
+    Cue cue = 7;
+
+    // Parse trailer. Always the last event of a successful parse, sent
+    // once.
+    ParseStatus status = 8;
+
+    // The whole parse folded into one Document. Emitted once, immediately
+    // before `status`, and only when `ParseOptions.emit_document` was set.
+    //
+    // Item refs are dense and local to this message (`#/texts/0`,
+    // `#/tables/1`), so a coordinator can renumber them into a larger
+    // document.
+    ai.pipestream.document.v1.Document document = 9;
+  }
+}
+
+// GetServiceInfoRequest asks for the server's identity and limits. It has
+// no fields; it exists because every RPC needs a request message.
+message GetServiceInfoRequest {}
+
+// GetServiceInfoResponse describes the running server.
+message GetServiceInfoResponse {
+  // Service name, always `grpc-markup`.
+  string service = 1;
+
+  // Version of this build, from the crate version.
+  string version = 2;
+
+  // Formats this build maps. Never empty and never contains
+  // `MARKUP_FORMAT_UNSPECIFIED`. Asking ParseMarkup for a format outside
+  // this list is `UNIMPLEMENTED`.
+  repeated MarkupFormat formats = 3;
+
+  // Default byte cap in mebibytes, applied when a request asks for 0.
+  uint32 default_max_document_mib = 4;
+
+  // Hard byte cap in mebibytes. A request asking for more is clamped here.
+  uint32 ceiling_max_document_mib = 5;
+
+  // Parses this server admits at once. Requests past the limit are refused
+  // with `RESOURCE_EXHAUSTED` rather than queued.
+  uint32 max_concurrent_parses = 6;
+}

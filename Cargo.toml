@@ -1,0 +1,43 @@
+[package]
+name = "grpc-markup"
+version = "0.1.0"
+description = "A gRPC server that maps text markup formats (Markdown, HTML, AsciiDoc, LaTeX, WebVTT, BoxNote, Docling JSON) into the Document plane"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["markdown", "html", "grpc", "streaming", "docling"]
+categories = ["parsing", "network-programming"]
+edition = "2024"
+# tonic 0.14 and tonic-prost 0.14 both declare 1.88; nothing else here is
+# newer, so the transport sets the floor.
+rust-version = "1.88"
+publish = false # Server binary; not a library for crates.io.
+
+[dependencies]
+prost = "0.14.4"
+# `google.protobuf.Value` in the vendored Document schema: prost maps the
+# well-known types to this crate rather than regenerating them.
+prost-types = "0.14.4"
+# CommonMark parsing for the markdown fold. The extensions match what the
+# fold maps: pipe tables, footnotes, strikethrough and task lists.
+pulldown-cmark = { version = "0.13", default-features = false }
+# BoxNote and Docling JSON are JSON formats; front-matter values that are
+# not scalar strings are re-encoded as JSON for `MarkupInfo.metadata`.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+tonic = { version = "0.14.6", features = ["gzip", "zstd"] }
+tonic-health = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-reflection = "0.14.6"
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+
+[dev-dependencies]
+# "net" enables TcpListenerStream for the in-process integration test server.
+tokio-stream = { version = "0.1.19", features = ["net"] }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"

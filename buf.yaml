@@ -1,0 +1,23 @@
+# Buf v2 configuration for the grpc-markup protobuf contracts.
+#
+# Lint runs the strictest built-in set (STANDARD) plus COMMENTS, so every
+# service, rpc, message, field, oneof, enum and enum value must carry a
+# documentation comment. Comment ignores are disallowed: a rule that is
+# inconvenient gets the contract fixed, not the lint silenced.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+    - COMMENTS
+  disallow_comment_ignores: true
+  ignore_only:
+    # The document schema is vendored for parity with the upstream JSON
+    # schema (canonical copy in the gRParse repo); its comment coverage
+    # follows that schema, not this repo's comment rule.
+    COMMENTS:
+      - proto/ai/pipestream/document/v1/document.proto
+breaking:
+  use:
+    - FILE
