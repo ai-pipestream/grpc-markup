@@ -228,6 +228,32 @@ async fn the_asciidoc_fold_is_a_merge_safe_fragment() {
 }
 
 #[tokio::test]
+async fn the_latex_fold_is_a_merge_safe_fragment() {
+    let client = client().await;
+    let latex = "\\title{The Title}\\author{Ada}\n\\begin{document}\n\\section{Section}\n\nunder it\n\n\\begin{itemize}\\item one\\item two\\end{itemize}\n\n\\begin{equation}E=mc^2\\end{equation}\n\n\\includegraphics{img.png}\n\\end{document}\n";
+    let events = parse_ok(&client, latex, with_document(pb::MarkupFormat::Latex)).await;
+    let document = document(&events).expect("the fold was requested");
+    assert_eq!(integrity_errors(document), Vec::<String>::new());
+    assert_eq!(document.name, "The Title");
+    assert_eq!(
+        document.origin.as_ref().unwrap().mimetype,
+        "application/x-latex"
+    );
+    let Some(doc::base_text_item::Item::Title(_)) = document.texts[0].item.as_ref() else {
+        panic!("texts[0] is the title");
+    };
+    assert_eq!(document.groups.len(), 1, "one list group");
+    assert!(
+        document.texts.iter().any(|item| matches!(
+            item.item.as_ref(),
+            Some(doc::base_text_item::Item::Formula(_))
+        )),
+        "the equation folds as a FormulaItem"
+    );
+    assert_eq!(document.pictures[0].image.as_ref().unwrap().uri, "img.png");
+}
+
+#[tokio::test]
 async fn the_vtt_fold_carries_cue_timings_as_track_provenance() {
     let client = client().await;
     let vtt = "WEBVTT\n\nintro\n00:00:01.000 --> 00:00:02.500\n<v Ada>Hello\n\n00:03.000 --> 00:04.000\nSecond\n";

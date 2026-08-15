@@ -3,8 +3,8 @@
 ## 1. Goals
 
 - One block vocabulary for lightweight text markup: Markdown, HTML,
-  AsciiDoc, WebVTT, BoxNote and serialized Docling JSON in this build;
-  LaTeX reserved in the contract for a later build.
+  AsciiDoc, LaTeX, WebVTT, BoxNote and serialized Docling JSON — every
+  format the contract names.
 - One process, one port, format selected on the request, sniffed when
   unspecified.
 - Typed events in document order as each fold produces them, and an
@@ -127,7 +127,37 @@ the author: nesting follows marker depth (`**`) rather than leading
 indentation, and single-cell `|` rows inside `|===` are kept (docling's
 two-pipe regex drops them).
 
-### 4.4 WebVTT (hand-written parser)
+### 4.4 LaTeX (hand-rolled tolerant reader)
+
+pylatexenc has no Rust counterpart, so the node model — text runs, groups,
+macros with signature-driven arguments, environments, math — is built
+here, and the mapping ports what docling's `latex` backend maps.
+
+| Source construct | Wire |
+|---|---|
+| preamble | skipped; `\title` surfaces as `MarkupInfo.title` and a `BLOCK_LABEL_TITLE` block, `\author`/`\date` as paragraphs with their macro name as `role` |
+| `\section` family | `BLOCK_LABEL_SECTION_HEADER` at docling's levels (part/chapter/section 1, subsection 2, subsubsection 3, paragraph 4, subparagraph 5) |
+| text runs | paragraphs split at blank lines; `\textbf` and friends flatten, `\cite`/`\ref` become `[key]`, `\href{u}{t}` becomes `[t](u)`, `~` a space, `\%` and friends their character; `%` comments stripped |
+| `itemize`/`enumerate`/`description` | nested `BLOCK_LABEL_LIST_ITEM`s, `enumerated` for enumerate, description terms as `term: ` lead-ins |
+| `tabular` | table events: `&` splits cells, `\\` ends rows, rules dropped, `\multicolumn` and `\multirow` as spans |
+| `verbatim`/`lstlisting`/`minted` | `BLOCK_LABEL_CODE`, verbatim, `[language=x]` as the declared language; `tikzpicture` as code declared `tikz` (no renderer here — docling's own no-engine fallback) |
+| equation family, `$$..$$`, `\[..\]` | `BLOCK_LABEL_FORMULA` with `\label{...}` removed; `$..$` stays inline |
+| `\includegraphics` | `ImageBlock`, path verbatim; `\caption` a `CAPTION` block; `\footnote`/`\marginpar` `FOOTNOTE` blocks |
+| `quote`/`quotation`/`verse` | `BLOCK_LABEL_QUOTE` paragraphs |
+| `abstract`, theorems, `proof`, `thebibliography` | an `Abstract` header with `role: "abstract"`, a `Theorem.`-style lead paragraph with the environment as `role`, a `References` header plus one `[key]`-led list item per `\bibitem` |
+| unknown environments | descended into, one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per environment name |
+| `\input`/`\include` | never read (diskless); one aggregated warning names the refusal |
+
+Zero-argument `\newcommand` macros expand one level, as docling expands
+them; parameterized custom macros are deliberately not expanded (docling
+substitutes `#N` textually, which this fold declines to guess at). Also
+deliberate: theorem lead-ins are plain text with a `role`, not docling's
+`**Theorem.**` markdown-in-a-string; `\bibliography{file}` is consumed
+silently rather than leaking its filename as text; accent macros drop the
+accent and keep the base letter; no `source_line` (the reader is not
+line-oriented and inventing lines would be guessing).
+
+### 4.5 WebVTT (hand-written parser)
 
 Mirrors `webvtt_backend.py` in effect: the `WEBVTT` header is mandatory
 (`INVALID_ARGUMENT` without it, empty input included), header title and
@@ -140,7 +170,7 @@ timings line, unparseable timestamps, end before start — is skipped with
 one aggregated `WARNING_CODE_MALFORMED_STRUCTURE`, which is WebVTT's own
 error recovery.
 
-### 4.5 BoxNote (ProseMirror `doc` tree)
+### 4.6 BoxNote (ProseMirror `doc` tree)
 
 Mirrors `boxnote_backend.py` node for node: headings (first level-1 is the
 title), paragraphs from styled runs (a single run keeps its safe-scheme
@@ -154,7 +184,7 @@ refused as `INVALID_ARGUMENT`, exactly as the docling backend refuses them.
 An unknown node type with nothing inside warns `UNMAPPED_CONSTRUCT` naming
 it.
 
-### 4.6 Docling JSON (field-by-field ingestion)
+### 4.7 Docling JSON (field-by-field ingestion)
 
 The vendored `document.proto` mirrors docling-core's `docling_document` v2
 schema, so ingestion is a mapping, not an interpretation: `schema_name`,
@@ -203,6 +233,10 @@ Dropped or demoted per format, deliberately:
 - **AsciiDoc:** table cell specifiers vanish (they are neither spans nor
   styles downstream); admonition kinds collapse into one `admonition` role;
   attribute entries live only on the body meta.
+- **LaTeX:** everything TeX (macro definitions, spacing, counters, page
+  furniture) dissolves; labels vanish once their formula is cleaned; tikz
+  survives only as its source; description-term structure survives only as
+  a `term: ` prefix.
 - **Markdown:** the distinction between quote and plain text is demoted to
   a custom field (`DocItemLabel` has no quote); an unknown code language
   survives only as `code_language_raw`; image `alt` / `title` become custom
@@ -227,8 +261,9 @@ Precedence, fixed:
    JSON object whose `schema_name` mentions docling (`DOCLING_JSON`) or
    with a ProseMirror `doc` tree / legacy `atext` key (`BOXNOTE`);
    `<!DOCTYPE html` or `<html` (`HTML`); `\documentclass` or
-   `\begin{document}` (`LATEX`). A signature match for a format outside
-   the build is still a match: the refusal names what was sniffed.
+   `\begin{document}` (`LATEX`). Every signature format is mapped by this
+   build; if a registry entry were ever removed, the signature would still
+   match and the refusal would name what was sniffed.
 3. **Heuristics, Markdown and AsciiDoc only:** ATX headings, fences, inline
    links or front matter say Markdown; a `= ` document title, `== `
    sections, `:name: value` attribute entries or `----` fences say

@@ -33,7 +33,7 @@ pub enum Format {
     Html,
     /// AsciiDoc.
     Asciidoc,
-    /// LaTeX source. Recognized by the sniff, not mapped by this build.
+    /// LaTeX source.
     Latex,
     /// WebVTT subtitle and caption files.
     Vtt,
@@ -98,7 +98,7 @@ impl Format {
             Self::DoclingJson => Some(3),
             Self::Html => Some(4),
             Self::Asciidoc => Some(5),
-            Self::Latex => None,
+            Self::Latex => Some(6),
         }
     }
 }

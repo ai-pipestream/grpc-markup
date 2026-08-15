@@ -195,48 +195,6 @@ async fn past_the_concurrency_limit_requests_are_refused_not_queued() {
 // ------------------------------------------------------------ unimplemented
 
 #[tokio::test]
-async fn formats_outside_this_build_are_unimplemented_and_named() {
-    let client = client().await;
-    for (format, name) in [(pb::MarkupFormat::Latex, "latex")] {
-        let error = parse(&client, "content\n", options(format))
-            .await
-            .expect_err("outside the build");
-        assert_eq!(error.code(), Code::Unimplemented, "{name}");
-        assert!(
-            error
-                .message()
-                .contains(&format!("{name} fold is not in this build")),
-            "{}",
-            error.message()
-        );
-    }
-}
-
-#[tokio::test]
-async fn sniffed_latex_is_unimplemented_with_the_sniff_named() {
-    let client = client().await;
-    for (document, name) in [(
-        "\\documentclass{article}\n\\begin{document}x\\end{document}\n",
-        "latex",
-    )] {
-        let error = parse(&client, document, sniff_options())
-            .await
-            .expect_err("recognized but unmapped");
-        assert_eq!(error.code(), Code::Unimplemented, "{name}");
-        assert!(
-            error.message().contains(&format!("sniff as {name}")),
-            "{}",
-            error.message()
-        );
-        assert!(
-            error.message().contains("not in this build"),
-            "{}",
-            error.message()
-        );
-    }
-}
-
-#[tokio::test]
 async fn a_failed_sniff_is_unimplemented_and_says_to_state_the_format() {
     let client = client().await;
     for document in ["plain prose with no structure at all.\n", ""] {
@@ -322,6 +280,7 @@ async fn get_service_info_reports_identity_limits_and_formats() {
             pb::MarkupFormat::DoclingJson as i32,
             pb::MarkupFormat::Html as i32,
             pb::MarkupFormat::Asciidoc as i32,
+            pb::MarkupFormat::Latex as i32,
         ],
         "exactly the formats this build maps, unspecified excluded"
     );

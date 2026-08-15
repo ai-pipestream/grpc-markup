@@ -20,7 +20,7 @@ use crate::document::v1 as doc;
 use crate::document_fold::DocumentFold;
 use crate::proto::v1 as pb;
 use crate::sniff::{self, Evidence, Format};
-use crate::{COLLECTOR, VERSION, asciidoc, boxnote, docling_json, html, markdown, vtt};
+use crate::{COLLECTOR, VERSION, asciidoc, boxnote, docling_json, html, latex, markdown, vtt};
 
 /// Upper bound on distinct aggregated warnings kept for one parse.
 ///
@@ -50,6 +50,7 @@ pub const REGISTRY: &[(Format, FoldFn)] = &[
     (Format::DoclingJson, docling_json::fold),
     (Format::Html, html::fold),
     (Format::Asciidoc, asciidoc::fold),
+    (Format::Latex, latex::fold),
 ];
 
 /// The fold for a format, or `None` when this build does not map it.
@@ -144,7 +145,7 @@ fn decode(bytes: &[u8]) -> (String, bool) {
 
 /// The `UNIMPLEMENTED` message for a format outside this build.
 fn unmapped(format: Format, evidence: Evidence) -> String {
-    let mapped = "this build maps markdown, vtt, boxnote, docling-json, html and asciidoc";
+    let mapped = "this build maps markdown, vtt, boxnote, docling-json, html, asciidoc and latex";
     match evidence {
         Evidence::Requested => {
             format!("the {} fold is not in this build; {mapped}", format.model())
@@ -534,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn the_registry_maps_exactly_the_formats_of_this_build() {
+    fn the_registry_maps_every_contract_format() {
         let formats: Vec<Format> = REGISTRY.iter().map(|(format, _)| *format).collect();
         assert_eq!(
             formats,
@@ -545,38 +546,23 @@ mod tests {
                 Format::DoclingJson,
                 Format::Html,
                 Format::Asciidoc,
+                Format::Latex,
             ]
         );
-        assert!(fold_for(Format::Latex).is_none());
+        for (format, _) in REGISTRY {
+            assert!(fold_for(*format).is_some(), "{format:?}");
+        }
     }
 
     #[test]
-    fn an_unmapped_format_is_unsupported_and_names_itself() {
-        let config = ParseConfig {
-            format: Some(Format::Latex),
-            emit_document: false,
-        };
-        let Err(ParseError::Unsupported(message)) = collect(b"\\documentclass{article}\n", &config)
-        else {
-            panic!("requesting latex must be Unsupported");
-        };
-        assert!(
-            message.contains("latex fold is not in this build"),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn a_sniffed_unmapped_format_says_it_was_sniffed() {
-        let config = ParseConfig::default();
-        let Err(ParseError::Unsupported(message)) = collect(
-            b"\\documentclass{article}\n\\begin{document}x\\end{document}\n",
-            &config,
-        ) else {
-            panic!("sniffed latex must be Unsupported");
-        };
-        assert!(message.contains("sniff as latex"), "{message}");
-        assert!(message.contains("not in this build"), "{message}");
+    fn the_unmapped_refusal_still_names_a_format_the_registry_would_lose() {
+        // Every contract format is mapped today; the refusal path stays
+        // because the registry, not the enum, is the source of truth. This
+        // pins the message shape a future partial build would produce.
+        let requested = unmapped(Format::Latex, Evidence::Requested);
+        assert!(requested.contains("latex fold is not in this build"));
+        let sniffed = unmapped(Format::Html, Evidence::Signature);
+        assert!(sniffed.contains("sniff as html"), "{sniffed}");
     }
 
     #[test]
