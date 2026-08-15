@@ -23,7 +23,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # Spec-compliant HTML parsing for the HTML fold: html5ever's tree builder
 # with a plain DOM on top. Fragments parse natively, and the tree builder's
 # own error list is what backs WARNING_CODE_MALFORMED_STRUCTURE.
-scraper = { version = "0.22", default-features = false, features = ["errors"] }
+scraper = { version = "0.27", default-features = false, features = ["errors"] }
 # BoxNote and Docling JSON are JSON formats; front-matter values that are
 # not scalar strings are re-encoded as JSON for `MarkupInfo.metadata`.
 serde = { version = "1", features = ["derive"] }
