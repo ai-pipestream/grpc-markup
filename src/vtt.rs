@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 
-use crate::parse::{Emitter, ParseError};
+use crate::parse::{Emitter, ParseError, scalar};
 use crate::proto::v1 as pb;
 use crate::sniff;
 
@@ -63,7 +63,7 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
             let key = key.trim();
             let value = value.trim();
             if !key.is_empty() && !value.is_empty() && !key.contains(' ') {
-                metadata.insert(key.to_ascii_lowercase(), value.to_owned());
+                metadata.insert(key.to_ascii_lowercase(), scalar(value));
             }
         }
         at += 1;

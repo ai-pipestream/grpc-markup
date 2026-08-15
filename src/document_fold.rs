@@ -178,7 +178,7 @@ impl DocumentFold {
             // Deterministic order for a map the wire delivers unordered.
             for (key, value) in info.metadata.iter().collect::<BTreeMap<_, _>>() {
                 meta.custom_fields
-                    .insert(format!("{}.{key}", self.prefix), string(value));
+                    .insert(format!("{}.{key}", self.prefix), meta_field(value));
             }
         }
     }
@@ -760,6 +760,35 @@ fn ms_to_seconds(ms: u64) -> f64 {
     ms / 1000.0
 }
 
+/// A `MetaValue` tree as the `google.protobuf.Value` the Document plane's
+/// custom fields hold: scalar to string, list to `ListValue`, map to
+/// `Struct`, recursively. The Document schema is fleet-wide and stays
+/// Struct-based; this direction is lossless because every scalar rides as
+/// the verbatim string it already was.
+fn meta_field(value: &pb::MetaValue) -> Value {
+    match value.kind.as_ref() {
+        Some(pb::meta_value::Kind::Value(text)) => string(text),
+        Some(pb::meta_value::Kind::List(list)) => Value {
+            kind: Some(Kind::ListValue(prost_types::ListValue {
+                values: list.items.iter().map(meta_field).collect(),
+            })),
+        },
+        Some(pb::meta_value::Kind::Map(map)) => Value {
+            kind: Some(Kind::StructValue(prost_types::Struct {
+                fields: map
+                    .entries
+                    .iter()
+                    .map(|(key, nested)| (key.clone(), meta_field(nested)))
+                    .collect(),
+            })),
+        },
+        // A peer that set no arm said nothing; null records exactly that.
+        None => Value {
+            kind: Some(Kind::NullValue(0)),
+        },
+    }
+}
+
 /// A `google.protobuf.Value` holding a string.
 fn string(text: &str) -> Value {
     Value {
@@ -1042,7 +1071,10 @@ mod tests {
             format: format as i32,
             evidence: pb::FormatEvidence::Requested as i32,
             title: Some("Named".to_owned()),
-            metadata: std::collections::HashMap::from([("author".to_owned(), "Ada".to_owned())]),
+            metadata: std::collections::HashMap::from([(
+                "author".to_owned(),
+                crate::parse::scalar("Ada"),
+            )]),
         })
     }
 
@@ -1064,6 +1096,41 @@ mod tests {
         assert_eq!(
             meta.custom_fields["markdown.author"].kind,
             Some(Kind::StringValue("Ada".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_metadata_tree_lands_as_the_same_tree_of_struct_values() {
+        let tree = pb::MetaValue {
+            kind: Some(pb::meta_value::Kind::List(pb::MetaList {
+                items: vec![pb::MetaValue {
+                    kind: Some(pb::meta_value::Kind::Map(pb::MetaMap {
+                        entries: std::collections::HashMap::from([(
+                            "name".to_owned(),
+                            crate::parse::scalar("Ada Lovelace"),
+                        )]),
+                    })),
+                }],
+            })),
+        };
+        let document = fold(&[pb::parse_markup_response::Event::Info(pb::MarkupInfo {
+            format: pb::MarkupFormat::Markdown as i32,
+            evidence: pb::FormatEvidence::Requested as i32,
+            title: None,
+            metadata: std::collections::HashMap::from([("authors".to_owned(), tree)]),
+        })]);
+        let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
+        let Some(Kind::ListValue(authors)) = meta.custom_fields["markdown.authors"].kind.as_ref()
+        else {
+            panic!("a MetaList folds as a ListValue");
+        };
+        let Some(Kind::StructValue(author)) = authors.values[0].kind.as_ref() else {
+            panic!("a MetaMap folds as a Struct");
+        };
+        assert_eq!(
+            author.fields["name"].kind,
+            Some(Kind::StringValue("Ada Lovelace".to_owned())),
+            "the scalar leaf is the verbatim string, not a JSON encoding"
         );
     }
 

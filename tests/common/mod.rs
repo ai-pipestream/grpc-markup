@@ -278,6 +278,30 @@ pub fn info(events: &[pb::ParseMarkupResponse]) -> &pb::MarkupInfo {
         .expect("stream has a MarkupInfo")
 }
 
+/// The scalar text of a metadata value; panics on a list or a map.
+pub fn meta_scalar(value: &pb::MetaValue) -> &str {
+    match value.kind.as_ref() {
+        Some(pb::meta_value::Kind::Value(text)) => text,
+        other => panic!("expected a scalar metadata value, got {other:?}"),
+    }
+}
+
+/// The items of a metadata list; panics on a scalar or a map.
+pub fn meta_list(value: &pb::MetaValue) -> &[pb::MetaValue] {
+    match value.kind.as_ref() {
+        Some(pb::meta_value::Kind::List(list)) => &list.items,
+        other => panic!("expected a metadata list, got {other:?}"),
+    }
+}
+
+/// The entries of a nested metadata map; panics on a scalar or a list.
+pub fn meta_map(value: &pb::MetaValue) -> &std::collections::HashMap<String, pb::MetaValue> {
+    match value.kind.as_ref() {
+        Some(pb::meta_value::Kind::Map(map)) => &map.entries,
+        other => panic!("expected a metadata map, got {other:?}"),
+    }
+}
+
 /// The `ParseStatus` trailer of a stream.
 pub fn status(events: &[pb::ParseMarkupResponse]) -> &pb::ParseStatus {
     events

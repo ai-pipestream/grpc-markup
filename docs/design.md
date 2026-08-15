@@ -51,7 +51,7 @@ tree branches on format.
 
 | Source construct | Wire |
 |---|---|
-| YAML front matter between leading `---` fences | `MarkupInfo.metadata` (scalars verbatim, nested maps to dotted keys, sequences JSON-encoded); `title:` also to `MarkupInfo.title`. Unparseable front matter: one `WARNING_CODE_METADATA`, raw text not emitted as content |
+| YAML front matter between leading `---` fences | `MarkupInfo.metadata` as the tree the source declared: scalars verbatim, sequences as `MetaList`, nested mappings as `MetaMap`, keys the mapping's own; `title:` also to `MarkupInfo.title` when it is a non-empty scalar. Unparseable front matter: one `WARNING_CODE_METADATA`, raw text not emitted as content |
 | First H1 | `BLOCK_LABEL_TITLE` |
 | Every other heading | `BLOCK_LABEL_SECTION_HEADER` with the Markdown level |
 | Paragraph | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; `hyperlink` when the whole paragraph is one link |
@@ -75,7 +75,7 @@ become items — without its rendering, bounding-box and form machinery.
 
 | Source construct | Wire |
 |---|---|
-| `<title>`, `<meta name content>` | `MarkupInfo.title`, `MarkupInfo.metadata` under dotted `meta.*` keys |
+| `<title>`, `<meta name content>` | `MarkupInfo.title`, scalar `MarkupInfo.metadata` values under `meta.*` keys |
 | `h1`..`h6` | first `h1` is `BLOCK_LABEL_TITLE` (the Markdown fold's rule); every other heading `BLOCK_LABEL_SECTION_HEADER` at its own level |
 | `p`, loose inline text between blocks | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; a block that is entirely one `<a>` carries `hyperlink` |
 | `address`, `summary` | paragraphs with the element name as `role` |

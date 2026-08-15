@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    blocks_labelled, client, images, info, options, parse_ok, sniff_options, status, table_rows,
-    texts, warning,
+    blocks_labelled, client, images, info, meta_scalar, options, parse_ok, sniff_options, status,
+    table_rows, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -59,8 +59,8 @@ async fn attribute_entries_become_metadata() {
     let info = info(&events);
     assert_eq!(info.format, pb::MarkupFormat::Asciidoc as i32);
     assert_eq!(info.title, None, "the doc title arrives as a TITLE block");
-    assert_eq!(info.metadata["author"], "Ada Lovelace");
-    assert_eq!(info.metadata["revnumber"], "1.2");
+    assert_eq!(meta_scalar(&info.metadata["author"]), "Ada Lovelace");
+    assert_eq!(meta_scalar(&info.metadata["revnumber"]), "1.2");
 }
 
 #[tokio::test]

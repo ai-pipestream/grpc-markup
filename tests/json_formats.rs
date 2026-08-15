@@ -6,8 +6,8 @@
 mod common;
 
 use common::{
-    BOXNOTE, DOCLING, blocks_labelled, client, images, info, options, parse, parse_ok, status,
-    table_rows, text_blocks, texts, warning,
+    BOXNOTE, DOCLING, blocks_labelled, client, images, info, meta_scalar, options, parse, parse_ok,
+    status, table_rows, text_blocks, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -141,8 +141,11 @@ async fn docling_json_projects_typed_events_in_reading_order() {
 
     let info = info(&events);
     assert_eq!(info.title.as_deref(), Some("Quarterly Review"));
-    assert_eq!(info.metadata["schema_name"], "DoclingDocument");
-    assert_eq!(info.metadata["version"], "1.3.0");
+    assert_eq!(
+        meta_scalar(&info.metadata["schema_name"]),
+        "DoclingDocument"
+    );
+    assert_eq!(meta_scalar(&info.metadata["version"]), "1.3.0");
 
     let blocks = text_blocks(&events);
     assert_eq!(

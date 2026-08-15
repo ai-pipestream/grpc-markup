@@ -7,10 +7,12 @@
 //! Shape of the mapping, in stream order:
 //!
 //! - YAML front matter between leading `---` fences becomes
-//!   `MarkupInfo.metadata` (scalar values verbatim, nested maps flattened to
-//!   dotted keys, everything else JSON-encoded) and its `title:` key becomes
-//!   `MarkupInfo.title`. A block that fails to parse as YAML gets one
-//!   `WARNING_CODE_METADATA` and its raw text is not emitted as content.
+//!   `MarkupInfo.metadata` as the tree the source declared: scalars are
+//!   verbatim text, sequences are `MetaList`s, nested mappings are
+//!   `MetaMap`s, and the top-level keys are the mapping's own. Its `title:`
+//!   key becomes `MarkupInfo.title` when it is a non-empty scalar. A block
+//!   that fails to parse as YAML gets one `WARNING_CODE_METADATA` and its
+//!   raw text is not emitted as content.
 //! - The first H1 is `BLOCK_LABEL_TITLE`; every other heading is
 //!   `BLOCK_LABEL_SECTION_HEADER` with its Markdown level.
 //! - Paragraphs flatten their inline markup to text with whitespace
@@ -89,7 +91,7 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
 fn front_matter(
     text: &str,
     emitter: &mut Emitter<'_>,
-) -> (HashMap<String, String>, Option<String>, usize) {
+) -> (HashMap<String, pb::MetaValue>, Option<String>, usize) {
     let Some((raw, body_start)) = front_matter_span(text) else {
         return (HashMap::new(), None, 0);
     };
@@ -104,11 +106,14 @@ fn front_matter(
             return (HashMap::new(), None, body_start);
         }
     };
-    let mut metadata = HashMap::new();
-    for (key, value) in mapping {
-        flatten(&yaml_key(key), value, &mut metadata);
-    }
-    let title = metadata.get("title").cloned().filter(|t| !t.is_empty());
+    let metadata: HashMap<String, pb::MetaValue> = mapping
+        .iter()
+        .map(|(key, value)| (yaml_key(key), meta_value(value)))
+        .collect();
+    let title = metadata.get("title").and_then(|value| match &value.kind {
+        Some(pb::meta_value::Kind::Value(text)) if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    });
     (metadata, title, body_start)
 }
 
@@ -130,71 +135,48 @@ fn front_matter_span(text: &str) -> Option<(&str, usize)> {
     None
 }
 
-/// One front-matter value into the flat metadata map.
+/// One front-matter value as the tree the source declared.
 ///
-/// Scalars land verbatim under their dotted key; nested maps recurse into
-/// deeper dots; sequences and anything else are JSON-encoded, so nothing the
-/// source declared is dropped even when it has no flat shape.
-fn flatten(key: &str, value: &Yaml, out: &mut HashMap<String, String>) {
-    match value {
-        Yaml::Hash(hash) => {
-            for (nested_key, nested) in hash {
-                flatten(&format!("{key}.{}", yaml_key(nested_key)), nested, out);
-            }
-        }
-        Yaml::String(text) => {
-            out.insert(key.to_owned(), text.clone());
-        }
-        Yaml::Integer(number) => {
-            out.insert(key.to_owned(), number.to_string());
-        }
-        Yaml::Real(raw) => {
-            out.insert(key.to_owned(), raw.clone());
-        }
-        Yaml::Boolean(flag) => {
-            out.insert(key.to_owned(), flag.to_string());
-        }
-        Yaml::Null => {
-            out.insert(key.to_owned(), String::new());
-        }
-        other => {
-            out.insert(key.to_owned(), json_encode(other).to_string());
-        }
-    }
+/// A scalar is verbatim text exactly as the author wrote it — a
+/// `version: 1.10` stays the string "1.10" because the wire has no number
+/// arm to mangle it with — a sequence is a `MetaList`, a mapping is a
+/// `MetaMap` keyed by [`yaml_key`], and a null is the empty string. Nothing
+/// is ever JSON-encoded.
+fn meta_value(value: &Yaml) -> pb::MetaValue {
+    use pb::meta_value::Kind;
+    let kind = match value {
+        Yaml::String(text) => Kind::Value(text.clone()),
+        Yaml::Integer(number) => Kind::Value(number.to_string()),
+        Yaml::Real(raw) => Kind::Value(raw.clone()),
+        Yaml::Boolean(flag) => Kind::Value(flag.to_string()),
+        Yaml::Array(items) => Kind::List(pb::MetaList {
+            items: items.iter().map(meta_value).collect(),
+        }),
+        Yaml::Hash(hash) => Kind::Map(pb::MetaMap {
+            entries: hash
+                .iter()
+                .map(|(key, nested)| (yaml_key(key), meta_value(nested)))
+                .collect(),
+        }),
+        // An alias never survives yaml-rust2's loader and a BadValue never
+        // reaches a well-formed mapping; both degrade like a null.
+        Yaml::Null | Yaml::Alias(_) | Yaml::BadValue => Kind::Value(String::new()),
+    };
+    pb::MetaValue { kind: Some(kind) }
 }
 
-/// A YAML mapping key as a string, however the source spelled it.
+/// A YAML mapping key as a string, however the source spelled it. A key
+/// that is itself a collection — legal YAML, unheard-of front matter —
+/// falls back to the loader's debug rendering rather than earning a JSON
+/// encoder.
 fn yaml_key(key: &Yaml) -> String {
     match key {
         Yaml::String(text) => text.clone(),
         Yaml::Integer(number) => number.to_string(),
         Yaml::Real(raw) => raw.clone(),
         Yaml::Boolean(flag) => flag.to_string(),
-        other => json_encode(other).to_string(),
-    }
-}
-
-/// A YAML value as JSON, for the shapes the flat map cannot hold.
-fn json_encode(value: &Yaml) -> serde_json::Value {
-    match value {
-        Yaml::String(text) => serde_json::Value::String(text.clone()),
-        Yaml::Integer(number) => serde_json::Value::from(*number),
-        Yaml::Real(raw) => raw
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map_or_else(
-                || serde_json::Value::String(raw.clone()),
-                serde_json::Value::Number,
-            ),
-        Yaml::Boolean(flag) => serde_json::Value::Bool(*flag),
-        Yaml::Array(items) => serde_json::Value::Array(items.iter().map(json_encode).collect()),
-        Yaml::Hash(hash) => serde_json::Value::Object(
-            hash.iter()
-                .map(|(key, nested)| (yaml_key(key), json_encode(nested)))
-                .collect(),
-        ),
-        Yaml::Alias(_) | Yaml::Null | Yaml::BadValue => serde_json::Value::Null,
+        Yaml::Null => "null".to_owned(),
+        other => format!("{other:?}"),
     }
 }
 

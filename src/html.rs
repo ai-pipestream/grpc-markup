@@ -9,7 +9,7 @@
 //! Shape of the mapping, in DOM order:
 //!
 //! - `<title>` becomes `MarkupInfo.title` and named `<meta>` pairs become
-//!   `MarkupInfo.metadata` under dotted `meta.*` keys.
+//!   scalar `MarkupInfo.metadata` values under `meta.*` keys.
 //! - `h1`..`h6` flatten their inline markup; the first `h1` is
 //!   `BLOCK_LABEL_TITLE` (the same rule as the Markdown fold), every other
 //!   heading is `BLOCK_LABEL_SECTION_HEADER` at its own level.
@@ -42,7 +42,7 @@
 use scraper::node::Node;
 use scraper::{ElementRef, Html};
 
-use crate::parse::{Block, Emitter, ParseError};
+use crate::parse::{Block, Emitter, ParseError, scalar};
 use crate::proto::v1 as pb;
 
 /// Elements whose entire subtree is dropped: executable, presentational or
@@ -108,7 +108,7 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
             if let (Some(name), Some(content)) = (meta.attr("name"), meta.attr("content")) {
                 let name = name.trim().to_ascii_lowercase();
                 if !name.is_empty() && !content.is_empty() {
-                    metadata.insert(format!("meta.{name}"), content.to_owned());
+                    metadata.insert(format!("meta.{name}"), scalar(content));
                 }
             }
         }

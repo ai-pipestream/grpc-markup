@@ -71,7 +71,7 @@ event kind.
 
 | Event | Carries |
 |---|---|
-| `info` | `MarkupInfo`: resolved format and the evidence for it, declared title, document metadata (front matter, header lines) |
+| `info` | `MarkupInfo`: resolved format and the evidence for it, declared title, document metadata as a typed `MetaValue` tree holding the shape the source declared (front matter as its own tree, header lines as scalars) |
 | `text_block` | One unit of text: title, section header, paragraph, list item, code, formula, caption, quote, footnote. `role` is an open refinement (`task-item`, `html`, a footnote label) |
 | `table_start` / `table_row` / `table_end` | A table, streamed a row at a time, header rows and cells flagged, spans carried |
 | `image` | One image reference — `src`, `alt`, `title` as written. Never dereferenced |
@@ -129,7 +129,7 @@ never edited here.
 
 | Wire event | Document |
 |---|---|
-| `info` | `name` (the declared title), `origin.mimetype` per format, metadata on the body meta under the fold's prefix (`markdown.author`, …) |
+| `info` | `name` (the declared title), `origin.mimetype` per format, metadata on the body meta under the fold's prefix (`markdown.author`, …); the `MetaValue` tree converts recursively — scalar to string, list to `ListValue`, map to `Struct` |
 | `text_block` | A `BaseTextItem` variant chosen by label — `TitleItem`, `SectionHeaderItem`, `ListItem`, `CodeItem`, `FormulaItem`, else `TextItem`. Quotes fold as `TEXT` with the quotation recorded in custom fields; a declared code language maps onto `CodeLanguageLabel` when it matches an enum name, else `code_language_raw` |
 | `text_block` list items | Grouped under `GROUP_LABEL_LIST` / `GROUP_LABEL_ORDERED_LIST` groups, one per contiguous list, nested lists as nested groups |
 | `table_*` | One `TableItem`: both `grid` and flat `table_cells`, offsets honoring spans, a leading caption created as a `CAPTION` item and referenced |

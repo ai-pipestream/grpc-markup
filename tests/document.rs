@@ -380,3 +380,36 @@ async fn info_metadata_lands_on_the_body_meta_under_the_format_prefix() {
         Some(prost_types::value::Kind::StringValue("Ada".to_owned()))
     );
 }
+
+#[tokio::test]
+async fn info_metadata_trees_land_as_the_same_tree_of_struct_values() {
+    use prost_types::value::Kind;
+    let client = client().await;
+    let markdown = "---\ntitle: Named\ntags:\n  - streaming\n  - markup\nauthors:\n  - name: Ada\n  - name: Charles\n---\nbody text\n";
+    let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
+    let document = document(&events).expect("the fold was requested");
+    let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
+    let Some(Kind::ListValue(tags)) = meta.custom_fields["markdown.tags"].kind.as_ref() else {
+        panic!("a list of scalars lands as a ListValue");
+    };
+    assert_eq!(
+        tags.values[0].kind,
+        Some(Kind::StringValue("streaming".to_owned()))
+    );
+    assert_eq!(
+        tags.values[1].kind,
+        Some(Kind::StringValue("markup".to_owned()))
+    );
+    let Some(Kind::ListValue(authors)) = meta.custom_fields["markdown.authors"].kind.as_ref()
+    else {
+        panic!("a list of maps lands as a ListValue");
+    };
+    let Some(Kind::StructValue(ada)) = authors.values[0].kind.as_ref() else {
+        panic!("each map in the list lands as a Struct");
+    };
+    assert_eq!(
+        ada.fields["name"].kind,
+        Some(Kind::StringValue("Ada".to_owned())),
+        "the leaf is the verbatim string, not a JSON encoding"
+    );
+}

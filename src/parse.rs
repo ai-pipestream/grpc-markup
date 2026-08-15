@@ -143,6 +143,15 @@ fn decode(bytes: &[u8]) -> (String, bool) {
     }
 }
 
+/// A [`pb::MetaValue`] holding one verbatim scalar, so a fold whose
+/// metadata is naturally flat stays a one-liner per key.
+#[must_use]
+pub fn scalar(text: impl Into<String>) -> pb::MetaValue {
+    pb::MetaValue {
+        kind: Some(pb::meta_value::Kind::Value(text.into())),
+    }
+}
+
 /// The `UNIMPLEMENTED` message for a format outside this build.
 fn unmapped(format: Format, evidence: Evidence) -> String {
     let mapped = "this build maps markdown, vtt, boxnote, docling-json, html, asciidoc and latex";
@@ -269,7 +278,7 @@ impl<'a> Emitter<'a> {
     pub fn info(
         &mut self,
         title: Option<String>,
-        metadata: std::collections::HashMap<String, String>,
+        metadata: std::collections::HashMap<String, pb::MetaValue>,
     ) -> Result<(), ParseError> {
         assert!(!self.info_sent, "MarkupInfo is sent exactly once");
         self.info_sent = true;

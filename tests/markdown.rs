@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    blocks_labelled, client, images, indexes, info, options, parse_ok, status, table_rows,
-    text_blocks, texts, warning,
+    blocks_labelled, client, images, indexes, info, meta_list, meta_map, meta_scalar, options,
+    parse_ok, status, table_rows, text_blocks, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -82,18 +82,104 @@ async fn front_matter_becomes_metadata_and_title() {
     assert_eq!(info.title.as_deref(), Some("Streaming Markup"));
 
     let metadata = &info.metadata;
-    assert_eq!(metadata["title"], "Streaming Markup");
-    assert_eq!(metadata["year"], "1843", "scalars land verbatim");
-    assert_eq!(metadata["draft"], "false");
+    assert_eq!(meta_scalar(&metadata["title"]), "Streaming Markup");
     assert_eq!(
-        metadata["publisher.name"], "Analytical Press",
-        "nested maps flatten to dotted keys"
+        meta_scalar(&metadata["year"]),
+        "1843",
+        "scalars stay verbatim text"
     );
-    assert_eq!(metadata["publisher.city"], "London");
+    assert_eq!(meta_scalar(&metadata["draft"]), "false");
+    let publisher = meta_map(&metadata["publisher"]);
     assert_eq!(
-        metadata["authors"], r#"["Ada Lovelace","Charles Babbage"]"#,
-        "sequences are JSON-encoded"
+        meta_scalar(&publisher["name"]),
+        "Analytical Press",
+        "a nested mapping arrives as a map, not dotted keys"
     );
+    assert_eq!(meta_scalar(&publisher["city"]), "London");
+    let authors: Vec<&str> = meta_list(&metadata["authors"])
+        .iter()
+        .map(meta_scalar)
+        .collect();
+    assert_eq!(
+        authors,
+        ["Ada Lovelace", "Charles Babbage"],
+        "a sequence arrives as a list, not a JSON string"
+    );
+}
+
+/// Front matter exercising every arm of the `MetaValue` tree: a scalar a
+/// double would mangle, a list of scalars, a nested map, and a list of
+/// maps.
+const TREE_FRONT_MATTER: &str = "---
+title: Trees
+version: 1.10
+tags:
+  - streaming
+  - markup
+author:
+  name: Ada Lovelace
+  city: London
+authors:
+  - name: Ada Lovelace
+  - name: Charles Babbage
+---
+Body.
+";
+
+#[tokio::test]
+async fn front_matter_arrives_as_the_tree_the_source_declared() {
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        TREE_FRONT_MATTER,
+        options(pb::MarkupFormat::Markdown),
+    )
+    .await;
+    let metadata = &info(&events).metadata;
+    assert_eq!(
+        meta_scalar(&metadata["version"]),
+        "1.10",
+        "a YAML 1.10 is verbatim text; a number arm would have made it 1.1"
+    );
+    let tags: Vec<&str> = meta_list(&metadata["tags"])
+        .iter()
+        .map(meta_scalar)
+        .collect();
+    assert_eq!(tags, ["streaming", "markup"]);
+    let author = meta_map(&metadata["author"]);
+    assert_eq!(meta_scalar(&author["name"]), "Ada Lovelace");
+    assert_eq!(meta_scalar(&author["city"]), "London");
+    let authors = meta_list(&metadata["authors"]);
+    assert_eq!(meta_scalar(&meta_map(&authors[0])["name"]), "Ada Lovelace");
+    assert_eq!(
+        meta_scalar(&meta_map(&authors[1])["name"]),
+        "Charles Babbage"
+    );
+    for (key, value) in metadata {
+        assert_no_json_scalar(key, value);
+    }
+}
+
+/// Fail on any scalar anywhere in a metadata tree that smuggles a JSON
+/// encoding — the wire wart the typed tree removed.
+fn assert_no_json_scalar(key: &str, value: &pb::MetaValue) {
+    match value.kind.as_ref() {
+        Some(pb::meta_value::Kind::Value(text)) => assert!(
+            !text.starts_with('[') && !text.starts_with('{'),
+            "{key} carries a JSON-encoded scalar: {text}"
+        ),
+        Some(pb::meta_value::Kind::List(list)) => {
+            for item in &list.items {
+                assert_no_json_scalar(key, item);
+            }
+        }
+        Some(pb::meta_value::Kind::Map(map)) => {
+            for (nested_key, nested) in &map.entries {
+                assert_no_json_scalar(nested_key, nested);
+            }
+        }
+        None => panic!("{key} has no arm set"),
+    }
 }
 
 #[tokio::test]

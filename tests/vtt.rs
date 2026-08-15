@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{client, cues, info, options, parse, parse_ok, status, warning};
+use common::{client, cues, info, meta_scalar, options, parse, parse_ok, status, warning};
 use grpc_markup::proto::v1 as pb;
 
 /// A caption file exercising the header title and metadata, comment and
@@ -19,8 +19,8 @@ async fn the_header_yields_title_and_metadata() {
     let info = info(&events);
     assert_eq!(info.format, pb::MarkupFormat::Vtt as i32);
     assert_eq!(info.title.as_deref(), Some("Kitchen Sink"));
-    assert_eq!(info.metadata["kind"], "captions");
-    assert_eq!(info.metadata["language"], "en");
+    assert_eq!(meta_scalar(&info.metadata["kind"]), "captions");
+    assert_eq!(meta_scalar(&info.metadata["language"]), "en");
 }
 
 #[tokio::test]

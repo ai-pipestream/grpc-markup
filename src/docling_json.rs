@@ -34,7 +34,7 @@ use serde_json::Value;
 
 use crate::document::v1 as doc;
 use crate::document_fold::code_language_label;
-use crate::parse::{Block, Emitter, ParseError};
+use crate::parse::{Block, Emitter, ParseError, scalar};
 use crate::proto::v1 as pb;
 use crate::{COLLECTOR, VERSION};
 
@@ -66,10 +66,10 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
 
     let mut metadata = HashMap::new();
     if let Some(name) = document.schema_name.clone() {
-        metadata.insert("schema_name".to_owned(), name);
+        metadata.insert("schema_name".to_owned(), scalar(name));
     }
     if let Some(version) = document.version.clone() {
-        metadata.insert("version".to_owned(), version);
+        metadata.insert("version".to_owned(), scalar(version));
     }
     let title = (!document.name.is_empty()).then(|| document.name.clone());
     emitter.info(title, metadata)?;

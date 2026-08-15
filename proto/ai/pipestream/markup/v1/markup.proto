@@ -104,11 +104,48 @@ message MarkupInfo {
   // as a `TextBlock` with `BLOCK_LABEL_TITLE`.
   optional string title = 3;
 
-  // Document-level metadata the format declares about itself, flattened to
-  // dotted string keys: Markdown YAML front matter, HTML `<meta>` tags,
-  // AsciiDoc attribute entries. Values that are not scalar strings are
-  // JSON-encoded. Empty when the format carries none.
-  map<string, string> metadata = 4;
+  // Document-level metadata the format declares about itself, keyed by the
+  // source's own top-level names and shaped as the source shaped it:
+  // Markdown YAML front matter arrives as its own tree; HTML `<meta>` tags
+  // (under `meta.*` keys), AsciiDoc attribute entries, WebVTT header lines
+  // and Docling JSON identity are naturally flat scalars. Empty when the
+  // format carries none.
+  map<string, MetaValue> metadata = 4;
+}
+
+// MetaValue is one metadata value, holding the shape the source declared.
+//
+// A scalar is verbatim text exactly as the author wrote it: a YAML
+// `version: 1.10` arrives as the string "1.10". This type deliberately has
+// no number arm — front-matter scalars are text, and a double would mangle
+// versions and dates — which is why this is not `google.protobuf.Struct`.
+// A YAML sequence is a list, a YAML mapping is a map, and nothing is ever
+// JSON-encoded inside the wire.
+message MetaValue {
+  // The one shape this value has.
+  oneof kind {
+    // Verbatim scalar text, exactly as the source wrote it. A YAML null is
+    // the empty string.
+    string value = 1;
+
+    // A sequence of values.
+    MetaList list = 2;
+
+    // A nested mapping.
+    MetaMap map = 3;
+  }
+}
+
+// MetaList is a sequence of metadata values, in source order.
+message MetaList {
+  // The sequence's items.
+  repeated MetaValue items = 1;
+}
+
+// MetaMap is a nested mapping of metadata values.
+message MetaMap {
+  // The mapping's entries, keyed as the source spelled them.
+  map<string, MetaValue> entries = 1;
 }
 
 // BlockLabel is the structural role of one text block.

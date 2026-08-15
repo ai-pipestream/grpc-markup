@@ -32,7 +32,7 @@
 
 use std::collections::HashMap;
 
-use crate::parse::{Block, Emitter, ParseError};
+use crate::parse::{Block, Emitter, ParseError, scalar};
 use crate::proto::v1 as pb;
 
 /// The admonition labels AsciiDoc puts before a paragraph.
@@ -53,7 +53,7 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
     let mut metadata = HashMap::new();
     for line in &lines {
         if let Some((key, value)) = attribute_entry(line) {
-            metadata.insert(key, value);
+            metadata.insert(key, scalar(value));
         }
     }
     emitter.info(None, metadata)?;

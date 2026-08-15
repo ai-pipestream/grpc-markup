@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    blocks_labelled, client, images, info, options, parse_ok, sniff_options, status, table_rows,
-    text_blocks, texts, warning,
+    blocks_labelled, client, images, info, meta_scalar, options, parse_ok, sniff_options, status,
+    table_rows, text_blocks, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -63,14 +63,14 @@ const HTML: &str = r#"<!DOCTYPE html>
 "#;
 
 #[tokio::test]
-async fn the_head_yields_title_and_dotted_meta_keys() {
+async fn the_head_yields_title_and_prefixed_meta_keys() {
     let client = client().await;
     let events = parse_ok(&client, HTML, options(pb::MarkupFormat::Html)).await;
     let info = info(&events);
     assert_eq!(info.format, pb::MarkupFormat::Html as i32);
     assert_eq!(info.title.as_deref(), Some("Streaming Markup"));
-    assert_eq!(info.metadata["meta.author"], "Ada Lovelace");
-    assert_eq!(info.metadata["meta.description"], "A fixture");
+    assert_eq!(meta_scalar(&info.metadata["meta.author"]), "Ada Lovelace");
+    assert_eq!(meta_scalar(&info.metadata["meta.description"]), "A fixture");
     assert!(
         !info.metadata.keys().any(|k| k.contains("charset")),
         "a nameless meta declares nothing"

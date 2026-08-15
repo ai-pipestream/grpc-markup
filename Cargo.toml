@@ -24,8 +24,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # with a plain DOM on top. Fragments parse natively, and the tree builder's
 # own error list is what backs WARNING_CODE_MALFORMED_STRUCTURE.
 scraper = { version = "0.27", default-features = false, features = ["errors"] }
-# BoxNote and Docling JSON are JSON formats; front-matter values that are
-# not scalar strings are re-encoded as JSON for `MarkupInfo.metadata`.
+# BoxNote and Docling JSON are JSON formats.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53.1", features = ["full"] }
