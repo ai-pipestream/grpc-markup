@@ -2,9 +2,9 @@
 
 ## 1. Goals
 
-- One block vocabulary for lightweight text markup: Markdown, WebVTT,
-  BoxNote and serialized Docling JSON in this build; HTML, AsciiDoc and
-  LaTeX reserved in the contract for later builds.
+- One block vocabulary for lightweight text markup: Markdown, HTML, WebVTT,
+  BoxNote and serialized Docling JSON in this build; AsciiDoc and LaTeX
+  reserved in the contract for later builds.
 - One process, one port, format selected on the request, sniffed when
   unspecified.
 - Typed events in document order as each fold produces them, and an
@@ -16,9 +16,12 @@
 
 ## 2. Non-goals (this build)
 
-- Parsing HTML — embedded or standalone. Raw HTML inside Markdown is
-  flattened to its text with `WARNING_CODE_EMBEDDED_HTML_FLATTENED`; a
-  standalone HTML document is `UNIMPLEMENTED` naming the format.
+- Parsing HTML embedded in another format: raw HTML inside Markdown is
+  still flattened to its text with `WARNING_CODE_EMBEDDED_HTML_FLATTENED`.
+  Standalone HTML has its own fold.
+- Rendering HTML: no browser, no CSS, no visibility computation, no form
+  extraction — the parts of docling's HTML backend that need a rendered
+  page are out of scope by construction.
 - Fetching anything: images, links and URIs stay the strings the source
   wrote.
 - Rendering, syntax highlighting, or language detection beyond what the
@@ -65,7 +68,37 @@ tree branches on format.
 `source_line` on every block comes from the offset iterator, mapped to
 1-based lines of the original file, front matter included.
 
-### 4.2 WebVTT (hand-written parser)
+### 4.2 HTML (`scraper` / html5ever)
+
+Ports the mapping decisions of docling's `html_backend.py` — which elements
+become items — without its rendering, bounding-box and form machinery.
+
+| Source construct | Wire |
+|---|---|
+| `<title>`, `<meta name content>` | `MarkupInfo.title`, `MarkupInfo.metadata` under dotted `meta.*` keys |
+| `h1`..`h6` | first `h1` is `BLOCK_LABEL_TITLE` (the Markdown fold's rule); every other heading `BLOCK_LABEL_SECTION_HEADER` at its own level |
+| `p`, loose inline text between blocks | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; a block that is entirely one `<a>` carries `hyperlink` |
+| `address`, `summary` | paragraphs with the element name as `role` |
+| `blockquote` | `BLOCK_LABEL_QUOTE` per paragraph, nesting flattened |
+| `ul` / `ol` / `li` | `BLOCK_LABEL_LIST_ITEM` with nesting depth; `enumerated` for `ol`; a marker is written only when the source numbered the list (`ol start`), as docling writes it |
+| `dl` / `dt` / `dd` | list items with the proto's `definition-term` / `definition-description` roles, descriptions one level under their term |
+| `table` (+`thead`/`tbody`/`tfoot`, `caption`, `colspan`/`rowspan`) | streamed table with the caption on `TableStart`, header cells and rows flagged, spans advancing the column index over an occupancy grid |
+| `pre` (+`language-*` class) | `BLOCK_LABEL_CODE`, text verbatim |
+| `img`, `figure`/`figcaption` | `ImageBlock` (`src`/`alt`/`title` verbatim), the figcaption as a following `CAPTION` block |
+| `details` | descended; its `summary` keeps its role |
+| `script`, `style`, `head`, `template`, form controls, media embeds | never text |
+| `hr` | nothing + `WARNING_CODE_UNMAPPED_CONSTRUCT` |
+| any element without a mapping | text flattened into the enclosing block + one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per element name |
+
+`WARNING_CODE_MALFORMED_STRUCTURE` comes only from html5ever's own
+tree-builder error list — repairs the parser actually made — with the
+missing-doctype complaint excluded, because a body-only fragment is a legal
+input. Deliberately not ported from docling: browser rendering, bounding
+boxes, form/key-value extraction, checkbox recognition, rich table cells
+(nested structure inside a cell flattens to its text), the `<inline-formula>`
+JATS-ism, and image fetching.
+
+### 4.3 WebVTT (hand-written parser)
 
 Mirrors `webvtt_backend.py` in effect: the `WEBVTT` header is mandatory
 (`INVALID_ARGUMENT` without it, empty input included), header title and
@@ -78,7 +111,7 @@ timings line, unparseable timestamps, end before start — is skipped with
 one aggregated `WARNING_CODE_MALFORMED_STRUCTURE`, which is WebVTT's own
 error recovery.
 
-### 4.3 BoxNote (ProseMirror `doc` tree)
+### 4.4 BoxNote (ProseMirror `doc` tree)
 
 Mirrors `boxnote_backend.py` node for node: headings (first level-1 is the
 title), paragraphs from styled runs (a single run keeps its safe-scheme
@@ -92,7 +125,7 @@ refused as `INVALID_ARGUMENT`, exactly as the docling backend refuses them.
 An unknown node type with nothing inside warns `UNMAPPED_CONSTRUCT` naming
 it.
 
-### 4.4 Docling JSON (field-by-field ingestion)
+### 4.5 Docling JSON (field-by-field ingestion)
 
 The vendored `document.proto` mirrors docling-core's `docling_document` v2
 schema, so ingestion is a mapping, not an interpretation: `schema_name`,
@@ -134,6 +167,10 @@ Dropped or demoted per format, deliberately:
 - **All formats:** `ParseStatus` (describes the stream, not the document);
   warnings; `evidence`. A block's `role` and `source_line` survive only as
   custom fields.
+- **HTML:** everything docling derives from a rendered page (provenance
+  boxes, visibility, forms) never existed here; nested structure inside a
+  table cell survives only as the cell's flattened text; `hr` and unmapped
+  elements survive only as warnings.
 - **Markdown:** the distinction between quote and plain text is demoted to
   a custom field (`DocItemLabel` has no quote); an unknown code language
   survives only as `code_language_raw`; image `alt` / `title` become custom
@@ -158,8 +195,8 @@ Precedence, fixed:
    JSON object whose `schema_name` mentions docling (`DOCLING_JSON`) or
    with a ProseMirror `doc` tree / legacy `atext` key (`BOXNOTE`);
    `<!DOCTYPE html` or `<html` (`HTML`); `\documentclass` or
-   `\begin{document}` (`LATEX`). A signature match for an unmapped format
-   is still a match: the refusal names what was sniffed.
+   `\begin{document}` (`LATEX`). A signature match for a format outside
+   the build is still a match: the refusal names what was sniffed.
 3. **Heuristics, Markdown and AsciiDoc only:** ATX headings, fences, inline
    links or front matter say Markdown; a `= ` document title, `== `
    sections, `:name: value` attribute entries or `----` fences say

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! A gRPC collector that maps lightweight text markup — Markdown, WebVTT,
-//! BoxNote and serialized Docling JSON in this build — into the gRParse
+//! A gRPC collector that maps lightweight text markup — Markdown, HTML,
+//! WebVTT, BoxNote and serialized Docling JSON in this build — into the gRParse
 //! Document plane, streaming typed events as each fold produces them.
 //!
 //! Design rules, in the order they constrain everything else:
@@ -21,7 +21,8 @@
 //! The modules follow the data: [`sniff`] decides which format the bytes
 //! are, [`parse`] is the shared driver that owns event ordering, warning
 //! aggregation and the fold registry, the format modules ([`markdown`],
-//! [`vtt`], [`boxnote`], [`docling_json`]) each map one input family, and
+//! [`html`], [`vtt`], [`boxnote`], [`docling_json`]) each map one input
+//! family, and
 //! [`service`] wires it all to tonic. [`document_fold`] is the optional
 //! second consumer of the same event stream: it folds a parse into one
 //! `ai.pipestream.document.v1.Document` when a caller asks for one.
@@ -29,6 +30,7 @@
 pub mod boxnote;
 pub mod docling_json;
 pub mod document_fold;
+pub mod html;
 pub mod markdown;
 pub mod metrics;
 pub mod parse;

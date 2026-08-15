@@ -1,17 +1,17 @@
 # grpc-markup
 
-gRPC collector for lightweight text markup — Markdown, WebVTT, BoxNote and
-serialized Docling JSON in this build — projecting into the gRParse Document
-data plane.
+gRPC collector for lightweight text markup — Markdown, HTML, WebVTT,
+BoxNote and serialized Docling JSON in this build — projecting into the
+gRParse Document data plane.
 
 One Rust process maps every format onto one shared block vocabulary: a
 heading is the same `TextBlock` whether it was `# Title` or a BoxNote
 heading node, a table streams as `TableStart` / `TableRow` / `TableEnd`
 whichever source wrote it, and an optional fold turns the whole parse into
 one `ai.pipestream.document.v1.Document` a coordinator can merge with
-another collector's parse of the same work. HTML, AsciiDoc and LaTeX are in
-the contract but not in this build; asking for them is `UNIMPLEMENTED` with
-the format named. It is not PipeStream core and not a Docling Python
+another collector's parse of the same work. AsciiDoc and LaTeX are in the
+contract but not in this build; asking for them is `UNIMPLEMENTED` with the
+format named. It is not PipeStream core and not a Docling Python
 wrapper.
 
 ## Build and run
@@ -62,7 +62,7 @@ a frame with neither field, is `INVALID_ARGUMENT`.
 
 | Option | Meaning |
 |---|---|
-| `format` | `MARKDOWN` / `VTT` / `BOXNOTE` / `DOCLING_JSON` (this build), or unset to sniff |
+| `format` | `MARKDOWN` / `HTML` / `VTT` / `BOXNOTE` / `DOCLING_JSON` (this build), or unset to sniff |
 | `max_document_mib` | Per-request byte cap; 0 takes the server default, over the ceiling clamps |
 | `emit_document` | Also fold the parse into one `ai.pipestream.document.v1.Document`, sent just before the trailer (see below) |
 
@@ -106,7 +106,8 @@ one warning with a count.
 | WebVTT | `WEBVTT` signature | header title and `Key: value` metadata, cues with millisecond timings, voice spans to `speaker`, styling and karaoke tags stripped, NOTE/STYLE/REGION skipped, malformed cues skipped with a warning |
 | BoxNote | JSON with a ProseMirror `doc` tree (or legacy `atext`, refused) | headings, styled paragraphs, nested/check lists, code, quotes, spanned tables, images, safe-scheme links |
 | Docling JSON | JSON whose `schema_name` names a DoclingDocument | field-by-field re-ingestion of the core arrays; typed events are a projection of the body in reading order; unconsumed keys warn per key path |
-| HTML / AsciiDoc / LaTeX | doctype/root, texture, `\documentclass` | **not in this build** — recognized so the refusal can name them |
+| HTML | `<!DOCTYPE html` or `<html` signature | whole documents and body-only fragments (html5ever); head title and `meta.*` metadata, h1-h6 ladder (first h1 = title), paragraphs, blockquotes, ul/ol/dl nesting, spanned tables with captions, `pre` code with `language-*` classes, figures and images, whole-block links; script/style/head never become text; tree-builder repairs warn as malformed structure |
+| AsciiDoc / LaTeX | texture, `\documentclass` | **not in this build** — recognized so the refusal can name them |
 
 Sniffing order is the one [`docs/design.md`](docs/design.md) fixes: an
 explicit request wins outright, then unambiguous signatures, and only then a
@@ -157,7 +158,8 @@ ingested Docling documents, whose provenance passes through untouched.
   the whole text, unlike a pull parser — and nothing is ever written. The
   image runs `--read-only` with no tmpfs.
 - **Nothing is fetched.** Image references, links and URIs stay the strings
-  the source wrote. Embedded HTML is flattened to its text, never parsed.
+  the source wrote. Embedded HTML inside Markdown is still flattened to its
+  text; standalone HTML parses without fetching a single subresource.
 - **Bounded.** The byte cap is enforced on the chunk that crosses it, while
   the client is still uploading; concurrent parses are capped and refused
   rather than queued; the response channel is small, so a client that stops
@@ -192,6 +194,7 @@ proto/ai/pipestream/document/v1/  the Document plane, vendored from gRParse
 src/sniff.rs                      format resolution and its evidence
 src/parse.rs                      the shared driver: emitter, envelope, fold registry
 src/markdown.rs                   the Markdown fold (pulldown-cmark)
+src/html.rs                       the HTML fold (html5ever via scraper)
 src/vtt.rs                        the WebVTT fold (hand-written cue parser)
 src/boxnote.rs                    the BoxNote fold (doc-tree walk)
 src/docling_json.rs               the Docling JSON fold (field-by-field ingestion)
@@ -199,6 +202,7 @@ src/document_fold.rs              the opt-in fold from events to one Document
 src/service.rs                    tonic wiring, framing, byte cap, admission control
 src/metrics.rs                    counters and the interval line
 tests/markdown.rs                 golden mappings for the Markdown fold
+tests/html.rs                     golden mappings for the HTML fold
 tests/vtt.rs                      golden mappings for the WebVTT fold
 tests/json_formats.rs             golden mappings for BoxNote and Docling JSON
 tests/document.rs                 the Document fold per format, placement, integrity

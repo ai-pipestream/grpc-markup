@@ -95,7 +95,8 @@ impl Format {
             Self::Vtt => Some(1),
             Self::Boxnote => Some(2),
             Self::DoclingJson => Some(3),
-            Self::Html | Self::Asciidoc | Self::Latex => None,
+            Self::Html => Some(4),
+            Self::Asciidoc | Self::Latex => None,
         }
     }
 }

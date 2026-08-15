@@ -198,7 +198,6 @@ async fn past_the_concurrency_limit_requests_are_refused_not_queued() {
 async fn formats_outside_this_build_are_unimplemented_and_named() {
     let client = client().await;
     for (format, name) in [
-        (pb::MarkupFormat::Html, "html"),
         (pb::MarkupFormat::Asciidoc, "asciidoc"),
         (pb::MarkupFormat::Latex, "latex"),
     ] {
@@ -217,16 +216,12 @@ async fn formats_outside_this_build_are_unimplemented_and_named() {
 }
 
 #[tokio::test]
-async fn sniffed_html_and_latex_are_unimplemented_with_the_sniff_named() {
+async fn sniffed_latex_is_unimplemented_with_the_sniff_named() {
     let client = client().await;
-    for (document, name) in [
-        ("<!DOCTYPE html>\n<html><body>x</body></html>", "html"),
-        ("<html lang=\"en\"><p>x</p></html>", "html"),
-        (
-            "\\documentclass{article}\n\\begin{document}x\\end{document}\n",
-            "latex",
-        ),
-    ] {
+    for (document, name) in [(
+        "\\documentclass{article}\n\\begin{document}x\\end{document}\n",
+        "latex",
+    )] {
         let error = parse(&client, document, sniff_options())
             .await
             .expect_err("recognized but unmapped");
@@ -328,6 +323,7 @@ async fn get_service_info_reports_identity_limits_and_formats() {
             pb::MarkupFormat::Vtt as i32,
             pb::MarkupFormat::Boxnote as i32,
             pb::MarkupFormat::DoclingJson as i32,
+            pb::MarkupFormat::Html as i32,
         ],
         "exactly the formats this build maps, unspecified excluded"
     );

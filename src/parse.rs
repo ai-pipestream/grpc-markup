@@ -20,7 +20,7 @@ use crate::document::v1 as doc;
 use crate::document_fold::DocumentFold;
 use crate::proto::v1 as pb;
 use crate::sniff::{self, Evidence, Format};
-use crate::{COLLECTOR, VERSION, boxnote, docling_json, markdown, vtt};
+use crate::{COLLECTOR, VERSION, boxnote, docling_json, html, markdown, vtt};
 
 /// Upper bound on distinct aggregated warnings kept for one parse.
 ///
@@ -48,6 +48,7 @@ pub const REGISTRY: &[(Format, FoldFn)] = &[
     (Format::Vtt, vtt::fold),
     (Format::Boxnote, boxnote::fold),
     (Format::DoclingJson, docling_json::fold),
+    (Format::Html, html::fold),
 ];
 
 /// The fold for a format, or `None` when this build does not map it.
@@ -142,7 +143,7 @@ fn decode(bytes: &[u8]) -> (String, bool) {
 
 /// The `UNIMPLEMENTED` message for a format outside this build.
 fn unmapped(format: Format, evidence: Evidence) -> String {
-    let mapped = "this build maps markdown, vtt, boxnote and docling-json";
+    let mapped = "this build maps markdown, vtt, boxnote, docling-json and html";
     match evidence {
         Evidence::Requested => {
             format!("the {} fold is not in this build; {mapped}", format.model())
@@ -532,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn the_registry_maps_exactly_the_four_formats_of_this_build() {
+    fn the_registry_maps_exactly_the_formats_of_this_build() {
         let formats: Vec<Format> = REGISTRY.iter().map(|(format, _)| *format).collect();
         assert_eq!(
             formats,
@@ -540,10 +541,11 @@ mod tests {
                 Format::Markdown,
                 Format::Vtt,
                 Format::Boxnote,
-                Format::DoclingJson
+                Format::DoclingJson,
+                Format::Html,
             ]
         );
-        for format in [Format::Html, Format::Asciidoc, Format::Latex] {
+        for format in [Format::Asciidoc, Format::Latex] {
             assert!(fold_for(format).is_none(), "{format:?}");
         }
     }
@@ -551,14 +553,14 @@ mod tests {
     #[test]
     fn an_unmapped_format_is_unsupported_and_names_itself() {
         let config = ParseConfig {
-            format: Some(Format::Html),
+            format: Some(Format::Asciidoc),
             emit_document: false,
         };
-        let Err(ParseError::Unsupported(message)) = collect(b"<html></html>", &config) else {
-            panic!("requesting html must be Unsupported");
+        let Err(ParseError::Unsupported(message)) = collect(b"= Title\n", &config) else {
+            panic!("requesting asciidoc must be Unsupported");
         };
         assert!(
-            message.contains("html fold is not in this build"),
+            message.contains("asciidoc fold is not in this build"),
             "{message}"
         );
     }
@@ -566,12 +568,13 @@ mod tests {
     #[test]
     fn a_sniffed_unmapped_format_says_it_was_sniffed() {
         let config = ParseConfig::default();
-        let Err(ParseError::Unsupported(message)) =
-            collect(b"<!DOCTYPE html><html></html>", &config)
-        else {
-            panic!("sniffed html must be Unsupported");
+        let Err(ParseError::Unsupported(message)) = collect(
+            b"\\documentclass{article}\n\\begin{document}x\\end{document}\n",
+            &config,
+        ) else {
+            panic!("sniffed latex must be Unsupported");
         };
-        assert!(message.contains("sniff as html"), "{message}");
+        assert!(message.contains("sniff as latex"), "{message}");
         assert!(message.contains("not in this build"), "{message}");
     }
 

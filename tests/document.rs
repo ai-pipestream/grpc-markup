@@ -150,6 +150,50 @@ async fn the_markdown_fold_is_a_merge_safe_fragment_with_docling_structure() {
 }
 
 #[tokio::test]
+async fn the_html_fold_is_a_merge_safe_fragment_with_docling_structure() {
+    let client = client().await;
+    let html = "<html><head><title>Named</title><meta name=\"author\" content=\"Ada\"></head>\
+                <body><h1>The Title</h1><h2>Section</h2><p>under it</p>\
+                <ul><li>one</li><li>two</li></ul>\
+                <pre class=\"language-rust\">fn x() {}</pre>\
+                <img src=\"img.png\" alt=\"a\"></body></html>";
+    let events = parse_ok(&client, html, with_document(pb::MarkupFormat::Html)).await;
+    let document = document(&events).expect("the fold was requested");
+    assert_eq!(integrity_errors(document), Vec::<String>::new());
+    assert_eq!(
+        document.name, "Named",
+        "MarkupInfo.title names the document"
+    );
+    assert_eq!(document.origin.as_ref().unwrap().mimetype, "text/html");
+    let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
+    assert_eq!(
+        meta.custom_fields["html.meta.author"].kind,
+        Some(prost_types::value::Kind::StringValue("Ada".to_owned()))
+    );
+    // The heading ladder and list group survive the fold.
+    let Some(doc::base_text_item::Item::SectionHeader(section)) = document.texts[1].item.as_ref()
+    else {
+        panic!("texts[1] is the section header");
+    };
+    assert!(!section.base.as_ref().unwrap().children.is_empty());
+    assert_eq!(document.groups.len(), 1);
+    assert_eq!(document.groups[0].label, doc::GroupLabel::List as i32);
+    let code = document
+        .texts
+        .iter()
+        .find_map(|item| match item.item.as_ref() {
+            Some(doc::base_text_item::Item::Code(code)) => Some(code),
+            _ => None,
+        })
+        .expect("a code item");
+    assert_eq!(
+        code.code_language,
+        Some(doc::CodeLanguageLabel::Rust as i32)
+    );
+    assert_eq!(document.pictures[0].image.as_ref().unwrap().uri, "img.png");
+}
+
+#[tokio::test]
 async fn the_vtt_fold_carries_cue_timings_as_track_provenance() {
     let client = client().await;
     let vtt = "WEBVTT\n\nintro\n00:00:01.000 --> 00:00:02.500\n<v Ada>Hello\n\n00:03.000 --> 00:04.000\nSecond\n";
