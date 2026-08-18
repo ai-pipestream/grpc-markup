@@ -22,22 +22,22 @@ cargo clippy --all-targets
 cargo fmt --check
 buf lint
 
-./target/release/grpc-markup   # listens on 0.0.0.0:50051
+./target/release/grpc-markup   # listens on 0.0.0.0:50065
 ```
 
 Container, with the tests gating the image and a read-only root filesystem:
 
 ```bash
 docker build -t grpc-markup .
-docker run --rm --read-only -p 50051:50051 grpc-markup
+docker run --rm --read-only -p 50065:50065 grpc-markup
 ```
 
 Poke at it with reflection, no local protos required:
 
 ```bash
-grpcurl -plaintext localhost:50051 list
-grpcurl -plaintext localhost:50051 ai.pipestream.markup.v1.MarkupParseService/GetServiceInfo
-grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
+grpcurl -plaintext localhost:50065 list
+grpcurl -plaintext localhost:50065 ai.pipestream.markup.v1.MarkupParseService/GetServiceInfo
+grpcurl -plaintext localhost:50065 grpc.health.v1.Health/Check
 ```
 
 `protoc` is required to build (the build script invokes it through
@@ -172,7 +172,7 @@ ingested Docling JSON payloads, whose provenance passes through untouched.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GRPC_MARKUP_ADDR` | `0.0.0.0:50051` | Listen address |
+| `GRPC_MARKUP_ADDR` | `0.0.0.0:50065` | Listen address |
 | `GRPC_MARKUP_WORKERS` | CPU count | Tokio worker threads |
 | `GRPC_MARKUP_BLOCKING_THREADS` | 512 | Blocking pool that runs the parsers |
 | `GRPC_MARKUP_MAX_CONCURRENT_PARSES` | 64 | Parses admitted at once; past it, `RESOURCE_EXHAUSTED` |

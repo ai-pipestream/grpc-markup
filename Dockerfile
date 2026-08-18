@@ -24,8 +24,8 @@ COPY --from=build /src/target/release/grpc-markup /usr/local/bin/grpc-markup
 # the request stream and the folds, nothing is written, and no library
 # spills. `docker run --read-only` therefore works with no tmpfs mount at all.
 USER grpcmarkup
-EXPOSE 50051
-ENV GRPC_MARKUP_ADDR=0.0.0.0:50051
+EXPOSE 50065
+ENV GRPC_MARKUP_ADDR=0.0.0.0:50065
 
 # grpc.health.v1.Health is registered, so an orchestrator probes the service
 # rather than the port. There is no HTTP endpoint and no curl in the image;
