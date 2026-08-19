@@ -287,6 +287,13 @@ async fn get_service_info_reports_identity_limits_and_formats() {
     assert_eq!(response.default_max_document_mib, 256);
     assert_eq!(response.ceiling_max_document_mib, 1024);
     assert_eq!(response.max_concurrent_parses, 64);
+    let ui = response.ui.expect("ui advertisement is set");
+    assert_eq!(ui.title, "Markup");
+    assert_eq!(ui.path, "/ui/markup");
+    assert_eq!(
+        ui.description,
+        "LaTeX, WebVTT, BoxNote, Docling JSON to a shared block vocabulary"
+    );
 }
 
 #[tokio::test]

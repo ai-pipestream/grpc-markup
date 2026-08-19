@@ -277,6 +277,12 @@ impl MarkupParseService for MarkupGrpc {
             default_max_document_mib: to_mib(self.default_max_document_bytes),
             ceiling_max_document_mib: to_mib(self.ceiling_max_document_bytes),
             max_concurrent_parses: u32::try_from(self.max_concurrent_parses).unwrap_or(u32::MAX),
+            ui: Some(pb::UiInfo {
+                title: "Markup".to_owned(),
+                path: "/ui/markup".to_owned(),
+                description: "LaTeX, WebVTT, BoxNote, Docling JSON to a shared block vocabulary"
+                    .to_owned(),
+            }),
         }))
     }
 }

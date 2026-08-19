@@ -55,6 +55,9 @@ rpc ParseMarkup(stream ParseMarkupRequest) returns (stream ParseMarkupResponse);
 rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 ```
 
+`GetServiceInfo` also carries a `ui` block (`title`, `path`, `description`)
+advertising this service's tab in the shared demo shell.
+
 **Request.** The first frame sets `options`; every frame after it carries a
 `chunk` of document bytes, concatenated in stream order. `options` twice, or
 a frame with neither field, is `INVALID_ARGUMENT`.

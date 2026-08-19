@@ -152,4 +152,20 @@ message GetServiceInfoResponse {
   // Parses this server admits at once. Requests past the limit are refused
   // with `RESOURCE_EXHAUSTED` rather than queued.
   uint32 max_concurrent_parses = 6;
+
+  // Frontend advertisement for the shared demo shell.
+  UiInfo ui = 7;
+}
+
+// Frontend advertisement. Same shape in every ai-pipestream grpc service:
+// the demo shell reads it to build its tab bar.
+message UiInfo {
+  // Tab title, e.g. "EPUB".
+  string title = 1;
+
+  // Shell mount path, e.g. "/ui/epub".
+  string path = 2;
+
+  // One line, used as the tab tooltip.
+  string description = 3;
 }
