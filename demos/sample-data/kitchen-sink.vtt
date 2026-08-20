@@ -1,0 +1,23 @@
+WEBVTT - Kitchen Sink
+Kind: captions
+Language: en
+
+NOTE This comment block
+spans two lines and is skipped
+
+STYLE
+::cue { color: lime }
+
+intro
+00:00:01.000 --> 00:00:04.000 align:start
+<v Ada>Hello <b>there</b>
+
+00:05.500 --> 00:07.250
+Never<00:00:06.000> gonna
+line two
+
+backwards
+00:00:10.000 --> 00:00:09.000
+never delivered
+
+this block has no timings line

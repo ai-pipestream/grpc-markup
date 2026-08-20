@@ -1,0 +1,63 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\newcommand{\engine}{Analytical Engine}
+\title{Streaming Markup}
+\author{Ada Lovelace}
+\date{1843}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Programs are woven like brocade.
+\end{abstract}
+
+\section{Introduction}
+
+An opening paragraph with \textbf{bold} and \emph{emphasis},
+citing \cite{menabrea1843} about the \engine.
+
+It even has $x^2$ inline math.
+
+\subsection{Detail}
+
+\begin{itemize}
+  \item first bullet
+  \item second bullet
+  \begin{enumerate}
+    \item nested one
+  \end{enumerate}
+\end{itemize}
+
+\begin{quote}
+A quoted sentence.
+\end{quote}
+
+\begin{tabular}{|l|c|}
+\hline
+Name & Role \\
+\hline
+Ada & \multicolumn{2}{c}{Analyst and lead} \\
+\hline
+\end{tabular}
+
+\begin{verbatim}
+fn main() {
+    println!("hi");
+}
+\end{verbatim}
+
+\begin{equation}
+E = mc^2 \label{eq:emc}
+\end{equation}
+
+\begin{figure}
+\includegraphics[width=\textwidth]{figures/engine.png}
+\caption{The engine}
+\end{figure}
+
+\begin{mysteryenv}
+Text inside an unknown environment survives.
+\end{mysteryenv}
+
+\end{document}

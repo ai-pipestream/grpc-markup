@@ -1,0 +1,36 @@
+:author: Ada Lovelace
+:revnumber: 1.2
+
+= Streaming Markup
+
+An opening paragraph
+wrapped across two source lines.
+
+== Blocks
+
+NOTE: Admonitions keep their text,
+not their chrome.
+
+* first bullet
+** nested bullet
+. first step
+.. nested step
+3. explicit third
+
+.Throughput
+|===
+|Name 2+|Role
+
+|Ada
+|Analyst
+|===
+
+[source,rust]
+----
+fn main() {
+    println!("hi");
+}
+----
+
+.The engine
+image::figures/engine.png[The engine, width=200]

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Streaming Markup</title>
+  <meta name="author" content="Ada Lovelace">
+  <meta name="description" content="A fixture">
+  <meta charset="utf-8">
+  <style>p { color: red }</style>
+  <script>alert("never text");</script>
+</head>
+<body>
+  <h1>Streaming <em>Markup</em></h1>
+  <p>An opening paragraph with <strong>bold</strong> and <code>inline code</code>.</p>
+  <h2>Blocks</h2>
+  <blockquote><p>A quoted sentence.</p></blockquote>
+  <ul>
+    <li>first bullet</li>
+    <li>second bullet
+      <ol start="3">
+        <li>nested three</li>
+        <li>nested four</li>
+      </ol>
+    </li>
+  </ul>
+  <dl>
+    <dt>term</dt>
+    <dd>its description</dd>
+  </dl>
+  <pre class="language-rust">fn main() {
+    println!("hi");
+}</pre>
+  <table>
+    <caption>Throughput</caption>
+    <thead>
+      <tr><th>Name</th><th colspan="2">Role</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Ada</td><td>Analyst</td><td>Lead</td></tr>
+    </tbody>
+  </table>
+  <figure>
+    <img src="figures/engine.png" alt="The engine" title="Plate 1">
+    <figcaption>The analytical engine.</figcaption>
+  </figure>
+  <p><a href="https://example.com">Docs</a></p>
+</body>
+</html>

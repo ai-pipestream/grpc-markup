@@ -1,0 +1,49 @@
+{
+  "title": "Meeting Notes",
+  "doc": {
+    "type": "doc",
+    "content": [
+      {"type": "heading", "attrs": {"level": 1},
+       "content": [{"type": "text", "text": "Meeting Notes"}]},
+      {"type": "paragraph",
+       "content": [{"type": "text", "text": "Agreed to "},
+                   {"type": "text", "text": "ship", "marks": [{"type": "strong"}]}]},
+      {"type": "heading", "attrs": {"level": 2},
+       "content": [{"type": "text", "text": "Decisions"}]},
+      {"type": "bullet_list", "content": [
+        {"type": "list_item", "content": [
+          {"type": "paragraph", "content": [{"type": "text", "text": "first"}]}]},
+        {"type": "list_item", "content": [
+          {"type": "paragraph", "content": [{"type": "text", "text": "second"}]},
+          {"type": "ordered_list", "content": [
+            {"type": "list_item", "content": [
+              {"type": "paragraph", "content": [{"type": "text", "text": "nested"}]}]}]}]}]},
+      {"type": "check_list", "content": [
+        {"type": "check_list_item", "attrs": {"checked": true}, "content": [
+          {"type": "paragraph", "content": [{"type": "text", "text": "done thing"}]}]}]},
+      {"type": "code_block", "attrs": {"language": "sql"},
+       "content": [{"type": "text", "text": "SELECT 1;"}]},
+      {"type": "blockquote", "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": "a quote"}]}]},
+      {"type": "table", "content": [
+        {"type": "table_row", "content": [
+          {"type": "table_header", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "H1"}]}]},
+          {"type": "table_header", "attrs": {"colspan": 2}, "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "H2"}]}]}]},
+        {"type": "table_row", "content": [
+          {"type": "table_cell", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "a"}]}]},
+          {"type": "table_cell", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "b"}]}]},
+          {"type": "table_cell", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "c"}]}]}]}]},
+      {"type": "image", "attrs": {"alt": "diagram", "fileName": "arch.png",
+                                  "boxSharedLink": "https://app.box.com/s/abc"}},
+      {"type": "paragraph", "content": [
+        {"type": "text", "text": "See docs",
+         "marks": [{"type": "link", "attrs": {"href": "https://example.com/docs"}}]}]},
+      {"type": "mystery_widget"}
+    ]
+  }
+}

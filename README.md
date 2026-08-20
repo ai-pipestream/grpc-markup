@@ -100,6 +100,26 @@ Warnings never fail a parse. They aggregate per (code, message) on the
 trailer, so a document with ten thousand instances of one finding produces
 one warning with a count.
 
+## Web demo
+
+[`demos/node-client`](demos/node-client) is a dependency-light node:http
+bridge (only `@grpc/grpc-js` and `@grpc/proto-loader`) plus a live viewer
+page: pick a format or let the server sniff it, upload or paste markup, and
+watch the shared block vocabulary stream back over Server-Sent Events on the
+same response that carries the upload up.
+
+```bash
+cd demos/node-client
+npm install
+npm start                              # http://127.0.0.1:8088
+UI_BASE=/ui/markup npm start           # mounted the way the demo shell does
+```
+
+The bridge honours `MARKUP_ADDR` (default `127.0.0.1:50065`), `PORT` (default
+`8088`) and `UI_BASE`. Samples for every mapped format live in
+[`demos/sample-data`](demos/sample-data); they mirror the golden fixtures the
+test suite pins as string literals.
+
 ## Format coverage
 
 | Format | Sniffed by | Mapped |
@@ -206,6 +226,8 @@ src/docling_json.rs               the Docling JSON fold (field-by-field ingestio
 src/document_fold.rs              the opt-in fold from events to one Document
 src/service.rs                    tonic wiring, framing, byte cap, admission control
 src/metrics.rs                    counters and the interval line
+demos/node-client/                the web viewer: node:http SSE bridge plus page
+demos/sample-data/                one sample per format, mirroring the test literals
 tests/markdown.rs                 golden mappings for the Markdown fold
 tests/html.rs                     golden mappings for the HTML fold
 tests/asciidoc.rs                 golden mappings for the AsciiDoc fold
