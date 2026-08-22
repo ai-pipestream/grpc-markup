@@ -13,6 +13,25 @@ another collector's parse of the same work. LaTeX is in the contract but
 not in this build; asking for it is `UNIMPLEMENTED` with the format named.
 It is not PipeStream core.
 
+```mermaid
+flowchart LR
+    client[Client] -->|"options, then chunk stream"| svc[MarkupParseService]
+    svc --> sniff["Format detection<br/>requested, signature, or heuristic"]
+    sniff -->|MARKDOWN| md[markdown fold]
+    sniff -->|HTML| html[html fold]
+    sniff -->|ASCIIDOC| adoc[asciidoc fold]
+    sniff -->|LATEX| latex[latex fold]
+    sniff -->|VTT| vtt[vtt fold]
+    sniff -->|BOXNOTE| boxnote[boxnote fold]
+    sniff -->|structured JSON| sjson[structured-json fold]
+    md & html & adoc & latex & vtt & boxnote & sjson --> vocab["shared block vocabulary:<br/>TextBlock, TableStart/Row/End, ImageBlock, Cue"]
+    vocab --> foldq{emit_document?}
+    foldq -->|yes| doc["Document fold<br/>Document event"]
+    foldq -->|no| out
+    doc --> out["ParseMarkupResponse stream:<br/>info, blocks, status"]
+    out --> client
+```
+
 ## Build and run
 
 ```bash
