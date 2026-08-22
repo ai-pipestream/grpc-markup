@@ -9,9 +9,10 @@ heading is the same `TextBlock` whether it was `# Title` or a BoxNote
 heading node, a table streams as `TableStart` / `TableRow` / `TableEnd`
 whichever source wrote it, and an optional fold turns the whole parse into
 one `ai.pipestream.document.v1.Document` a coordinator can merge with
-another collector's parse of the same work. LaTeX is in the contract but
-not in this build; asking for it is `UNIMPLEMENTED` with the format named.
-It is not PipeStream core.
+another collector's parse of the same work. All seven formats in the
+contract are mapped; asking for a format outside the registry (there is
+none today) is `UNIMPLEMENTED` with the format named. It is not PipeStream
+core.
 
 ```mermaid
 flowchart LR
