@@ -1,10 +1,10 @@
 # AGENTS.md — grpc-markup
 
-**Status: the four-format build is implemented.** `MARKDOWN`, `VTT`,
-`BOXNOTE` and `DOCLING_JSON` parse; `HTML`, `ASCIIDOC` and `LATEX` are in
-the contract, recognized by the sniff, and refused with `UNIMPLEMENTED`
-until their folds land. See `README.md` for what the server does today and
-`docs/design.md` for the mappings.
+**Status: all seven formats in the contract are implemented.** `MARKDOWN`,
+`VTT`, `BOXNOTE`, `DOCLING_JSON`, `HTML`, `ASCIIDOC` and `LATEX` all parse.
+`UNIMPLEMENTED` remains the response for any format outside the registry
+(there is none today) and for failed sniffs. See `README.md` for what the
+server does today and `docs/design.md` for the mappings.
 
 ## Read this first, in order
 
@@ -57,7 +57,7 @@ Document data plane.
 
 ## Definition of done
 
-ParseMarkup stream over a real socket, four format folds with golden
+ParseMarkup stream over a real socket, seven format folds with golden
 fixtures, framing/cap/admission tests, sniff evidence tests, Document fold
 integrity per format, buf-lint-clean proto, health+reflection, read-only
 image. `cargo fmt --check`, `cargo clippy --all-targets` (no warnings) and
