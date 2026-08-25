@@ -8,22 +8,32 @@
 //!
 //! Shape of the mapping, in DOM order:
 //!
-//! - `<title>` becomes `MarkupInfo.title` and named `<meta>` pairs become
-//!   scalar `MarkupInfo.metadata` values under `meta.*` keys.
+//! - `<title>` becomes `MarkupInfo.title` and `<meta>` pairs become scalar
+//!   `MarkupInfo.metadata` values under `meta.*` keys, keyed by `name` or,
+//!   for OpenGraph and its relatives, by `property`.
 //! - `h1`..`h6` flatten their inline markup; the first `h1` is
 //!   `BLOCK_LABEL_TITLE` (the same rule as the Markdown fold), every other
 //!   heading is `BLOCK_LABEL_SECTION_HEADER` at its own level.
 //! - Inline text between blocks buffers and flushes as one paragraph per
 //!   block boundary, whitespace collapsed; a block that is entirely one
-//!   `<a>` carries `hyperlink`. Paragraphs inside `<blockquote>` are
-//!   `BLOCK_LABEL_QUOTE`, nesting flattened.
+//!   `<a>` carries `hyperlink`, and every inline element leaves an
+//!   `InlineSpan` over the run it covers: emphasis and its siblings as
+//!   styles, every `<a href>` as a link (a `#fragment` also as a typed
+//!   cross reference), an `<abbr title>`, `<time datetime>` or
+//!   `<data value>` as the machine-readable value the text does not say.
+//!   An `id` anywhere is an anchor, on the block or on the run.
+//!   Paragraphs inside `<blockquote>` are `BLOCK_LABEL_QUOTE`, nesting
+//!   flattened.
 //! - `ul` / `ol` nest through `li`, `enumerated` for `ol`; the marker is
 //!   written out only when the source numbered the list itself (an `ol
 //!   start` attribute). `dl` maps `dt` / `dd` to list
 //!   items with the proto's own `definition-term` role vocabulary.
 //! - `table` streams with `thead` cells and `th` flagged as headers,
-//!   `rowspan` / `colspan` honored through an occupancy grid, and the
-//!   `<caption>` element on `TableStart`.
+//!   `rowspan` / `colspan` honored through an occupancy grid, the
+//!   `<caption>` element on `TableStart`, `<colgroup>` / `<col>` geometry
+//!   as the table's column specs, and each cell's own `align` / `valign`.
+//!   Nested block structure inside a cell still flattens to its text; its
+//!   emphasis and its links do not.
 //! - `pre` keeps its text verbatim as `BLOCK_LABEL_CODE` with a
 //!   `language-*` class as the declared language.
 //! - `img` becomes an `ImageBlock` (`src`, `alt`, `title` verbatim, never
@@ -44,6 +54,7 @@ use scraper::{ElementRef, Html};
 
 use crate::parse::{Block, Emitter, ParseError, scalar};
 use crate::proto::v1 as pb;
+use crate::spans::{Inline, Mark};
 
 /// Elements whose entire subtree is dropped: executable, presentational or
 /// interactive machinery whose text is not document content.
@@ -105,7 +116,10 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
             if meta.value().name() != "meta" {
                 continue;
             }
-            if let (Some(name), Some(content)) = (meta.attr("name"), meta.attr("content")) {
+            // `property` is how OpenGraph, Dublin Core and Twitter cards
+            // name themselves; requiring `name` skipped all of them.
+            let key = meta.attr("name").or_else(|| meta.attr("property"));
+            if let (Some(name), Some(content)) = (key, meta.attr("content")) {
                 let name = name.trim().to_ascii_lowercase();
                 if !name.is_empty() && !content.is_empty() {
                     metadata.insert(format!("meta.{name}"), scalar(content));
@@ -144,63 +158,70 @@ fn collapse(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Inline text being flattened toward one block, with enough link
-/// accounting to decide whether the whole block is one hyperlink.
-#[derive(Default)]
-struct Buf {
-    text: String,
-    pending_space: bool,
-    /// Destination of the first link seen.
-    url: Option<String>,
-    /// Links seen.
-    links: usize,
-    /// Depth of open links.
-    open_links: usize,
-    /// Non-whitespace text seen outside any link.
-    outside: bool,
+/// The run one inline element declares, or nothing when the element is
+/// only a container for its children.
+///
+/// This is the table the fold used to not have: every name in [`INLINE`]
+/// either names a rendering signal, carries a machine-readable value the
+/// text does not, or says nothing at all.
+fn inline_mark(element: &ElementRef<'_>, name: &str) -> Option<Mark> {
+    let attr = |key: &str| element.attr(key).map(str::trim).filter(|v| !v.is_empty());
+    let style = |style: pb::SpanStyle| Some(Mark::style(style));
+    let mut mark = match name {
+        "b" | "strong" => style(pb::SpanStyle::Bold),
+        "i" | "em" | "cite" | "dfn" | "var" => style(pb::SpanStyle::Italic),
+        "u" => style(pb::SpanStyle::Underline),
+        "ins" => Some(Mark::style(pb::SpanStyle::Insertion).with_style(pb::SpanStyle::Underline)),
+        "s" | "del" => style(pb::SpanStyle::Strikethrough),
+        "code" | "kbd" | "samp" => style(pb::SpanStyle::Code),
+        "mark" => style(pb::SpanStyle::Mark),
+        "small" => style(pb::SpanStyle::Small),
+        "sub" => style(pb::SpanStyle::Subscript),
+        "sup" => style(pb::SpanStyle::Superscript),
+        "q" => style(pb::SpanStyle::Quote),
+        // The expansion, the machine-readable timestamp and the machine
+        // value are exactly what the visible text does not say.
+        "abbr" => Some(match attr("title") {
+            Some(title) => Mark::style(pb::SpanStyle::Abbreviation).with_raw(title),
+            None => Mark::style(pb::SpanStyle::Abbreviation),
+        }),
+        "time" => attr("datetime").map(|value| Mark::default().with_raw(value)),
+        "data" => attr("value").map(|value| Mark::default().with_raw(value)),
+        _ => None,
+    };
+    // An `id` on an inline element is an anchor a fragment link resolves
+    // to, whatever else the element says.
+    if let Some(id) = attr("id") {
+        mark.get_or_insert_default().anchor_id = Some(id.to_owned());
+    }
+    mark
 }
 
-impl Buf {
-    fn push(&mut self, text: &str) {
-        if self.open_links == 0 && !text.trim().is_empty() {
-            self.outside = true;
-        }
-        for c in text.chars() {
-            if c.is_whitespace() {
-                self.pending_space = !self.text.is_empty();
-            } else {
-                if self.pending_space {
-                    self.text.push(' ');
-                    self.pending_space = false;
-                }
-                self.text.push(c);
-            }
-        }
+/// The link one `<a>` declares: its destination, its title, and the
+/// fragment it points at when the target is inside this document.
+fn link_mark(element: &ElementRef<'_>) -> Option<Mark> {
+    let href = element
+        .attr("href")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?;
+    let mut mark = Mark::link(href, element.attr("title"));
+    if let Some(fragment) = href.strip_prefix('#').filter(|f| !f.is_empty()) {
+        mark.reference = Some(fragment.to_owned());
+        mark.reference_kind = pb::ReferenceKind::CrossRef;
     }
+    if let Some(id) = element.attr("id").map(str::trim).filter(|v| !v.is_empty()) {
+        mark.anchor_id = Some(id.to_owned());
+    }
+    Some(mark)
+}
 
-    fn space(&mut self) {
-        self.pending_space = !self.text.is_empty();
-    }
-
-    fn open_link(&mut self, url: &str) {
-        if self.links == 0 {
-            self.url = Some(url.to_owned());
-        }
-        self.links += 1;
-        self.open_links += 1;
-    }
-
-    fn close_link(&mut self) {
-        self.open_links = self.open_links.saturating_sub(1);
-    }
-
-    fn hyperlink(&self) -> Option<String> {
-        if self.links == 1 && !self.outside {
-            self.url.clone()
-        } else {
-            None
-        }
-    }
+/// The anchor a block element declares, when it names one.
+fn anchor_of(element: &ElementRef<'_>) -> Option<String> {
+    element
+        .attr("id")
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 /// The walk state of one document.
@@ -209,7 +230,7 @@ struct Walk<'w, 'e> {
     title_taken: bool,
     quote_depth: u32,
     /// Inline text collected since the last block boundary.
-    buffer: Option<Buf>,
+    buffer: Option<Inline>,
 }
 
 impl Walk<'_, '_> {
@@ -326,15 +347,19 @@ impl Walk<'_, '_> {
         }
     }
 
-    /// An inline element: its text flows into the current buffer; a nested
-    /// block (invalid but common) flushes and dispatches.
+    /// An inline element: its text flows into the current buffer, and the
+    /// run it covers is recorded. A nested block (invalid but common)
+    /// flushes and dispatches.
     fn inline(&mut self, element: &ElementRef<'_>, name: &str) -> Result<(), ParseError> {
-        let link = (name == "a")
-            .then(|| element.attr("href"))
-            .flatten()
-            .map(str::to_owned);
-        if let Some(url) = link.as_deref() {
-            self.buffer.get_or_insert_default().open_link(url);
+        let link = (name == "a").then(|| link_mark(element)).flatten();
+        let mark = link.clone().or_else(|| inline_mark(element, name));
+        if let Some(mark) = mark.clone() {
+            let buffer = self.buffer.get_or_insert_default();
+            if link.is_some() {
+                buffer.open_link_mark(mark);
+            } else {
+                buffer.open(mark);
+            }
         }
         for node in element.children() {
             match node.value() {
@@ -346,20 +371,24 @@ impl Walk<'_, '_> {
                 _ => {}
             }
         }
-        if link.is_some()
+        if mark.is_some()
             && let Some(buffer) = self.buffer.as_mut()
         {
-            buffer.close_link();
+            if link.is_some() {
+                buffer.close_link();
+            } else {
+                buffer.close();
+            }
         }
         Ok(())
     }
 
     /// Flush the inline buffer as one paragraph (or quote) block.
     fn flush(&mut self) -> Result<(), ParseError> {
-        let Some(buffer) = self.buffer.take() else {
+        let Some(mut buffer) = self.buffer.take() else {
             return Ok(());
         };
-        if buffer.text.is_empty() {
+        if buffer.is_empty() {
             return Ok(());
         }
         let label = if self.quote_depth > 0 {
@@ -368,16 +397,18 @@ impl Walk<'_, '_> {
             pb::BlockLabel::Paragraph
         };
         let hyperlink = buffer.hyperlink();
+        let (text, spans) = buffer.take();
         self.emitter.text_block(Block {
             label,
-            text: buffer.text,
+            text,
             hyperlink,
+            spans,
             ..Block::default()
         })
     }
 
     fn heading(&mut self, element: &ElementRef<'_>, name: &str) -> Result<(), ParseError> {
-        let (text, hyperlink) = self.flatten(element)?;
+        let (text, spans, hyperlink) = self.flatten(element)?;
         if text.is_empty() {
             return Ok(());
         }
@@ -393,12 +424,14 @@ impl Walk<'_, '_> {
             text,
             level,
             hyperlink,
+            spans,
+            anchor_id: anchor_of(element),
             ..Block::default()
         })
     }
 
     fn paragraph(&mut self, element: &ElementRef<'_>, role: &str) -> Result<(), ParseError> {
-        let (text, hyperlink) = self.flatten(element)?;
+        let (text, spans, hyperlink) = self.flatten(element)?;
         if text.is_empty() {
             return Ok(());
         }
@@ -412,19 +445,21 @@ impl Walk<'_, '_> {
             role: role.to_owned(),
             text,
             hyperlink,
+            spans,
+            anchor_id: anchor_of(element),
             ..Block::default()
         })
     }
 
-    /// Flatten an element's inline subtree into one text, emitting the
-    /// nested blocks (images, lists, tables) it may illegally contain
-    /// before the text itself.
+    /// Flatten an element's inline subtree into one text and its runs,
+    /// emitting the nested blocks (images, lists, tables) it may illegally
+    /// contain before the text itself.
     fn flatten(
         &mut self,
         element: &ElementRef<'_>,
-    ) -> Result<(String, Option<String>), ParseError> {
+    ) -> Result<(String, Vec<pb::InlineSpan>, Option<String>), ParseError> {
         let outer = self.buffer.take();
-        self.buffer = Some(Buf::default());
+        self.buffer = Some(Inline::default());
         for node in element.children() {
             match node.value() {
                 Node::Text(text) => self.buffer.get_or_insert_default().push(text),
@@ -435,10 +470,11 @@ impl Walk<'_, '_> {
                 _ => {}
             }
         }
-        let buffer = self.buffer.take().unwrap_or_default();
+        let mut buffer = self.buffer.take().unwrap_or_default();
         self.buffer = outer;
         let hyperlink = buffer.hyperlink();
-        Ok((buffer.text, hyperlink))
+        let (text, spans) = buffer.take();
+        Ok((text, spans, hyperlink))
     }
 
     fn pre(&mut self, element: &ElementRef<'_>) -> Result<(), ParseError> {
@@ -457,6 +493,7 @@ impl Walk<'_, '_> {
             label: pb::BlockLabel::Code,
             text,
             language,
+            anchor_id: anchor_of(element),
             ..Block::default()
         })
     }
@@ -502,7 +539,8 @@ impl Walk<'_, '_> {
         marker: Option<String>,
     ) -> Result<(), ParseError> {
         let outer = self.buffer.take();
-        self.buffer = Some(Buf::default());
+        self.buffer = Some(Inline::default());
+        let anchor = anchor_of(li);
         let mut emitted = false;
         for node in li.children() {
             let child = match node.value() {
@@ -515,16 +553,16 @@ impl Walk<'_, '_> {
             };
             let name = child.value().name();
             let is_block = matches!(name, "ul" | "ol" | "dl" | "table" | "pre" | "blockquote")
-                || (name == "p" && !self.buffer.as_ref().is_none_or(|b| b.text.is_empty()));
+                || (name == "p" && !self.buffer.as_ref().is_none_or(Inline::is_empty));
             if is_block {
-                self.flush_item(ordered, depth, marker.clone(), &mut emitted)?;
+                self.flush_item(ordered, depth, marker.clone(), anchor.clone(), &mut emitted)?;
                 match name {
                     "ul" => self.list(&child, false, depth + 1)?,
                     "ol" => self.list(&child, true, depth + 1)?,
                     "dl" => self.definition_list(&child, depth + 1)?,
                     _ => self.element(&child)?,
                 }
-                self.buffer = Some(Buf::default());
+                self.buffer = Some(Inline::default());
             } else if name == "p" {
                 // The leading paragraph is the item's own text.
                 for grandchild in child.children() {
@@ -542,7 +580,7 @@ impl Walk<'_, '_> {
                 self.element(&child)?;
             }
         }
-        self.flush_item(ordered, depth, marker, &mut emitted)?;
+        self.flush_item(ordered, depth, marker, anchor, &mut emitted)?;
         self.buffer = outer;
         Ok(())
     }
@@ -553,33 +591,37 @@ impl Walk<'_, '_> {
         ordered: bool,
         depth: u32,
         marker: Option<String>,
+        anchor: Option<String>,
         emitted: &mut bool,
     ) -> Result<(), ParseError> {
-        let Some(buffer) = self.buffer.take() else {
+        let Some(mut buffer) = self.buffer.take() else {
             return Ok(());
         };
-        if buffer.text.is_empty() {
+        if buffer.is_empty() {
             return Ok(());
         }
+        let hyperlink = buffer.hyperlink();
+        let (text, spans) = buffer.take();
         if *emitted {
             // A second run of text in the same item: a further paragraph.
-            let hyperlink = buffer.hyperlink();
             return self.emitter.text_block(Block {
                 label: pb::BlockLabel::Paragraph,
-                text: buffer.text,
+                text,
                 hyperlink,
+                spans,
                 ..Block::default()
             });
         }
         *emitted = true;
-        let hyperlink = buffer.hyperlink();
         self.emitter.text_block(Block {
             label: pb::BlockLabel::ListItem,
-            text: buffer.text,
+            text,
             enumerated: ordered,
             marker,
             list_depth: Some(depth),
             hyperlink,
+            spans,
+            anchor_id: anchor,
             ..Block::default()
         })
     }
@@ -593,7 +635,7 @@ impl Walk<'_, '_> {
                 "dd" => ("definition-description", depth + 1),
                 _ => continue,
             };
-            let (text, hyperlink) = self.flatten(&child)?;
+            let (text, spans, hyperlink) = self.flatten(&child)?;
             if text.is_empty() {
                 continue;
             }
@@ -603,6 +645,8 @@ impl Walk<'_, '_> {
                 text,
                 list_depth: Some(item_depth),
                 hyperlink,
+                spans,
+                anchor_id: anchor_of(&child),
                 ..Block::default()
             })?;
         }
@@ -613,7 +657,8 @@ impl Walk<'_, '_> {
         let caption = child_element(element, "caption")
             .map(|caption| collapse(&text_of(&caption)))
             .filter(|caption| !caption.is_empty());
-        self.emitter.table_start(caption, None)?;
+        self.emitter
+            .table_start_with_columns(caption, None, column_specs(element))?;
 
         // Rows in DOM order, `thead`/`tbody`/`tfoot` unwrapped.
         let mut rows: Vec<ElementRef<'_>> = Vec::new();
@@ -665,15 +710,18 @@ impl Walk<'_, '_> {
                 }
                 let is_header = cell_name == "th" || in_head;
                 all_headers &= is_header;
+                // Nested block structure inside a cell still flattens to
+                // its text; its emphasis and its links no longer do.
+                let (text, spans) = cell_inline(&cell);
                 cells.push(pb::TableCell {
                     column_index: column,
-                    // Nested structure inside a cell flattens to its text;
-                    // this wire has no rich cells.
-                    text: collapse(&text_of(&cell)),
+                    text,
                     column_span,
                     row_span,
                     is_header,
-                    ..pb::TableCell::default()
+                    spans,
+                    align: attr_alignment(&cell, "align") as i32,
+                    valign: attr_alignment(&cell, "valign") as i32,
                 });
                 column = column.saturating_add(column_span);
             }
@@ -692,12 +740,14 @@ impl Walk<'_, '_> {
             match child.value().name() {
                 "img" => self.image(&child)?,
                 "figcaption" => {
-                    let (text, hyperlink) = self.flatten(&child)?;
+                    let (text, spans, hyperlink) = self.flatten(&child)?;
                     if !text.is_empty() {
                         self.emitter.text_block(Block {
                             label: pb::BlockLabel::Caption,
                             text,
                             hyperlink,
+                            spans,
+                            anchor_id: anchor_of(&child),
                             ..Block::default()
                         })?;
                     }
@@ -718,6 +768,111 @@ impl Walk<'_, '_> {
             return Ok(());
         }
         self.emitter.image(src, alt, title, None)
+    }
+}
+
+/// The column geometry a table's `<colgroup>` and `<col>` elements
+/// declare, expanded so index N of the result is column N.
+fn column_specs(table: &ElementRef<'_>) -> Vec<pb::ColumnSpec> {
+    let mut specs = Vec::new();
+    let columns = table
+        .child_elements()
+        .flat_map(|child| match child.value().name() {
+            "colgroup" => child.child_elements().collect::<Vec<_>>(),
+            "col" => vec![child],
+            _ => Vec::new(),
+        })
+        .filter(|column| column.value().name() == "col");
+    for column in columns {
+        let spec = pb::ColumnSpec {
+            align: attr_alignment(&column, "align") as i32,
+            valign: attr_alignment(&column, "valign") as i32,
+            width: column
+                .attr("width")
+                .map(str::trim)
+                .filter(|width| !width.is_empty())
+                .map(str::to_owned),
+        };
+        // `span` repeats one declaration across that many columns.
+        let repeat = column
+            .attr("span")
+            .and_then(|span| span.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 1024);
+        specs.extend(std::iter::repeat_n(spec, repeat));
+    }
+    specs
+}
+
+/// One alignment attribute as the wire's own vocabulary.
+fn attr_alignment(element: &ElementRef<'_>, name: &str) -> pb::Alignment {
+    match element
+        .attr(name)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("left") => pb::Alignment::Left,
+        Some("center" | "centre") => pb::Alignment::Center,
+        Some("right") => pb::Alignment::Right,
+        Some("justify") => pb::Alignment::Justify,
+        Some("top") => pb::Alignment::Top,
+        Some("middle") => pb::Alignment::Middle,
+        Some("bottom") => pb::Alignment::Bottom,
+        _ => pb::Alignment::Unspecified,
+    }
+}
+
+/// One table cell's text and the runs inside it.
+///
+/// Deliberately not [`Walk::flatten`]: a cell is flattened without emitting
+/// anything, because a block event between a `TableRow` and its `TableEnd`
+/// would break the stream's document order.
+fn cell_inline(cell: &ElementRef<'_>) -> (String, Vec<pb::InlineSpan>) {
+    let mut inline = Inline::default();
+    cell_children(cell, &mut inline);
+    let (text, spans) = inline.take();
+    (text, spans)
+}
+
+/// Walk one cell subtree into a flattener, recording the runs its inline
+/// elements declare and flattening everything else.
+fn cell_children(element: &ElementRef<'_>, inline: &mut Inline) {
+    for node in element.children() {
+        match node.value() {
+            Node::Text(text) => inline.push(text),
+            Node::Element(_) => {
+                let child = ElementRef::wrap(node).expect("an element node wraps");
+                let name = child.value().name().to_ascii_lowercase();
+                if SKIPPED.contains(&name.as_str()) {
+                    continue;
+                }
+                if name == "br" {
+                    inline.space();
+                    continue;
+                }
+                let link = (name == "a").then(|| link_mark(&child)).flatten();
+                let mark = link.clone().or_else(|| inline_mark(&child, &name));
+                match (link.is_some(), mark) {
+                    (true, Some(mark)) => inline.open_link_mark(mark),
+                    (false, Some(mark)) => inline.open(mark),
+                    (_, None) => {
+                        // A block inside a cell is a word boundary, not a
+                        // run: its text joins the cell's.
+                        inline.space();
+                        cell_children(&child, inline);
+                        inline.space();
+                        continue;
+                    }
+                }
+                cell_children(&child, inline);
+                if link.is_some() {
+                    inline.close_link();
+                } else {
+                    inline.close();
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -759,17 +914,52 @@ mod tests {
 
     #[test]
     fn the_whole_block_link_rule_matches_the_markdown_fold() {
-        let mut whole = Buf::default();
-        whole.open_link("https://example.com");
+        let mut whole = Inline::default();
+        whole.open_link("https://example.com", None);
         whole.push("Docs");
         whole.close_link();
         assert_eq!(whole.hyperlink().as_deref(), Some("https://example.com"));
 
-        let mut partial = Buf::default();
+        let mut partial = Inline::default();
         partial.push("see ");
-        partial.open_link("https://example.com");
+        partial.open_link("https://example.com", None);
         partial.push("docs");
         partial.close_link();
-        assert!(partial.hyperlink().is_none());
+        assert!(
+            partial.hyperlink().is_none(),
+            "one link plus prose is not a whole-block link"
+        );
+        let (_, spans) = partial.take();
+        assert_eq!(
+            spans.len(),
+            1,
+            "the URL still survives as a run, which is the point"
+        );
+    }
+
+    #[test]
+    fn inline_names_map_to_the_runs_they_declare() {
+        let html = Html::parse_fragment(
+            r#"<p><strong>a</strong><abbr title="HyperText">b</abbr><span id="x">c</span></p>"#,
+        );
+        let pick = |selector: &str| {
+            let selector = scraper::Selector::parse(selector).unwrap();
+            html.select(&selector).next().expect("present")
+        };
+        let strong = pick("strong");
+        assert_eq!(
+            inline_mark(&strong, "strong").unwrap().styles,
+            vec![pb::SpanStyle::Bold]
+        );
+        let abbr = pick("abbr");
+        let mark = inline_mark(&abbr, "abbr").unwrap();
+        assert_eq!(mark.styles, vec![pb::SpanStyle::Abbreviation]);
+        assert_eq!(mark.raw.as_deref(), Some("HyperText"));
+        // A `span` says nothing on its own, but an id on one is an anchor.
+        let span = pick("span");
+        assert_eq!(
+            inline_mark(&span, "span").unwrap().anchor_id.as_deref(),
+            Some("x")
+        );
     }
 }

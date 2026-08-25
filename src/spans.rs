@@ -223,12 +223,19 @@ impl Inline {
 
     /// Open a link run and count it for the whole-block link rule.
     pub fn open_link(&mut self, url: &str, title: Option<&str>) {
+        self.open_link_mark(Mark::link(url, title));
+    }
+
+    /// Open a link run described by a whole mark, so a link that also
+    /// declares an anchor or points at a fragment stays one run rather
+    /// than two overlapping ones.
+    pub fn open_link_mark(&mut self, mark: Mark) {
         if self.links == 0 {
-            self.url = Some(url.to_owned());
+            self.url.clone_from(&mark.hyperlink);
         }
         self.links += 1;
         self.open_links += 1;
-        self.open(Mark::link(url, title));
+        self.open(mark);
     }
 
     /// Close the innermost link run.

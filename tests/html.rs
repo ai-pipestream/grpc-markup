@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    blocks_labelled, client, images, info, meta_scalar, options, parse_ok, sniff_options, status,
-    table_rows, text_blocks, texts, warning,
+    blocks_labelled, client, images, info, meta_scalar, options, parse_ok, sniff_options, spanned,
+    status, styles, table_rows, table_starts, text_blocks, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -374,4 +374,190 @@ async fn empty_html_is_a_valid_empty_parse() {
     let events = parse_ok(&client, "", options(pb::MarkupFormat::Html)).await;
     assert_eq!(events.len(), 2, "info and status; HTML has no magic header");
     assert_eq!(status(&events).counts.as_ref().unwrap().text_blocks, 0);
+}
+
+// ---------------------------------------------------------- inline runs
+
+/// A fragment whose inline elements, anchors and table geometry are the
+/// point: the twenty-seven-name inline set, in-prose links, a fragment
+/// link, ids, `<colgroup>` and per-cell alignment.
+const INLINE: &str = r##"<body>
+<h2 id="méthode">La <em>méthode</em></h2>
+<p id="lede">Le <b>café</b> est <i>prêt</i> et <s>froid</s>, dit
+<a href="https://ada.example" title="Her page">Ada</a> et
+<a href="https://grace.example">Grace</a>, voir <a href="#méthode">plus bas</a>.</p>
+<p>Water is H<sub>2</sub>O, the area is r<sup>2</sup>, and
+<abbr title="HyperText Markup Language">HTML</abbr> is <mark>marked</mark>,
+<ins>added</ins>, <del>removed</del> and <small>quiet</small>, at
+<time datetime="1843-10-01">October</time>.</p>
+<table>
+  <colgroup>
+    <col align="left">
+    <col align="center" width="40%">
+    <col align="right" span="2">
+  </colgroup>
+  <tr><td>a</td><td valign="top"><b>b</b> <a href="https://c.example">c</a></td><td>d</td><td>e</td></tr>
+</table>
+</body>"##;
+
+#[tokio::test]
+async fn the_inline_element_set_leaves_runs_instead_of_bare_text() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Html)).await;
+    let paragraph = text_blocks(&events)
+        .into_iter()
+        .find(|block| block.text.starts_with("Le "))
+        .expect("the lede");
+    let styled: Vec<(String, Vec<pb::SpanStyle>)> = paragraph
+        .spans
+        .iter()
+        .filter(|span| !span.styles.is_empty())
+        .map(|span| (spanned(&paragraph.text, span), styles(span)))
+        .collect();
+    assert_eq!(
+        styled,
+        vec![
+            ("café".to_owned(), vec![pb::SpanStyle::Bold]),
+            ("prêt".to_owned(), vec![pb::SpanStyle::Italic]),
+            ("froid".to_owned(), vec![pb::SpanStyle::Strikethrough]),
+        ],
+        "the accented text does not shift the code point ranges"
+    );
+
+    let second = text_blocks(&events)
+        .into_iter()
+        .find(|block| block.text.starts_with("Water"))
+        .expect("the second paragraph");
+    let of = |wanted: pb::SpanStyle| -> Vec<String> {
+        second
+            .spans
+            .iter()
+            .filter(|span| styles(span).contains(&wanted))
+            .map(|span| spanned(&second.text, span))
+            .collect()
+    };
+    assert_eq!(of(pb::SpanStyle::Subscript), vec!["2"]);
+    assert_eq!(of(pb::SpanStyle::Superscript), vec!["2"]);
+    assert_eq!(of(pb::SpanStyle::Mark), vec!["marked"]);
+    assert_eq!(of(pb::SpanStyle::Insertion), vec!["added"]);
+    assert_eq!(of(pb::SpanStyle::Strikethrough), vec!["removed"]);
+    assert_eq!(of(pb::SpanStyle::Small), vec!["quiet"]);
+    let abbr = second
+        .spans
+        .iter()
+        .find(|span| styles(span).contains(&pb::SpanStyle::Abbreviation))
+        .expect("an abbreviation run");
+    assert_eq!(
+        abbr.raw.as_deref(),
+        Some("HyperText Markup Language"),
+        "the expansion the visible text does not carry"
+    );
+    let time = second
+        .spans
+        .iter()
+        .find(|span| spanned(&second.text, span) == "October")
+        .expect("a time run");
+    assert_eq!(time.raw.as_deref(), Some("1843-10-01"));
+}
+
+#[tokio::test]
+async fn in_prose_links_and_ids_survive_with_fragments_typed() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Html)).await;
+    let heading = blocks_labelled(&events, pb::BlockLabel::SectionHeader);
+    assert_eq!(texts(&heading), ["La méthode"]);
+    assert_eq!(
+        heading[0].anchor_id.as_deref(),
+        Some("méthode"),
+        "an id is an anchor an intra-document link can resolve to"
+    );
+
+    let paragraph = text_blocks(&events)
+        .into_iter()
+        .find(|block| block.text.starts_with("Le "))
+        .expect("the lede");
+    assert_eq!(paragraph.anchor_id.as_deref(), Some("lede"));
+    assert!(paragraph.hyperlink.is_none(), "three links is not one link");
+    let links: Vec<(String, String)> = paragraph
+        .spans
+        .iter()
+        .filter_map(|span| Some((spanned(&paragraph.text, span), span.hyperlink.clone()?)))
+        .collect();
+    assert_eq!(
+        links,
+        vec![
+            ("Ada".to_owned(), "https://ada.example".to_owned()),
+            ("Grace".to_owned(), "https://grace.example".to_owned()),
+            ("plus bas".to_owned(), "#méthode".to_owned()),
+        ]
+    );
+    let fragment = paragraph
+        .spans
+        .iter()
+        .find(|span| span.hyperlink.as_deref() == Some("#méthode"))
+        .expect("the fragment link");
+    assert_eq!(fragment.reference.as_deref(), Some("méthode"));
+    assert_eq!(
+        fragment.reference_kind,
+        pb::ReferenceKind::CrossRef as i32,
+        "a same-document link is a cross reference, not only a URL"
+    );
+    let titled = paragraph
+        .spans
+        .iter()
+        .find(|span| span.hyperlink.as_deref() == Some("https://ada.example"))
+        .expect("the first link");
+    assert_eq!(titled.link_title.as_deref(), Some("Her page"));
+}
+
+#[tokio::test]
+async fn colgroup_geometry_and_cell_alignment_reach_the_wire() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Html)).await;
+    let start = table_starts(&events)[0];
+    assert_eq!(
+        start
+            .columns
+            .iter()
+            .map(|column| column.align)
+            .collect::<Vec<_>>(),
+        vec![
+            pb::Alignment::Left as i32,
+            pb::Alignment::Center as i32,
+            pb::Alignment::Right as i32,
+            pb::Alignment::Right as i32,
+        ],
+        "a col span repeats its declaration across the columns it covers"
+    );
+    assert_eq!(start.columns[1].width.as_deref(), Some("40%"));
+
+    let row = table_rows(&events)[0];
+    assert_eq!(row.cells[1].valign, pb::Alignment::Top as i32);
+    assert_eq!(row.cells[1].text, "b c");
+    assert_eq!(
+        styles(&row.cells[1].spans[0]),
+        vec![pb::SpanStyle::Bold],
+        "a cell's own emphasis is no longer flattened away"
+    );
+    assert_eq!(
+        row.cells[1].spans[1].hyperlink.as_deref(),
+        Some("https://c.example")
+    );
+}
+
+#[tokio::test]
+async fn open_graph_meta_tags_are_no_longer_skipped() {
+    let client = client().await;
+    let document = r#"<html><head>
+      <meta property="og:title" content="The Engine">
+      <meta name="author" content="Ada">
+    </head><body><p>x</p></body></html>"#;
+    let events = parse_ok(&client, document, options(pb::MarkupFormat::Html)).await;
+    let metadata = &info(&events).metadata;
+    assert_eq!(
+        meta_scalar(&metadata["meta.og:title"]),
+        "The Engine",
+        "a property-named meta tag is metadata too"
+    );
+    assert_eq!(meta_scalar(&metadata["meta.author"]), "Ada");
 }

@@ -116,6 +116,10 @@ enum SpanStyle {
 
   // A quoted run inside a larger text: HTML `q`.
   SPAN_STYLE_QUOTE = 13;
+
+  // Set smaller than the surrounding text: HTML `small`. Distinct from
+  // `SPAN_STYLE_SMALL_CAPS`, which is a letterform and not a size.
+  SPAN_STYLE_SMALL = 14;
 }
 
 // ReferenceKind names what an `InlineSpan.reference` points at.

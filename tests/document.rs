@@ -544,3 +544,47 @@ async fn front_matter_lands_in_the_document_metadata_slots() {
         Some("CC-BY-4.0")
     );
 }
+
+#[tokio::test]
+async fn html_meta_tags_land_in_the_typed_list_not_in_a_free_form_map() {
+    let client = client().await;
+    let document_html = r#"<html><head>
+      <title>The Engine</title>
+      <meta property="og:title" content="The Engine">
+      <meta name="author" content="Ada Lovelace">
+      <meta name="keywords" content="engine, looms">
+    </head><body><p id="lede">Body.</p></body></html>"#;
+    let events = parse_ok(
+        &client,
+        document_html,
+        with_document(pb::MarkupFormat::Html),
+    )
+    .await;
+    let document = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(document).is_empty());
+    assert_eq!(
+        document
+            .meta_tags
+            .iter()
+            .map(|tag| (tag.name.as_str(), tag.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("author", "Ada Lovelace"),
+            ("keywords", "engine, looms"),
+            ("og:title", "The Engine"),
+        ]
+    );
+    let meta = document.source_meta.as_ref().expect("declared metadata");
+    assert_eq!(meta.title.as_deref(), Some("The Engine"));
+    assert_eq!(meta.authors, vec!["Ada Lovelace"]);
+    assert_eq!(meta.keywords, vec!["engine", "looms"]);
+    assert!(
+        meta.extra.is_empty(),
+        "a meta tag has one home, and it is the typed one: {:?}",
+        meta.extra
+    );
+    assert!(
+        document.anchors.iter().any(|anchor| anchor.name == "lede"),
+        "an element id is an anchor"
+    );
+}

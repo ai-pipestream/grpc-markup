@@ -222,6 +222,7 @@ impl DocumentFold {
             ..doc::DocumentOrigin::default()
         });
         self.document.source_meta = source_meta(info.title.as_deref(), &info.metadata);
+        self.document.meta_tags = meta_tags(&info.metadata);
         if !info.metadata.is_empty()
             && let Some(body) = self.document.body.as_mut()
         {
@@ -1193,7 +1194,11 @@ fn source_meta(
                 continue;
             }
             _ => {
-                if let Some(text) = scalar_of(value) {
+                // A meta tag already has a typed home in `meta_tags`; it
+                // does not need a second one here.
+                if !key.starts_with("meta.")
+                    && let Some(text) = scalar_of(value)
+                {
                     meta.extra.insert(key.clone(), text);
                 }
                 continue;
@@ -1204,6 +1209,27 @@ fn source_meta(
         }
     }
     (meta != doc::DocumentMeta::default()).then_some(meta)
+}
+
+/// The page-level meta tags a web source declares.
+///
+/// `meta.<name>` is the HTML fold's own namespace for a `<meta>` element,
+/// stated in the contract's comment on `MarkupInfo.metadata`, so a key in
+/// it is a meta tag and belongs in the typed list rather than in a
+/// free-form map.
+fn meta_tags(metadata: &HashMap<String, pb::MetaValue>) -> Vec<doc::MetaTag> {
+    metadata
+        .iter()
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let name = key.strip_prefix("meta.").filter(|name| !name.is_empty())?;
+            Some(doc::MetaTag {
+                name: name.to_owned(),
+                content: scalar_of(value)?,
+            })
+        })
+        .collect()
 }
 
 /// One metadata value as verbatim text, or nothing when it is a tree.
