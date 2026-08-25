@@ -542,7 +542,7 @@ impl DocumentFold {
             }),
             label: doc::DocItemLabel::Picture as i32,
             image: Some(doc::ImageRef {
-                mimetype: String::new(),
+                mimetype: image_mimetype(&image.src).to_owned(),
                 dpi: 0,
                 size: None,
                 uri: image.src.clone(),
@@ -720,6 +720,47 @@ const fn model_name(format: pb::MarkupFormat) -> &'static str {
         pb::MarkupFormat::Vtt => "vtt",
         pb::MarkupFormat::Boxnote => "boxnote",
         pb::MarkupFormat::DoclingJson => "docling-json",
+    }
+}
+
+/// Media type of an image reference, derived from its source. An empty
+/// mimetype is not a valid media type and breaks canonical-JSON consumers,
+/// so unknown sources carry the generic binary type instead of nothing.
+fn image_mimetype(src: &str) -> &'static str {
+    let path = src
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(src)
+        .rsplit('/')
+        .next()
+        .unwrap_or(src);
+    let extension = path.rsplit('.').next().unwrap_or("");
+    if let Some(data_type) = src
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split([';', ',']).next())
+        && !data_type.is_empty()
+    {
+        return match data_type {
+            "image/png" => "image/png",
+            "image/jpeg" => "image/jpeg",
+            "image/gif" => "image/gif",
+            "image/webp" => "image/webp",
+            "image/svg+xml" => "image/svg+xml",
+            "image/tiff" => "image/tiff",
+            "image/bmp" => "image/bmp",
+            _ => "application/octet-stream",
+        };
+    }
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "tif" | "tiff" => "image/tiff",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        _ => "application/octet-stream",
     }
 }
 
@@ -1032,6 +1073,27 @@ fn text_base(item: &doc::base_text_item::Item) -> Option<&doc::TextItemBase> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_mimetype_derives_from_the_source() {
+        assert_eq!(image_mimetype("figures/engine.png"), "image/png");
+        assert_eq!(
+            image_mimetype("https://a.example/x/y.JPEG?w=200#frag"),
+            "image/jpeg"
+        );
+        assert_eq!(image_mimetype("chart.svg"), "image/svg+xml");
+        assert_eq!(image_mimetype("data:image/webp;base64,AAAA"), "image/webp");
+        assert_eq!(
+            image_mimetype("data:image/x-exotic,payload"),
+            "application/octet-stream"
+        );
+        // No recognizable extension: a generic binary type, never empty.
+        assert_eq!(
+            image_mimetype("https://cdn.example/asset/12345"),
+            "application/octet-stream"
+        );
+        assert_eq!(image_mimetype(""), "application/octet-stream");
+    }
 
     fn block(label: pb::BlockLabel, text: &str) -> pb::parse_markup_response::Event {
         pb::parse_markup_response::Event::TextBlock(pb::TextBlock {
