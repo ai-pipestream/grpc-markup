@@ -6,7 +6,7 @@ mod common;
 
 use common::{
     blocks_labelled, client, images, info, meta_scalar, options, parse_ok, sniff_options, status,
-    table_rows, texts, warning,
+    styles, table_rows, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -143,7 +143,7 @@ async fn lists_nest_by_marker_depth_with_markers_as_written() {
 }
 
 #[tokio::test]
-async fn tables_take_their_caption_flag_the_first_row_and_strip_cell_specs() {
+async fn tables_take_their_caption_flag_the_first_row_and_honour_cell_specs() {
     let client = client().await;
     let events = parse_ok(&client, ASCIIDOC, options(pb::MarkupFormat::Asciidoc)).await;
     let start = events
@@ -158,11 +158,13 @@ async fn tables_take_their_caption_flag_the_first_row_and_strip_cell_specs() {
     let rows = table_rows(&events);
     assert_eq!(rows.len(), 3, "one header row, two single-cell body rows");
     assert!(rows[0].is_header);
-    assert_eq!(
-        rows[0].cells[0].text, "Name",
-        "the 2+ specifier is stripped"
-    );
+    assert_eq!(rows[0].cells[0].text, "Name");
+    assert_eq!(rows[0].cells[0].column_span, 1);
     assert_eq!(rows[0].cells[1].text, "Role");
+    assert_eq!(
+        rows[0].cells[1].column_span, 2,
+        "the 2+ specifier belongs to the cell it opens, and is now honoured"
+    );
     assert!(!rows[1].is_header);
     assert_eq!(rows[1].cells[0].text, "Ada");
     assert_eq!(rows[2].cells[0].text, "Analyst");
@@ -230,4 +232,93 @@ async fn empty_asciidoc_is_a_valid_empty_parse() {
     let events = parse_ok(&client, "", options(pb::MarkupFormat::Asciidoc)).await;
     assert_eq!(events.len(), 2);
     assert_eq!(status(&events).counts.as_ref().unwrap().text_blocks, 0);
+}
+
+/// A table whose every cell specifier says something: spans, a duplication
+/// factor, alignments, a header style letter and an emphasis style letter.
+const SPECS: &str = "\
+= Specs
+
+|===
+2+^|Spanning head
+
+|Ada 2.2+>.^|Deep h|Head
+|left 2*^|both centered |plain
+|s|strong e|emphatic
+|===
+";
+
+#[tokio::test]
+async fn every_part_of_a_cell_specifier_lands_on_the_cell() {
+    let client = client().await;
+    let events = parse_ok(&client, SPECS, options(pb::MarkupFormat::Asciidoc)).await;
+    let rows = table_rows(&events);
+
+    // A row that opens with a bare specifier has no phantom empty cell.
+    assert_eq!(rows[0].cells.len(), 1, "{:?}", rows[0].cells);
+    assert_eq!(rows[0].cells[0].text, "Spanning head");
+    assert_eq!(rows[0].cells[0].column_span, 2);
+    assert_eq!(rows[0].cells[0].align, pb::Alignment::Center as i32);
+
+    // Spans, both alignments, and a style letter that means "header".
+    let deep = &rows[1].cells[1];
+    assert_eq!(deep.text, "Deep");
+    assert_eq!((deep.column_span, deep.row_span), (2, 2));
+    assert_eq!(deep.align, pb::Alignment::Right as i32);
+    assert_eq!(deep.valign, pb::Alignment::Middle as i32);
+    assert_eq!(rows[1].cells[2].text, "Head");
+    assert!(
+        rows[1].cells[2].is_header,
+        "an h style letter marks the cell a header"
+    );
+    assert_eq!(
+        rows[1].cells[1].column_index, 1,
+        "column indexes advance past the spans before them"
+    );
+    assert_eq!(rows[1].cells[2].column_index, 3);
+
+    // A duplication factor applies one specifier to the next two cells.
+    let second = &rows[2];
+    assert_eq!(second.cells[1].align, pb::Alignment::Center as i32);
+    assert_eq!(second.cells[2].align, pb::Alignment::Center as i32);
+    assert_eq!(second.cells[0].align, pb::Alignment::Unspecified as i32);
+
+    // Style letters that mean emphasis put a run over the cell text.
+    let styled = &rows[3];
+    assert_eq!(styled.cells[1].text, "strong");
+    assert_eq!(styles(&styled.cells[1].spans[0]), vec![pb::SpanStyle::Bold]);
+    assert_eq!(styled.cells[2].text, "emphatic");
+    assert_eq!(
+        styles(&styled.cells[2].spans[0]),
+        vec![pb::SpanStyle::Italic]
+    );
+}
+
+#[tokio::test]
+async fn admonitions_keep_which_of_the_five_they_are() {
+    let client = client().await;
+    let document = "\
+= Admonitions
+
+NOTE: A note.
+
+WARNING: A warning.
+
+CAUTION: Take care.
+";
+    let events = parse_ok(&client, document, options(pb::MarkupFormat::Asciidoc)).await;
+    let paragraphs = blocks_labelled(&events, pb::BlockLabel::Paragraph);
+    assert_eq!(
+        paragraphs
+            .iter()
+            .map(|block| (block.role.as_str(), block.admonition))
+            .collect::<Vec<_>>(),
+        vec![
+            ("admonition", pb::AdmonitionKind::Note as i32),
+            ("admonition", pb::AdmonitionKind::Warning as i32),
+            ("admonition", pb::AdmonitionKind::Caution as i32),
+        ],
+        "the marker was matched to be stripped; the kind now survives it"
+    );
+    assert_eq!(texts(&paragraphs), ["A note.", "A warning.", "Take care."]);
 }

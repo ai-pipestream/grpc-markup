@@ -15,14 +15,20 @@
 //!   `BLOCK_LABEL_SECTION_HEADER` at marker length minus one.
 //! - Consecutive non-empty lines join into one paragraph, flushed at a
 //!   blank line. A paragraph opening with `NOTE:` / `TIP:` / `IMPORTANT:`
-//!   / `WARNING:` / `CAUTION:` carries `role: "admonition"`.
+//!   / `WARNING:` / `CAUTION:` carries `role: "admonition"` and the
+//!   `admonition` kind that marker named.
 //! - `*` and `.` list items nest by marker repetition (`**` is depth 2);
 //!   `-` and `1.` are depth-1 items; `.`-markers and numbered markers are
 //!   `enumerated`; the marker rides verbatim.
-//! - `|===` delimits a table; each `|` line inside is one row, cells split
-//!   on `|` with AsciiDoc cell specifiers (`2+`, `^.^h`) stripped —
-//!   spans are not expanded. The first row is the
-//!   header row. A `.Caption` line before the table lands on `TableStart`.
+//! - `|===` delimits a table; each row is a line whose cells are split on
+//!   `|`. A cell specifier (`2+`, `3*`, `^.^h`) sits before the `|` that
+//!   opens its cell and is honoured rather than deleted: span factors
+//!   become `column_span` / `row_span`, alignments become the cell's
+//!   `align` and `valign`, a duplication factor applies one specifier to
+//!   the cells that follow, an `h` marks the cell a header and the
+//!   emphasis style letters put a run over the cell text. The first row is
+//!   the header row. A `.Caption` line before the table lands on
+//!   `TableStart`.
 //! - `image::path[alt, k=v]` is an `ImageBlock`, the path verbatim (no
 //!   `file:` URI mangling — this service never dereferences); a pending
 //!   `.Caption` follows it as a `CAPTION` block.
@@ -33,9 +39,18 @@ use std::collections::HashMap;
 
 use crate::parse::{Block, Emitter, ParseError, scalar};
 use crate::proto::v1 as pb;
+use crate::spans::{Inline, Mark};
 
-/// The admonition labels AsciiDoc puts before a paragraph.
-const ADMONITIONS: &[&str] = &["NOTE:", "TIP:", "IMPORTANT:", "WARNING:", "CAUTION:"];
+/// The admonition labels AsciiDoc puts before a paragraph, each with the
+/// kind it declares. The parser matched these and then kept only the fact
+/// that one of them had matched.
+const ADMONITIONS: &[(&str, pb::AdmonitionKind)] = &[
+    ("NOTE:", pb::AdmonitionKind::Note),
+    ("TIP:", pb::AdmonitionKind::Tip),
+    ("IMPORTANT:", pb::AdmonitionKind::Important),
+    ("WARNING:", pb::AdmonitionKind::Warning),
+    ("CAUTION:", pb::AdmonitionKind::Caution),
+];
 
 /// Map one AsciiDoc document. Empty input is a valid empty parse.
 ///
@@ -170,65 +185,167 @@ fn source_attribute(line: &str) -> Option<Option<String>> {
     )
 }
 
+/// One table row: the specifier of its first cell, when the line opens
+/// with one, and everything after the `|` that starts that cell.
+///
+/// `|Name |Role` is a row with no leading specifier; `2+^|Spanning` is a
+/// row whose first cell spans two columns. A line with no `|` at all is
+/// layout between rows, not a row.
+fn table_row(line: &str) -> Option<(Option<CellSpec>, &str)> {
+    let pipe = line.find('|')?;
+    let head = line[..pipe].trim();
+    let lead = if head.is_empty() {
+        None
+    } else {
+        Some(parse_cell_spec(head)?)
+    };
+    Some((lead, &line[pipe + 1..]))
+}
+
 /// True for a listing-block fence: a line of four or more dashes.
 fn is_listing_fence(line: &str) -> bool {
     let trimmed = line.trim_end();
     trimmed.len() >= 4 && trimmed.bytes().all(|b| b == b'-')
 }
 
-/// Strip a trailing AsciiDoc cell specifier (`2+`, `^.^h`, `3*`) from the
-/// text before a `|`, the way docling's `_CELL_SPEC` regex strips it: only
-/// when it stands alone as the last whitespace-separated token.
-fn strip_cell_spec(text: &str) -> &str {
+/// One AsciiDoc cell specifier, parsed rather than deleted.
+///
+/// The grammar the fold already recognized: a duplication factor (`3*`), a
+/// span factor (`2+`, `2.3+` for columns and rows), an alignment (`<`, `^`,
+/// `>`, and the same three after a `.` for the vertical one) and one style
+/// letter. Every part of it lands on the cell now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellSpec {
+    /// How many following cells this specifier applies to.
+    repeat: u32,
+    column_span: u32,
+    row_span: u32,
+    align: pb::Alignment,
+    valign: pb::Alignment,
+    /// The style letter, when the specifier names one.
+    style: Option<char>,
+}
+
+impl Default for CellSpec {
+    fn default() -> Self {
+        Self {
+            repeat: 1,
+            column_span: 1,
+            row_span: 1,
+            align: pb::Alignment::Unspecified,
+            valign: pb::Alignment::Unspecified,
+            style: None,
+        }
+    }
+}
+
+impl CellSpec {
+    /// True when the style letter marks the cell as a header.
+    const fn is_header(self) -> bool {
+        matches!(self.style, Some('h'))
+    }
+
+    /// The run the style letter puts over the whole cell text, if any.
+    fn style_mark(self) -> Option<Mark> {
+        match self.style? {
+            'e' => Some(Mark::style(pb::SpanStyle::Italic)),
+            's' => Some(Mark::style(pb::SpanStyle::Bold)),
+            'm' | 'l' => Some(Mark::style(pb::SpanStyle::Code)),
+            _ => None,
+        }
+    }
+}
+
+/// Split a row fragment into the text of the cell it closes and the
+/// specifier of the cell it opens.
+///
+/// A specifier sits immediately before the `|` that starts its cell, which
+/// is why it is found at the *end* of the previous fragment: only when it
+/// stands alone as the last whitespace-separated token.
+fn split_cell_spec(text: &str) -> (&str, Option<CellSpec>) {
     let trimmed = text.trim_end();
     let token_start = trimmed
         .rfind(char::is_whitespace)
         .map_or(0, |space| space + 1);
     let token = &trimmed[token_start..];
-    if !token.is_empty() && is_cell_spec(token) {
-        trimmed[..token_start].trim_end()
-    } else {
-        trimmed
+    match (!token.is_empty())
+        .then(|| parse_cell_spec(token))
+        .flatten()
+    {
+        Some(spec) => (trimmed[..token_start].trim_end(), Some(spec)),
+        None => (trimmed, None),
     }
 }
 
-/// The cell-specifier grammar: span factors (`3*`, `2+`), alignment
-/// (`<`, `^`, `>`, optionally `.` + one more), one style letter.
-fn is_cell_spec(token: &str) -> bool {
+/// The cell-specifier grammar, or `None` when the token is ordinary text.
+fn parse_cell_spec(token: &str) -> Option<CellSpec> {
+    let mut spec = CellSpec::default();
     let mut rest = token;
+    let mut saw_factor = false;
     // (digits[.digits][*+])*
     loop {
         let digits = rest.chars().take_while(char::is_ascii_digit).count();
         if digits == 0 {
             break;
         }
+        let first: u32 = rest[..digits].parse().ok()?;
+        let mut second = None;
         let mut after = &rest[digits..];
         if let Some(stripped) = after.strip_prefix('.') {
             let fraction = stripped.chars().take_while(char::is_ascii_digit).count();
             if fraction == 0 {
-                return false;
+                return None;
             }
+            second = stripped[..fraction].parse::<u32>().ok();
             after = &stripped[fraction..];
         }
-        if let Some(stripped) = after.strip_prefix(['*', '+']) {
-            rest = stripped;
-        } else {
-            return false;
+        match after.chars().next() {
+            // `2+` spans columns; `2.3+` spans columns and rows.
+            Some('+') => {
+                spec.column_span = first.max(1);
+                spec.row_span = second.unwrap_or(1).max(1);
+            }
+            // `3*` applies this specifier to the next three cells.
+            Some('*') => spec.repeat = first.max(1),
+            _ => return None,
         }
+        saw_factor = true;
+        rest = &after[1..];
     }
-    if let Some(stripped) = rest.strip_prefix(['<', '^', '>']) {
-        rest = stripped;
+    let horizontal = |c: char| match c {
+        '<' => pb::Alignment::Left,
+        '^' => pb::Alignment::Center,
+        _ => pb::Alignment::Right,
+    };
+    let mut saw_alignment = false;
+    if let Some(first) = rest.chars().next().filter(|c| "<^>".contains(*c)) {
+        spec.align = horizontal(first);
+        saw_alignment = true;
+        rest = &rest[1..];
     }
     if let Some(stripped) = rest.strip_prefix('.') {
-        let Some(stripped) = stripped.strip_prefix(['<', '^', '>']) else {
-            return false;
+        let vertical = stripped.chars().next().filter(|c| "<^>".contains(*c))?;
+        spec.valign = match vertical {
+            '<' => pb::Alignment::Top,
+            '^' => pb::Alignment::Middle,
+            _ => pb::Alignment::Bottom,
         };
-        rest = stripped;
+        saw_alignment = true;
+        rest = &stripped[1..];
     }
-    if let Some(stripped) = rest.strip_prefix(['a', 'd', 'e', 'h', 'l', 'm', 's']) {
-        rest = stripped;
+    let mut saw_style = false;
+    if let Some(style) = rest.chars().next().filter(|c| "adehlms".contains(*c)) {
+        spec.style = Some(style);
+        saw_style = true;
+        rest = &rest[1..];
     }
-    rest.is_empty()
+    // The token has to be a specifier and nothing else, and it has to say
+    // something: a bare `h|` is the header-cell style, but a token that
+    // matched no part of the grammar is prose.
+    if !rest.is_empty() || !(saw_factor || saw_alignment || saw_style) {
+        return None;
+    }
+    Some(spec)
 }
 
 /// An open listing block being captured.
@@ -295,20 +412,9 @@ impl Walk<'_, '_> {
             return Ok(());
         }
         if self.in_table {
-            if let Some(cells) = line.strip_prefix('|') {
-                let cells: Vec<pb::TableCell> = cells
-                    .split('|')
-                    .enumerate()
-                    .map(|(column, cell)| pb::TableCell {
-                        column_index: u32::try_from(column).unwrap_or(u32::MAX),
-                        text: strip_cell_spec(cell).trim().to_owned(),
-                        column_span: 1,
-                        row_span: 1,
-                        is_header: self.table_row_index == 0,
-                        ..pb::TableCell::default()
-                    })
-                    .collect();
+            if let Some((lead, row)) = table_row(line) {
                 let is_header = self.table_row_index == 0;
+                let cells = self.row_cells(lead, row, is_header);
                 self.table_row_index += 1;
                 return self.emitter.table_row(is_header, cells);
             }
@@ -409,6 +515,57 @@ impl Walk<'_, '_> {
         Ok(())
     }
 
+    /// One `|`-delimited row as cells, with each cell's specifier honoured
+    /// rather than deleted.
+    ///
+    /// A specifier sits before the `|` that opens its cell, so it is found
+    /// at the end of the fragment that closes the cell before it; the one
+    /// exception is a row that opens `|2+|`, where the first fragment is
+    /// the specifier itself and no cell precedes it.
+    fn row_cells(&self, lead: Option<CellSpec>, row: &str, header_row: bool) -> Vec<pb::TableCell> {
+        let mut cells = Vec::new();
+        let mut column = 0u32;
+        let mut pending: Option<(CellSpec, u32)> = lead.map(|spec| (spec, spec.repeat));
+        for fragment in row.split('|') {
+            let (text, next) = split_cell_spec(fragment);
+            let spec = match pending.as_mut() {
+                Some((spec, left)) => {
+                    let spec = *spec;
+                    *left -= 1;
+                    if *left == 0 {
+                        pending = None;
+                    }
+                    spec
+                }
+                None => CellSpec::default(),
+            };
+            let mut inline = Inline::default();
+            if let Some(mark) = spec.style_mark() {
+                inline.open(mark);
+                inline.push(text.trim());
+                inline.close();
+            } else {
+                inline.push(text.trim());
+            }
+            let (text, spans) = inline.take();
+            cells.push(pb::TableCell {
+                column_index: column,
+                text,
+                column_span: spec.column_span,
+                row_span: spec.row_span,
+                is_header: header_row || spec.is_header(),
+                spans,
+                align: spec.align as i32,
+                valign: spec.valign as i32,
+            });
+            column = column.saturating_add(spec.column_span);
+            if let Some(spec) = next {
+                pending = Some((spec, spec.repeat));
+            }
+        }
+        cells
+    }
+
     /// Emit the accumulated paragraph, admonition-labelled when its first
     /// line opens with one of the AsciiDoc admonition markers.
     fn flush_paragraph(&mut self) -> Result<(), ParseError> {
@@ -417,8 +574,15 @@ impl Walk<'_, '_> {
         }
         let mut text = std::mem::take(&mut self.paragraph).join(" ");
         let mut role = String::new();
-        if let Some(marker) = ADMONITIONS.iter().find(|marker| text.starts_with(*marker)) {
+        let mut admonition = None;
+        if let Some((marker, kind)) = ADMONITIONS
+            .iter()
+            .find(|(marker, _)| text.starts_with(*marker))
+        {
             role = "admonition".to_owned();
+            // Which of the five it was: matched here since the fold was
+            // written, and now kept.
+            admonition = Some(*kind);
             text = text[marker.len()..].trim_start().to_owned();
         }
         if text.is_empty() {
@@ -429,6 +593,7 @@ impl Walk<'_, '_> {
             role,
             text,
             source_line: Some(self.paragraph_line),
+            admonition,
             ..Block::default()
         })
     }
@@ -550,12 +715,48 @@ mod tests {
     }
 
     #[test]
-    fn cell_specs_strip_only_when_they_stand_alone() {
-        assert_eq!(strip_cell_spec("value 2+"), "value");
-        assert_eq!(strip_cell_spec("value ^.^h"), "value");
-        assert_eq!(strip_cell_spec("Eth"), "Eth", "prose survives");
-        assert_eq!(strip_cell_spec("3*"), "");
-        assert_eq!(strip_cell_spec("plain"), "plain");
+    fn cell_specs_are_parsed_where_they_used_to_be_deleted() {
+        let (text, spec) = split_cell_spec("value 2+");
+        assert_eq!(text, "value");
+        let spec = spec.expect("a span factor");
+        assert_eq!(spec.column_span, 2, "the factor lands on the cell");
+        assert_eq!(spec.row_span, 1);
+
+        let (text, spec) = split_cell_spec("value 2.3+^.^h");
+        assert_eq!(text, "value");
+        let spec = spec.expect("spans, alignment and a style letter");
+        assert_eq!((spec.column_span, spec.row_span), (2, 3));
+        assert_eq!(spec.align, pb::Alignment::Center);
+        assert_eq!(spec.valign, pb::Alignment::Middle);
+        assert!(spec.is_header());
+
+        let (text, spec) = split_cell_spec("3*");
+        assert_eq!(text, "");
+        assert_eq!(spec.expect("a duplication factor").repeat, 3);
+    }
+
+    #[test]
+    fn prose_is_not_mistaken_for_a_specifier() {
+        for prose in ["Eth", "plain", "value 12", "value >x"] {
+            let (text, spec) = split_cell_spec(prose);
+            assert_eq!(text, prose, "{prose}");
+            assert!(spec.is_none(), "{prose}");
+        }
+    }
+
+    #[test]
+    fn a_row_may_open_with_a_specifier_instead_of_a_pipe() {
+        let (lead, row) = table_row("2+^|Spanning").expect("a row");
+        let lead = lead.expect("a leading specifier");
+        assert_eq!(lead.column_span, 2);
+        assert_eq!(lead.align, pb::Alignment::Center);
+        assert_eq!(row, "Spanning");
+
+        let (lead, row) = table_row("|Name |Role").expect("a row");
+        assert!(lead.is_none());
+        assert_eq!(row, "Name |Role");
+
+        assert!(table_row("layout between rows").is_none());
     }
 
     #[test]
