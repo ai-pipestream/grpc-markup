@@ -170,6 +170,7 @@ impl DocumentFold {
             binary_hash: 0,
             filename: String::new(),
             uri: None,
+            ..doc::DocumentOrigin::default()
         });
         if !info.metadata.is_empty()
             && let Some(body) = self.document.body.as_mut()
@@ -370,6 +371,7 @@ impl DocumentFold {
             } else {
                 doc::GroupLabel::List as i32
             },
+            ..doc::GroupItem::default()
         });
         self.link_child(&parent, &self_ref);
         self.lists.push((depth, enumerated, self_ref));

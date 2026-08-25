@@ -233,6 +233,7 @@ fn map_origin(value: &Value, unmapped: &mut Unmapped) -> Option<doc::DocumentOri
             .unwrap_or_default(),
         filename: obj.text("filename"),
         uri: obj.string("uri"),
+        ..doc::DocumentOrigin::default()
     };
     obj.finish();
     Some(origin)
@@ -252,6 +253,7 @@ fn map_group(value: &Value, path: &str, unmapped: &mut Unmapped) -> Option<doc::
             .as_deref()
             .and_then(group_label)
             .unwrap_or(doc::GroupLabel::Unspecified) as i32,
+        ..doc::GroupItem::default()
     };
     obj.finish();
     Some(group)
@@ -432,6 +434,7 @@ fn map_table_cell(value: &Value, unmapped: &mut Unmapped) -> Option<doc::TableCe
         row_section: obj.boolean("row_section"),
         fillable: obj.boolean("fillable"),
         r#ref: None,
+        ..doc::TableCell::default()
     };
     obj.finish();
     Some(cell)
@@ -490,6 +493,7 @@ fn map_pages(value: Option<&Value>, unmapped: &mut Unmapped) -> HashMap<i32, doc
                     .get("image")
                     .and_then(|value| map_image_ref(value, obj.unmapped)),
                 page_no: obj.int("page_no"),
+                ..doc::PageItem::default()
             },
         );
         obj.finish();
@@ -512,6 +516,7 @@ fn map_prov(value: &Value, unmapped: &mut Unmapped) -> Option<doc::ProvenanceIte
             .get("bbox")
             .and_then(|value| map_bbox(value, obj.unmapped)),
         charspan: span,
+        ..doc::ProvenanceItem::default()
     };
     obj.finish();
     Some(prov)
