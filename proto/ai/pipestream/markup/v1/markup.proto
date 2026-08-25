@@ -8,7 +8,8 @@
 // LaTeX, WebVTT, BoxNote and serialized Docling JSON — into one block
 // vocabulary. Every format lands on the same events, so a downstream reader
 // handles a heading the same way whether it was `# Title`, `<h1>`, `= Title`
-// or `\section{Title}`.
+// or `\section{Title}`, and the formatting, links and references inside a
+// block land on one `InlineSpan` vocabulary the same way.
 
 syntax = "proto3";
 
@@ -102,7 +103,7 @@ enum SpanStyle {
   // Highlighted: HTML `mark`.
   SPAN_STYLE_MARK = 8;
 
-  // Small capitals: HTML `small`, LaTeX `\textsc`.
+  // Small capitals: LaTeX `\textsc`.
   SPAN_STYLE_SMALL_CAPS = 9;
 
   // An inline math run. `InlineSpan.raw` carries the source notation.
@@ -416,7 +417,8 @@ message TextBlock {
   // The block's text: inline markup flattened away, entity and escape
   // sequences decoded, runs of whitespace collapsed except inside
   // `BLOCK_LABEL_CODE` and `BLOCK_LABEL_FORMULA`, which keep their text
-  // verbatim. Never empty.
+  // verbatim. Never empty. What the flattening removed is described by
+  // `spans`, whose ranges index this string.
   string text = 4;
 
   // Heading depth for `BLOCK_LABEL_SECTION_HEADER`, starting at 1. Absent
@@ -439,8 +441,10 @@ message TextBlock {
   // Absent when the source declares none.
   optional string language = 9;
 
-  // Hyperlink target when the entire block is one link. Inline links inside
-  // a larger block are flattened to their text.
+  // Hyperlink target when the entire block is one link, which is a fact
+  // about the block rather than about its runs. A link inside a larger
+  // block is a `spans` entry carrying `hyperlink`, so no URL is lost
+  // either way.
   optional string hyperlink = 10;
 
   // One-based line in the source where the block starts, when the parser
@@ -500,7 +504,9 @@ message TableCell {
   // Zero-based column index, advanced by the column spans before it.
   uint32 column_index = 1;
 
-  // Cell text, flattened the same way as `TextBlock.text`. May be empty.
+  // Cell text, flattened the same way as `TextBlock.text`, with `spans`
+  // describing what the flattening removed. Nested block structure inside
+  // a cell flattens into this text. May be empty.
   string text = 2;
 
   // Columns this cell spans. At least 1; always 1 in formats without spans.

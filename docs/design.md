@@ -11,8 +11,9 @@
   identical `Document` projection gRParse can merge with another
   collector's parse of the same work.
 - Full structural coverage of each format — every construct the mappings
-  in section 4 name — minus the inline formatting model this wire
-  deliberately flattens away.
+  in section 4 name — plus the inline formatting, link and reference
+  structure each parser computes while flattening, carried as `InlineSpan`
+  runs over the flattened text.
 
 ## 2. Non-goals (this build)
 
@@ -26,9 +27,45 @@
   wrote.
 - Rendering, syntax highlighting, or language detection beyond what the
   source declares.
-- Inline formatting (bold, italic) on the typed wire: blocks are flattened
-  text. The Docling JSON fold preserves `formatting` on ingested items
-  because there it is data, not interpretation.
+- Rich block structure inside a table cell or an image alt: nested lists
+  and nested tables inside a cell flatten to the cell's text. The cell's
+  own emphasis and links survive as runs; its structure does not.
+- Resolving what a reference points at *on the typed wire*: a span carries
+  the key, and the Document projection is where a key becomes a `FineRef`
+  into a real item.
+
+## 2a. Inline runs
+
+`TextBlock.spans` and `TableCell.spans` carry one `InlineSpan` per run of
+the flattened text that says something the flat string cannot: a rendering
+signal (`SpanStyle`), a link (`hyperlink` plus `link_title`), an anchor the
+run declares (`anchor_id`), a key it points at (`reference` plus
+`reference_kind`), the source notation flattening removed (`raw`), and a
+run's own typography (`font_family`, `font_size_pt`, `color`).
+
+Three rules make the ranges usable:
+
+- **Code points, not bytes.** `IntRange` is half-open and counts Unicode
+  scalar values into the same event's `text`, so a consumer slices the
+  string it was handed. `src/spans.rs` builds the buffer one `char` at a
+  time and counts as it builds, which is why a multi-byte document cannot
+  produce a range that is right in bytes and wrong in scalars.
+- **A run starts where its first visible character lands.** Marks open
+  before the text arrives; the start offset is fixed at the moment a
+  character is appended, so a mark that opens while a collapsed space is
+  pending does not swallow the space. A run that covers nothing leaves no
+  span.
+- **Spans come back in start order**, outermost first where two runs start
+  together. They may nest and overlap.
+
+`TextBlock.hyperlink` keeps its old meaning — "this whole block is one
+link" — because that is a question about the block. Every other URL is a
+span, so a paragraph with three links yields three URLs where it used to
+yield none.
+
+`ParseOptions.emit_inline_spans` gates the field and is unset-means-on:
+every fold computes the structure while flattening either way, so the
+option exists to turn the runs off for a consumer that wants flat text.
 
 ## 3. The fold registry
 
@@ -54,13 +91,19 @@ tree branches on format.
 | YAML front matter between leading `---` fences | `MarkupInfo.metadata` as the tree the source declared: scalars verbatim, sequences as `MetaList`, nested mappings as `MetaMap`, keys the mapping's own; `title:` also to `MarkupInfo.title` when it is a non-empty scalar. Unparseable front matter: one `WARNING_CODE_METADATA`, raw text not emitted as content |
 | First H1 | `BLOCK_LABEL_TITLE` |
 | Every other heading | `BLOCK_LABEL_SECTION_HEADER` with the Markdown level |
-| Paragraph | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; `hyperlink` when the whole paragraph is one link |
+| Paragraph | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; `hyperlink` when the whole paragraph is one link, and one `InlineSpan` per formatted, linked or referring run |
+| Emphasis, strong, strikethrough, sub/superscript | span styles over the run they cover |
+| Inline code, inline math | span styles; math also keeps its source notation in `raw` |
+| Inline link | a span with `hyperlink` and the link title, whether or not the block is one link |
+| Heading attribute `{#id}` | `TextBlock.anchor_id` |
+| Definition list | list items with the `definition-term` / `definition-description` roles, the description one depth under its term |
+| GFM alert (`> [!WARNING]`) | `BLOCK_LABEL_QUOTE` with `role: "admonition"` and the `admonition` kind |
 | List item | `BLOCK_LABEL_LIST_ITEM` with `enumerated`, the marker as written (read back from the source bytes), `list_depth`; task-list checkbox in `role` (`task-item` / `task-item-checked`) |
 | Fenced / indented code | `BLOCK_LABEL_CODE`, text verbatim, info-string first word as `language` |
 | Blockquote | `BLOCK_LABEL_QUOTE`, one block per paragraph, nesting flattened |
-| Pipe table | `TableStart` / `TableRow` (header row and cells flagged) / `TableEnd` |
+| Pipe table | `TableStart` (delimiter-row alignments as `columns`) / `TableRow` (header row and cells flagged, cell runs carried) / `TableEnd` |
 | Image | `ImageBlock` with `src`, `alt`, `title` as written |
-| Footnote definition | `BLOCK_LABEL_FOOTNOTE`, `role` = the label; references stay in the referring text as `[label]` |
+| Footnote definition | `BLOCK_LABEL_FOOTNOTE`, `role` and `anchor_id` = the label; a reference is a superscript span over the label carrying the key |
 | Display math | `BLOCK_LABEL_FORMULA`, verbatim |
 | HTML block / inline HTML | flattened to text (`role: "html"` for blocks) + `WARNING_CODE_EMBEDDED_HTML_FLATTENED` |
 | Thematic break | nothing + `WARNING_CODE_UNMAPPED_CONSTRUCT` |
@@ -76,14 +119,18 @@ scope by construction.
 
 | Source construct | Wire |
 |---|---|
-| `<title>`, `<meta name content>` | `MarkupInfo.title`, scalar `MarkupInfo.metadata` values under `meta.*` keys |
+| `<title>`, `<meta name content>` or `<meta property content>` | `MarkupInfo.title`, scalar `MarkupInfo.metadata` values under `meta.*` keys |
 | `h1`..`h6` | first `h1` is `BLOCK_LABEL_TITLE` (the Markdown fold's rule); every other heading `BLOCK_LABEL_SECTION_HEADER` at its own level |
-| `p`, loose inline text between blocks | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; a block that is entirely one `<a>` carries `hyperlink` |
+| `p`, loose inline text between blocks | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; a block that is entirely one `<a>` carries `hyperlink`, and every inline element leaves a run |
+| `b`/`strong`, `i`/`em`/`cite`/`dfn`/`var`, `u`, `ins`, `s`/`del`, `code`/`kbd`/`samp`, `mark`, `small`, `sub`, `sup`, `q` | span styles over the run they cover |
+| `a href` | a span with the URL and `<a title>`; a `#fragment` also carries `reference_kind = CROSS_REF` |
+| `abbr title`, `time datetime`, `data value` | the machine-readable value in the span's `raw` |
+| `id` on any element | `TextBlock.anchor_id` on a block, `InlineSpan.anchor_id` on a run |
 | `address`, `summary` | paragraphs with the element name as `role` |
 | `blockquote` | `BLOCK_LABEL_QUOTE` per paragraph, nesting flattened |
 | `ul` / `ol` / `li` | `BLOCK_LABEL_LIST_ITEM` with nesting depth; `enumerated` for `ol`; a marker is written only when the source numbered the list (`ol start`) |
 | `dl` / `dt` / `dd` | list items with the proto's `definition-term` / `definition-description` roles, descriptions one level under their term |
-| `table` (+`thead`/`tbody`/`tfoot`, `caption`, `colspan`/`rowspan`) | streamed table with the caption on `TableStart`, header cells and rows flagged, spans advancing the column index over an occupancy grid |
+| `table` (+`thead`/`tbody`/`tfoot`, `caption`, `colspan`/`rowspan`, `colgroup`/`col`) | streamed table with the caption on `TableStart`, the `col` geometry as `columns` (a `span` repeated across the columns it covers), header cells and rows flagged, spans advancing the column index over an occupancy grid, each cell's own `align`/`valign` and its inline runs |
 | `pre` (+`language-*` class) | `BLOCK_LABEL_CODE`, text verbatim |
 | `img`, `figure`/`figcaption` | `ImageBlock` (`src`/`alt`/`title` verbatim), the figcaption as a following `CAPTION` block |
 | `details` | descended; its `summary` keeps its role |
@@ -95,8 +142,9 @@ scope by construction.
 tree-builder error list — repairs the parser actually made — with the
 missing-doctype complaint excluded, because a body-only fragment is a legal
 input. Deliberately out of scope: browser rendering, bounding boxes,
-form/key-value extraction, checkbox recognition, rich table cells
-(nested structure inside a cell flattens to its text), the `<inline-formula>`
+form/key-value extraction, checkbox recognition, block structure inside a
+table cell (nested lists and tables flatten to the cell's text, though the
+cell's own emphasis and links survive as runs), the `<inline-formula>`
 JATS-ism, and image fetching.
 
 ### 4.3 AsciiDoc (line-oriented)
@@ -111,16 +159,15 @@ blocks, attribute entries, admonitions).
 | `= Title` | `BLOCK_LABEL_TITLE` (first; later ones level-1 headers) |
 | `== `..`====== ` | `BLOCK_LABEL_SECTION_HEADER` at marker length minus one |
 | consecutive non-empty lines | one `BLOCK_LABEL_PARAGRAPH`, joined with spaces, flushed at a blank line |
-| `NOTE:` / `TIP:` / `IMPORTANT:` / `WARNING:` / `CAUTION:` paragraphs | `role: "admonition"`, the label stripped |
+| `NOTE:` / `TIP:` / `IMPORTANT:` / `WARNING:` / `CAUTION:` paragraphs | `role: "admonition"` and the matching `admonition` kind, the label stripped |
 | `*`/`**`/`.`/`..`/`-`/`1.` items | `BLOCK_LABEL_LIST_ITEM`, nesting by marker repetition, `enumerated` for dot and numbered markers, marker verbatim |
-| `|===` blocks | streamed table; each `|` line is a row, cells split on `|`, cell specifiers (`2+`, `^.^h`) stripped, spans **not** expanded, first row flagged as header; a preceding `.Caption` lands on `TableStart` |
+| `|===` blocks | streamed table; each row is a line whose cells split on `|`, with the cell specifier before each `|` honoured: `2+`/`2.3+` as `column_span`/`row_span`, `<`/`^`/`>` and their `.`-prefixed forms as `align`/`valign`, `3*` applying one specifier to the cells that follow, `h` marking a header cell and `e`/`s`/`m`/`l` putting a run over the cell text. A row may open with a specifier instead of a `|`. First row flagged as header; a preceding `.Caption` lands on `TableStart` |
 | `[source,lang]` + `----` fences | `BLOCK_LABEL_CODE`, verbatim, with the declared language; an unclosed fence keeps its content and warns `MALFORMED_STRUCTURE` |
 | `image::path[alt, k=v]` | `ImageBlock` with the path verbatim (no `file:` URI rewriting — this service never dereferences); a pending `.Caption` follows as a `CAPTION` block |
 
 Deliberately skipped where the format is richer than this fold: block
 quotes (`____`), sidebars (`****`), literal blocks (`....`),
-description lists, cell spans and per-cell styles in tables (specifiers are
-stripped, not honored), includes and conditional directives, inline
+description lists, includes and conditional directives, inline
 formatting, and comment lines (`//` lines join paragraphs as text). Two
 choices made deliberately, both kinder to the author: nesting follows
 marker depth (`**`) rather than leading indentation, and single-cell `|`
@@ -136,14 +183,16 @@ here, and the mapping covers the constructs below.
 |---|---|
 | preamble | skipped; `\title` surfaces as `MarkupInfo.title` and a `BLOCK_LABEL_TITLE` block, `\author`/`\date` as paragraphs with their macro name as `role` |
 | `\section` family | `BLOCK_LABEL_SECTION_HEADER` — levels: part/chapter/section 1, subsection 2, subsubsection 3, paragraph 4, subparagraph 5 |
-| text runs | paragraphs split at blank lines; `\textbf` and friends flatten, `\cite`/`\ref` become `[key]`, `\href{u}{t}` becomes `[t](u)`, `~` a space, `\%` and friends their character; `%` comments stripped |
+| text runs | paragraphs split at blank lines; `\textbf`, `\textit`, `\emph`, `\texttt`, `\underline` and `\textsc` leave the run they cover, `\cite`/`\citep`/`\citet` leave a citation reference per key, `\ref` a cross reference and `\eqref` an equation reference, `\href{u}{t}` and `\url{u}` a link run, `$..$` a math run keeping its TeX, `~` a space, `\%` and friends their character; `%` comments stripped |
+| `\label` | the `anchor_id` of the block it follows (a heading, a caption, a formula) or of the paragraph it sits in |
+| `\footnote` | a `FOOTNOTE` block whose `anchor_id` the marker run left in the interrupted paragraph points at |
 | `itemize`/`enumerate`/`description` | nested `BLOCK_LABEL_LIST_ITEM`s, `enumerated` for enumerate, description terms as `term: ` lead-ins |
-| `tabular` | table events: `&` splits cells, `\\` ends rows, rules dropped, `\multicolumn` and `\multirow` as spans |
+| `tabular` | table events: the preamble (`{|l|c|p{5cm}|}`) as the table's `columns`, `&` splits cells, `\\` ends rows, rules dropped, `\multicolumn` and `\multirow` as spans |
 | `verbatim`/`lstlisting`/`minted` | `BLOCK_LABEL_CODE`, verbatim, `[language=x]` as the declared language; `tikzpicture` as code declared `tikz` (no renderer here) |
-| equation family, `$$..$$`, `\[..\]` | `BLOCK_LABEL_FORMULA` with `\label{...}` removed; `$..$` stays inline |
+| equation family, `$$..$$`, `\[..\]` | `BLOCK_LABEL_FORMULA` with `\label{...}` lifted into `anchor_id`; `$..$` stays inline as a math run |
 | `\includegraphics` | `ImageBlock`, path verbatim; `\caption` a `CAPTION` block; `\footnote`/`\marginpar` `FOOTNOTE` blocks |
 | `quote`/`quotation`/`verse` | `BLOCK_LABEL_QUOTE` paragraphs |
-| `abstract`, theorems, `proof`, `thebibliography` | an `Abstract` header with `role: "abstract"`, a `Theorem.`-style lead paragraph with the environment as `role`, a `References` header plus one `[key]`-led list item per `\bibitem` |
+| `abstract`, theorems, `proof`, `thebibliography` | an `Abstract` header with `role: "abstract"`, a `Theorem.`-style lead paragraph with the environment as `role`, a `References` header plus one list item per `\bibitem`, its key the item's `anchor_id` |
 | unknown environments | descended into, one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per environment name |
 | `\input`/`\include` | never read (diskless); one aggregated warning names the refusal |
 
@@ -172,8 +221,11 @@ error recovery.
 ### 4.6 BoxNote (ProseMirror `doc` tree)
 
 A node-for-node walk of the tree: headings (first level-1 is the
-title), paragraphs from styled runs (a single run keeps its safe-scheme
-hyperlink, a mixed span flattens), bullet / ordered / check lists (checkbox
+title), paragraphs from styled runs (every mark leaves a run: the boolean
+ones as styles, colour, family and size as the run's own typography, and
+each safe-scheme link as a link run whatever else the block holds; the
+block-level `hyperlink` still means "the whole block is one link"), bullet
+/ ordered / check lists (checkbox
 in `role`; BoxNote writes no markers so `marker` stays absent), code
 blocks, blockquotes, spanned tables (`rowspan` / `colspan` advance the
 column index over the occupied grid), images from the node's own attributes
@@ -221,22 +273,41 @@ under the nearest open header of a lower level), plus one
 `GROUP_LABEL_LIST` / `GROUP_LABEL_ORDERED_LIST` group per contiguous list
 with nested lists as nested groups.
 
+Carried across from the typed wire, into slots the schema already had:
+
+- `TextBlock.spans` and `TableCell.spans` become `InlineSpan` runs on
+  `TextItemBase.spans` and `TableCell.spans`, styles folded onto
+  `Formatting` and `Script`. A run with no typography carries no
+  all-false `Formatting`.
+- A block's `admonition` becomes `TextItemBase.admonition_kind`, lower-cased.
+- Every `anchor_id` becomes a `NamedAnchor` in `Document.anchors`, and every
+  span `reference` becomes a `FineRef` into the item that declares that
+  anchor. Resolution is a pass at the end of the parse, because a document
+  refers forward as often as backward; a reference whose anchor the document
+  never declares keeps no target rather than an invented one.
+- The heading ladder becomes `Document.outline`.
+- `MarkupInfo.metadata` becomes `Document.source_meta`: title, authors,
+  dates, language, generator and keywords in their own slots, other scalars
+  in `extra` under their own names. An author list stays a list. The HTML
+  fold's `meta.*` keys become typed `Document.meta_tags` entries instead.
+
 Dropped or demoted per format, deliberately:
 
 - **All formats:** `ParseStatus` (describes the stream, not the document);
   warnings; `evidence`. A block's `role` and `source_line` survive only as
-  custom fields.
+  custom fields. A run's style beyond the four `Formatting` booleans plus
+  `Script` (code, mark, small, small caps, math, insertion, abbreviation,
+  quote) has no slot on this plane, and a table's column alignment has
+  none either; both stay on the typed wire rather than being faked into a
+  custom field.
 - **HTML:** anything derived from a rendered page (provenance
   boxes, visibility, forms) never existed here; nested structure inside a
   table cell survives only as the cell's flattened text; `hr` and unmapped
   elements survive only as warnings.
-- **AsciiDoc:** table cell specifiers vanish (they are neither spans nor
-  styles downstream); admonition kinds collapse into one `admonition` role;
-  attribute entries live only on the body meta.
+- **AsciiDoc:** attribute entries live only on the body meta.
 - **LaTeX:** everything TeX (macro definitions, spacing, counters, page
-  furniture) dissolves; labels vanish once their formula is cleaned; tikz
-  survives only as its source; description-term structure survives only as
-  a `term: ` prefix.
+  furniture) dissolves; tikz survives only as its source; description-term
+  structure survives only as a `term: ` prefix.
 - **Markdown:** the distinction between quote and plain text is demoted to
   a custom field (`DocItemLabel` has no quote); an unknown code language
   survives only as `code_language_raw`; image `alt` / `title` become custom
@@ -246,7 +317,7 @@ Dropped or demoted per format, deliberately:
   `TrackSource`; skipped NOTE/STYLE/REGION content never reaches the
   document.
 - **BoxNote:** checkbox state is a custom-field `role`, not a
-  `CHECKBOX_SELECTED` item; inline formatting is flattened away.
+  `CHECKBOX_SELECTED` item.
 - **Docling JSON:** nothing is re-folded — the ingested document passes
   through with stamps appended. What the *mapping* dropped (unconsumed
   keys: annotations, key-value items, form items) is exactly what the
@@ -264,12 +335,20 @@ Precedence, fixed:
    `\begin{document}` (`LATEX`). Every signature format is mapped by this
    build; if a registry entry were ever removed, the signature would still
    match and the refusal would name what was sniffed.
-3. **Heuristics, Markdown and AsciiDoc only:** ATX headings, fences, inline
-   links or front matter say Markdown; a `= ` document title, `== `
-   sections, `:name: value` attribute entries or `----` fences say
-   AsciiDoc. Both at once, or neither, is `UNIMPLEMENTED` — the server
-   never guesses between candidates it cannot separate, and plain prose is
-   not blessed as Markdown by default.
+3. **Heuristics, Markdown, AsciiDoc and reStructuredText only:** ATX
+   headings, fences, inline links or front matter say Markdown; a `= `
+   document title, `== ` sections, `:name: value` attribute entries or
+   `----` fences say AsciiDoc; an explicit-markup block (`.. note::`,
+   `.. _target:`, `.. [ref]`) or a section adornment says
+   reStructuredText. The adornment test refuses `=` and `-`, which the
+   other two own. More than one at once, or none, is `UNIMPLEMENTED` — the
+   server never guesses between candidates it cannot separate, and plain
+   prose is not blessed as Markdown by default.
+
+   No build maps reStructuredText yet, so bytes that resolve to it are
+   refused with `UNIMPLEMENTED` naming the format. That is the point of
+   naming it: without `MARKUP_FORMAT_RST` a `.rst` file sniffed as Markdown
+   and was mapped by the wrong fold.
 
 Bytes that merely start like JSON but do not parse are not a signature;
 they fall through to the heuristics and, in practice, to the refusal.
@@ -281,8 +360,8 @@ re-running the sniff by hand.
 ## 7. Tests
 
 - Unit tests per module: sniff signatures and heuristics, VTT timestamp
-  grammar and tag stripping, BoxNote run collapsing, emitter aggregation
-  and bounds, fold integrity and structure.
+  grammar and tag stripping, BoxNote mark reading, the inline flattener's
+  offsets, emitter aggregation and bounds, fold integrity and structure.
 - Integration tests over a real socket (`tests/`), fixtures inline:
   per-format golden event sequences and envelope assertions
   (`info` first, `status` last, dense indexes), warning aggregation, the
@@ -290,6 +369,9 @@ re-running the sniff by hand.
   resolution and evidence values, framing violations, the byte cap tripping
   mid-upload, admission refusal, the `UNIMPLEMENTED` refusals, and
   `GetServiceInfo` coupled to the actual parse behaviour.
+- Every span assertion slices the text by code points through one helper,
+  and every fold's span fixture carries multi-byte text, so a range that is
+  right in bytes and wrong in scalars fails rather than passes quietly.
 - Empty input is per-format: Markdown parses to an empty document, VTT and
   the JSON formats are `INVALID_ARGUMENT`, an empty sniff is
   `UNIMPLEMENTED`.

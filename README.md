@@ -84,9 +84,10 @@ a frame with neither field, is `INVALID_ARGUMENT`.
 
 | Option | Meaning |
 |---|---|
-| `format` | `MARKDOWN` / `HTML` / `ASCIIDOC` / `LATEX` / `VTT` / `BOXNOTE` / `DOCLING_JSON`, or unset to sniff |
+| `format` | `MARKDOWN` / `HTML` / `ASCIIDOC` / `LATEX` / `VTT` / `BOXNOTE` / `DOCLING_JSON`, or unset to sniff. `RST` is named by the contract and mapped by no build, so asking for it is `UNIMPLEMENTED` |
 | `max_document_mib` | Per-request byte cap; 0 takes the server default, over the ceiling clamps |
 | `emit_document` | Also fold the parse into one `ai.pipestream.document.v1.Document`, sent just before the trailer (see below) |
+| `emit_inline_spans` | Carry the formatting, link and reference runs inside each block. Unset means on; clear it for a flat stream |
 
 **Response.** Exactly one `info` first, content events in document order,
 exactly one `status` last. Stream indexes are dense across every indexed
@@ -95,8 +96,8 @@ event kind.
 | Event | Carries |
 |---|---|
 | `info` | `MarkupInfo`: resolved format and the evidence for it, declared title, document metadata as a typed `MetaValue` tree holding the shape the source declared (front matter as its own tree, header lines as scalars) |
-| `text_block` | One unit of text: title, section header, paragraph, list item, code, formula, caption, quote, footnote. `role` is an open refinement (`task-item`, `html`, a footnote label) |
-| `table_start` / `table_row` / `table_end` | A table, streamed a row at a time, header rows and cells flagged, spans carried |
+| `text_block` | One unit of text: title, section header, paragraph, list item, code, formula, caption, quote, footnote. `role` is an open refinement (`task-item`, `html`, a footnote label); `spans` are the runs inside the text, `anchor_id` the anchor the block declares, `admonition` the callout kind |
+| `table_start` / `table_row` / `table_end` | A table, streamed a row at a time, header rows and cells flagged, column and row spans carried, the source's declared column geometry on `table_start`, and each cell's own alignment and inline runs |
 | `image` | One image reference — `src`, `alt`, `title` as written. Never dereferenced |
 | `cue` | One WebVTT cue: identifier, timings in milliseconds, speaker, flattened text |
 | `document` | The whole parse folded into one `Document`. Only when `emit_document` was set, exactly once, immediately before `status` |
@@ -144,18 +145,35 @@ test suite pins as string literals.
 
 | Format | Sniffed by | Mapped |
 |---|---|---|
-| Markdown | Heuristic only (ATX headings, fences, links, front matter) | headings (first H1 = title), paragraphs, nested lists with markers as written, task lists, fenced/indented code with language, blockquotes, pipe tables, images, footnotes, display math, YAML front matter to metadata; raw HTML flattened to text with a warning |
+| Markdown | Heuristic only (ATX headings, fences, links, front matter) | headings (first H1 = title) with `{#id}` anchors, paragraphs, nested lists with markers as written, task lists, definition lists, fenced/indented code with language, blockquotes, GFM alerts as admonitions, pipe tables with their column alignments, images, footnote bodies as anchors and references as runs, display math, sub/superscript, emphasis and links as runs, YAML front matter to metadata; raw HTML flattened to text with a warning |
 | WebVTT | `WEBVTT` signature | header title and `Key: value` metadata, cues with millisecond timings, voice spans to `speaker`, styling and karaoke tags stripped, NOTE/STYLE/REGION skipped, malformed cues skipped with a warning |
-| BoxNote | JSON with a ProseMirror `doc` tree (or legacy `atext`, refused) | headings, styled paragraphs, nested/check lists, code, quotes, spanned tables, images, safe-scheme links |
+| BoxNote | JSON with a ProseMirror `doc` tree (or legacy `atext`, refused) | headings, paragraphs with every mark as a run (bold, italic, underline, strikethrough, code, highlight, colour, family, size), nested/check lists, code, quotes, spanned tables, images, safe-scheme links |
 | Docling JSON | JSON whose `schema_name` names a DoclingDocument | field-by-field re-ingestion of the core arrays; typed events are a projection of the body in reading order; unconsumed keys warn per key path |
-| HTML | `<!DOCTYPE html` or `<html` signature | whole documents and body-only fragments (html5ever); head title and `meta.*` metadata, h1-h6 ladder (first h1 = title), paragraphs, blockquotes, ul/ol/dl nesting, spanned tables with captions, `pre` code with `language-*` classes, figures and images, whole-block links; script/style/head never become text; tree-builder repairs warn as malformed structure |
-| AsciiDoc | Heuristic only (`= ` title, `== ` sections, `:name: value` entries, `----` fences) | attribute entries to metadata, `= `/`== ` title and section ladder (level is marker length minus one), multiline paragraphs, admonitions as `role: "admonition"`, `*`/`.` lists nested by marker depth with markers as written, `|===` tables with the first row as header and cell specifiers stripped, `[source,lang]` + `----` listings as code, `image::` macros with `.Caption` lines |
-| LaTeX | `\documentclass` or `\begin{document}` | preamble skipped with `\title`/`\author`/`\date` surfaced, section ladder (part/chapter/section 1 through subparagraph 5), inline commands flattened (`\cite`/`\ref` to `[key]`), itemize/enumerate/description nesting, tabular with `\multicolumn`/`\multirow` spans and rules dropped, verbatim/lstlisting/tikz as code, equation family and `$$`/`\[..\]` as formulas, `\includegraphics` by reference, quotes, theorems, bibliographies; unknown environments descend with one aggregated warning |
+| HTML | `<!DOCTYPE html` or `<html` signature | whole documents and body-only fragments (html5ever); head title and `meta.*` metadata keyed by `name` or `property`, h1-h6 ladder (first h1 = title), paragraphs, blockquotes, ul/ol/dl nesting, spanned tables with captions and `colgroup` geometry and per-cell alignment, `pre` code with `language-*` classes, figures and images, the inline element set as runs, every `href` as a link run with `#fragment` links typed as cross references, `id` as an anchor; script/style/head never become text; tree-builder repairs warn as malformed structure |
+| AsciiDoc | Heuristic only (`= ` title, `== ` sections, `:name: value` entries, `----` fences) | attribute entries to metadata, `= `/`== ` title and section ladder (level is marker length minus one), multiline paragraphs, admonitions as `role: "admonition"` plus the kind, `*`/`.` lists nested by marker depth with markers as written, `|===` tables with the first row as header and cell specifiers honoured (span and duplication factors, alignments, header and emphasis style letters), `[source,lang]` + `----` listings as code, `image::` macros with `.Caption` lines |
+| LaTeX | `\documentclass` or `\begin{document}` | preamble skipped with `\title`/`\author`/`\date` surfaced, section ladder (part/chapter/section 1 through subparagraph 5), text wrappers as style runs, `\cite`/`\ref`/`\eqref` as typed references and `\label` as the anchor they resolve to, `\href`/`\url` as link runs, `\footnote` as a marker run plus an anchored body, itemize/enumerate/description nesting, tabular with its column preamble as geometry and `\multicolumn`/`\multirow` spans, verbatim/lstlisting/tikz as code, equation family and `$$`/`\[..\]` as formulas, `\includegraphics` by reference, quotes, theorems, bibliographies anchored by `\bibitem` key; unknown environments descend with one aggregated warning |
 
 Sniffing order is the one [`docs/design.md`](docs/design.md) fixes: an
 explicit request wins outright, then unambiguous signatures, and only then a
-Markdown/AsciiDoc structure heuristic. The server never guesses between two
-candidates it cannot separate — bytes that match both fail closed.
+Markdown / AsciiDoc / reStructuredText structure heuristic. The server never
+guesses between candidates it cannot separate — bytes that match more than
+one fail closed. reStructuredText is recognized so a `.rst` file is refused
+by name rather than mapped as Markdown; no build maps it.
+
+### Inline runs
+
+Every block and every table cell carries `spans`: one `InlineSpan` per run
+of its flattened text that says something the flat string cannot — bold,
+italic, code, sub/superscript and the rest as `SpanStyle`s, a link with its
+title, an anchor the run declares, a key it points at with the kind of
+reference it is, the source notation flattening removed, and a run's own
+colour, family and size where the source states them.
+
+Ranges are half-open and count **code points**, not bytes, into the same
+event's `text`, so a consumer indexes the string it was handed. Runs come
+back in start order and may nest. `TextBlock.hyperlink` still means "this
+whole block is one link"; every other URL is a span, which is why a
+paragraph with three links now yields three URLs instead of none.
 
 ## The Document projection (opt-in)
 
@@ -172,10 +190,13 @@ never edited here.
 
 | Wire event | Document |
 |---|---|
-| `info` | `name` (the declared title), `origin.mimetype` per format, metadata on the body meta under the fold's prefix (`markdown.author`, …); the `MetaValue` tree converts recursively — scalar to string, list to `ListValue`, map to `Struct` |
+| `info` | `name` (the declared title), `origin.mimetype` per format, `source_meta` (title, authors, dates, language, generator, keywords in their own slots, other scalars in `extra`), HTML `meta.*` pairs as typed `meta_tags`, and the whole metadata tree on the body meta under the fold's prefix (`markdown.author`, …) — scalar to string, list to `ListValue`, map to `Struct` |
 | `text_block` | A `BaseTextItem` variant chosen by label — `TitleItem`, `SectionHeaderItem`, `ListItem`, `CodeItem`, `FormulaItem`, else `TextItem`. Quotes fold as `TEXT` with the quotation recorded in custom fields; a declared code language maps onto `CodeLanguageLabel` when it matches an enum name, else `code_language_raw` |
 | `text_block` list items | Grouped under `GROUP_LABEL_LIST` / `GROUP_LABEL_ORDERED_LIST` groups, one per contiguous list, nested lists as nested groups |
-| `table_*` | One `TableItem`: both `grid` and flat `table_cells`, offsets honoring spans, a leading caption created as a `CAPTION` item and referenced |
+| `text_block` spans | `TextItemBase.spans`, styles folded onto the schema's own `Formatting` and `Script`; an `admonition` becomes `admonition_kind` |
+| `text_block` anchors and references | Every `anchor_id` becomes a `NamedAnchor` in `anchors`; every span `reference` becomes a `FineRef` into the item declaring that anchor, resolved at the end of the parse. A reference nothing declares keeps no target |
+| headings | `Document.outline`, one entry per title and section header, each pointing at its item |
+| `table_*` | One `TableItem`: both `grid` and flat `table_cells`, offsets honoring spans, each cell's own inline runs, a leading caption created as a `CAPTION` item and referenced. Column alignment has no slot on this plane and stays on the typed wire |
 | `image` | A `PictureItem` whose `ImageRef.uri` is the `src` verbatim — no bytes, no size, no dpi |
 | `cue` | A `TextItem` whose provenance is a `TrackSource` (timings in seconds, identifier, voice) alongside the collector stamp |
 | `status` | Nothing; it describes the stream, not the document |
