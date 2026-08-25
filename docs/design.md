@@ -277,29 +277,35 @@ Carried across from the typed wire, into slots the schema already had:
 
 - `TextBlock.spans` and `TableCell.spans` become `InlineSpan` runs on
   `TextItemBase.spans` and `TableCell.spans`, styles folded onto
-  `Formatting` and `Script`. A run with no typography carries no
-  all-false `Formatting`.
+  `Formatting` (bold, italic, underline, strikethrough, monospace, small
+  caps, math) and `Script`. A run with no typography carries no all-false
+  `Formatting`.
 - A block's `admonition` becomes `TextItemBase.admonition_kind`, lower-cased.
 - Every `anchor_id` becomes a `NamedAnchor` in `Document.anchors`, and every
   span `reference` becomes a `FineRef` into the item that declares that
-  anchor. Resolution is a pass at the end of the parse, because a document
+  anchor, plus the plane's own coarser `ReferenceKind` (a cross reference
+  and an equation reference are both `SECTION` there). Resolution is a pass at the end of the parse, because a document
   refers forward as often as backward; a reference whose anchor the document
   never declares keeps no target rather than an invented one.
 - The heading ladder becomes `Document.outline`.
 - `MarkupInfo.metadata` becomes `Document.source_meta`: title, authors,
   dates, language, generator and keywords in their own slots, other scalars
-  in `extra` under their own names. An author list stays a list. The HTML
+  in `extra` under their own names. A declared date lands in the shape the
+  source actually stated: an offset means an instant and a `Timestamp`, a
+  bare date or a wall-clock time means a `CivilDateTime` and no invented
+  timezone, and either way the source's own spelling is kept in the `_raw`
+  twin. An author list stays a list. The HTML
   fold's `meta.*` keys become typed `Document.meta_tags` entries instead.
 
 Dropped or demoted per format, deliberately:
 
 - **All formats:** `ParseStatus` (describes the stream, not the document);
   warnings; `evidence`. A block's `role` and `source_line` survive only as
-  custom fields. A run's style beyond the four `Formatting` booleans plus
-  `Script` (code, mark, small, small caps, math, insertion, abbreviation,
-  quote) has no slot on this plane, and a table's column alignment has
-  none either; both stay on the typed wire rather than being faked into a
-  custom field.
+  custom fields. Four of the run styles (mark, small, insertion,
+  abbreviation, quote) have no slot on this plane, a reference's key
+  survives only as the resolved `FineRef` (an unresolved one keeps
+  nothing), and a table's column alignment has no slot either; all of them
+  stay on the typed wire rather than being faked into a custom field.
 - **HTML:** anything derived from a rendered page (provenance
   boxes, visibility, forms) never existed here; nested structure inside a
   table cell survives only as the cell's flattened text; `hr` and unmapped

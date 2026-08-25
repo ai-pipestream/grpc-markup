@@ -583,6 +583,9 @@ fn map_formatting(value: &Value, unmapped: &mut Unmapped) -> Option<doc::Formatt
         strikethrough: obj.boolean("strikethrough"),
         script: script as i32,
         script_raw,
+        monospace: obj.boolean("monospace"),
+        small_caps: obj.boolean("small_caps"),
+        math: obj.boolean("math"),
     };
     obj.finish();
     Some(formatting)
@@ -914,6 +917,7 @@ fn stamp(document: &mut doc::Document) {
             model: Some("docling-json".to_owned()),
             version: Some(VERSION.to_owned()),
             confidence: None,
+            ..doc::CollectorSource::default()
         })),
     };
     for item in &mut document.texts {

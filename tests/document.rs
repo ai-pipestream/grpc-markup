@@ -537,7 +537,20 @@ async fn front_matter_lands_in_the_document_metadata_slots() {
         .expect("the source declares metadata");
     assert_eq!(meta.title.as_deref(), Some("Sketch of the Engine"));
     assert_eq!(meta.authors, vec!["Ada Lovelace", "Charles Babbage"]);
-    assert_eq!(meta.created.as_deref(), Some("1843-10-01"));
+    assert_eq!(
+        meta.created_raw.as_deref(),
+        Some("1843-10-01"),
+        "the source's own spelling is kept"
+    );
+    let civil = meta
+        .created_civil
+        .as_ref()
+        .expect("a date with no time of day is a wall-clock date");
+    assert_eq!((civil.year, civil.month, civil.day), (1843, 10, 1));
+    assert!(
+        meta.created.is_none(),
+        "no instant is invented for a date that states none"
+    );
     assert_eq!(meta.keywords, vec!["engine", "looms"]);
     assert_eq!(
         meta.extra.get("licence").map(String::as_str),

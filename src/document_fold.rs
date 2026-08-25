@@ -117,7 +117,10 @@ impl DocumentFold {
                 collector: COLLECTOR.to_owned(),
                 model: None,
                 version: Some(VERSION.to_owned()),
+                // A declarative markup mapping is deterministic, so there
+                // is no confidence and no engine score behind one.
                 confidence: None,
+                ..doc::CollectorSource::default()
             },
             prefix: COLLECTOR.to_owned(),
             table: None,
@@ -1179,8 +1182,28 @@ fn source_meta(
         let name = key.rsplit('.').next().unwrap_or(key).to_ascii_lowercase();
         let slot = match name.as_str() {
             "title" | "doctitle" => &mut meta.title,
-            "date" | "created" | "revdate" | "published" => &mut meta.created,
-            "modified" | "updated" | "lastmod" => &mut meta.modified,
+            "date" | "created" | "revdate" | "published" => {
+                if meta.created_raw.is_none()
+                    && let Some(text) = scalar_of(value)
+                {
+                    let (instant, civil) = declared_time(&text);
+                    meta.created = instant;
+                    meta.created_civil = civil;
+                    meta.created_raw = Some(text);
+                }
+                continue;
+            }
+            "modified" | "updated" | "lastmod" => {
+                if meta.modified_raw.is_none()
+                    && let Some(text) = scalar_of(value)
+                {
+                    let (instant, civil) = declared_time(&text);
+                    meta.modified = instant;
+                    meta.modified_civil = civil;
+                    meta.modified_raw = Some(text);
+                }
+                continue;
+            }
             "lang" | "language" | "content-language" => &mut meta.language,
             "generator" => &mut meta.generator,
             "author" | "authors" | "creator" => {
@@ -1230,6 +1253,173 @@ fn meta_tags(metadata: &HashMap<String, pb::MetaValue>) -> Vec<doc::MetaTag> {
             })
         })
         .collect()
+}
+
+/// A declared date as the two typed shapes the schema distinguishes.
+///
+/// A source that states an offset states an instant, and that is a
+/// `Timestamp`. A source that writes `1843-10-01`, or a date and a
+/// wall-clock time with no zone, has stated no instant, and inventing one
+/// would be inventing a timezone; that is a `CivilDateTime`. Anything the
+/// grammar does not cover parses to neither, and the caller keeps the
+/// source's own spelling in the `_raw` twin either way.
+fn declared_time(text: &str) -> (Option<prost_types::Timestamp>, Option<doc::CivilDateTime>) {
+    let Some(parsed) = Iso8601::parse(text.trim()) else {
+        return (None, None);
+    };
+    let Some(offset) = parsed.utc_offset_minutes else {
+        return (None, Some(parsed.civil()));
+    };
+    let seconds = days_from_civil(
+        i64::from(parsed.year),
+        i64::from(parsed.month),
+        i64::from(parsed.day),
+    ) * 86_400
+        + i64::from(parsed.hour) * 3_600
+        + i64::from(parsed.minute) * 60
+        + i64::from(parsed.second)
+        - i64::from(offset) * 60;
+    (
+        Some(prost_types::Timestamp {
+            seconds,
+            nanos: parsed.nanos,
+        }),
+        None,
+    )
+}
+
+/// One parsed ISO 8601 date, optionally with a time and an offset.
+struct Iso8601 {
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32,
+    nanos: i32,
+    has_time: bool,
+    utc_offset_minutes: Option<i32>,
+}
+
+impl Iso8601 {
+    /// `YYYY-MM-DD`, optionally `THH:MM[:SS[.fff]]`, optionally `Z` or
+    /// `+HH:MM`. Nothing looser: a date this cannot read is a date whose
+    /// meaning this fold does not know.
+    fn parse(text: &str) -> Option<Self> {
+        let (date, rest) = text.split_at_checked(10)?;
+        let mut parts = date.split('-');
+        let year = field(parts.next()?, 4)?;
+        let month = field(parts.next()?, 2)?;
+        let day = field(parts.next()?, 2)?;
+        if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return None;
+        }
+        let mut parsed = Self {
+            year,
+            month,
+            day,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            nanos: 0,
+            has_time: false,
+            utc_offset_minutes: None,
+        };
+        if rest.is_empty() {
+            return Some(parsed);
+        }
+        let rest = rest.strip_prefix(['T', 't', ' '])?;
+        let (time, zone) = match rest.find(['Z', 'z', '+']) {
+            Some(at) => rest.split_at(at),
+            // A minus inside the time is impossible, so the first one is
+            // the offset sign.
+            None => match rest.rfind('-') {
+                Some(at) => rest.split_at(at),
+                None => (rest, ""),
+            },
+        };
+        let (time, fraction) = time.split_once('.').unwrap_or((time, ""));
+        let mut units = time.split(':');
+        parsed.hour = field(units.next()?, 2)?;
+        parsed.minute = field(units.next()?, 2)?;
+        parsed.second = units.next().map_or(Some(0), |unit| field(unit, 2))?;
+        if units.next().is_some() || parsed.hour > 23 || parsed.minute > 59 || parsed.second > 60 {
+            return None;
+        }
+        if !fraction.is_empty() {
+            let digits: String = fraction.chars().take(9).collect();
+            if !digits.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let scale = 10i64.pow(9 - u32::try_from(digits.len()).ok()?);
+            parsed.nanos = i32::try_from(digits.parse::<i64>().ok()? * scale).ok()?;
+        }
+        parsed.has_time = true;
+        parsed.utc_offset_minutes = parse_offset(zone)?;
+        Some(parsed)
+    }
+
+    /// The wall-clock shape, with the time only when the source wrote one.
+    fn civil(&self) -> doc::CivilDateTime {
+        doc::CivilDateTime {
+            year: self.year,
+            month: self.month,
+            day: self.day,
+            hour: self.has_time.then_some(self.hour),
+            minute: self.has_time.then_some(self.minute),
+            second: self.has_time.then_some(self.second),
+            nanos: (self.has_time && self.nanos != 0).then_some(self.nanos),
+            // Unset: an offset means an instant, and an instant is a
+            // Timestamp rather than a civil value.
+            utc_offset_minutes: None,
+        }
+    }
+}
+
+/// The offset a timestamp states, `None` when it states none. The outer
+/// `Option` is the parse: an unreadable zone is not an offset of zero.
+fn parse_offset(zone: &str) -> Option<Option<i32>> {
+    if zone.is_empty() {
+        return Some(None);
+    }
+    if zone.eq_ignore_ascii_case("z") {
+        return Some(Some(0));
+    }
+    let sign = match zone.chars().next()? {
+        '+' => 1,
+        '-' => -1,
+        _ => return None,
+    };
+    let digits: String = zone[1..].chars().filter(|c| *c != ':').collect();
+    let (hours, minutes) = match digits.len() {
+        2 => (field(&digits, 2)?, 0),
+        4 => (field(&digits[..2], 2)?, field(&digits[2..], 2)?),
+        _ => return None,
+    };
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some(Some(sign * (hours * 60 + minutes)))
+}
+
+/// A zero-padded decimal field of exactly `width` digits.
+fn field(text: &str, width: usize) -> Option<i32> {
+    if text.len() != width || !text.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// Days from the Unix epoch to a proleptic Gregorian date, by Howard
+/// Hinnant's `days_from_civil`.
+const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// One metadata value as verbatim text, or nothing when it is a tree.
@@ -1291,6 +1481,9 @@ fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
         strikethrough: has(pb::SpanStyle::Strikethrough),
         script: script as i32,
         script_raw: None,
+        monospace: has(pb::SpanStyle::Code),
+        small_caps: has(pb::SpanStyle::SmallCaps),
+        math: has(pb::SpanStyle::Math),
     };
     doc::InlineSpan {
         range: span.range.map(|range| doc::IntSpan {
@@ -1307,6 +1500,26 @@ fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
         color: span.color.clone(),
         language: span.language.clone(),
         field_code: span.field_code.clone(),
+        reference_kind: reference_kind(span.reference_kind).map(|kind| kind as i32),
+    }
+}
+
+/// The Document plane's own name for what a reference points at.
+///
+/// Its vocabulary is coarser than the wire's: a cross reference and an
+/// equation reference are both a pointer at a numbered part of the
+/// document, so both land on `SECTION`, and a bibliography entry is a
+/// citation. The wire keeps the finer distinction.
+fn reference_kind(kind: i32) -> Option<doc::ReferenceKind> {
+    match pb::ReferenceKind::try_from(kind).ok()? {
+        pb::ReferenceKind::Unspecified => None,
+        pb::ReferenceKind::Footnote => Some(doc::ReferenceKind::Footnote),
+        pb::ReferenceKind::Citation | pb::ReferenceKind::Bibliography => {
+            Some(doc::ReferenceKind::Citation)
+        }
+        pb::ReferenceKind::CrossRef | pb::ReferenceKind::EquationRef => {
+            Some(doc::ReferenceKind::Section)
+        }
     }
 }
 
@@ -1807,6 +2020,28 @@ mod tests {
             Some("https://example.com"),
             "an in-prose link survives as a span, not only as an item hyperlink"
         );
+
+        // The three styles the schema gained homes for.
+        let typographic = pb::InlineSpan {
+            styles: vec![
+                pb::SpanStyle::Code as i32,
+                pb::SpanStyle::SmallCaps as i32,
+                pb::SpanStyle::Math as i32,
+            ],
+            ..span(0, 4)
+        };
+        let document = fold(&[pb::parse_markup_response::Event::TextBlock(spanned_block(
+            "code",
+            vec![typographic],
+        ))]);
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+            panic!("a paragraph folds to a TextItem");
+        };
+        let formatting = item.base.as_ref().unwrap().spans[0]
+            .formatting
+            .as_ref()
+            .expect("styled");
+        assert!(formatting.monospace && formatting.small_caps && formatting.math);
         assert!(
             spans[1].formatting.is_none(),
             "a run with no typography carries no all-false formatting"
@@ -1838,11 +2073,14 @@ mod tests {
         let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
             panic!("a paragraph folds to a TextItem");
         };
-        let target = item.base.as_ref().unwrap().spans[0]
-            .target
-            .as_ref()
-            .expect("the reference resolved");
+        let span = &item.base.as_ref().unwrap().spans[0];
+        let target = span.target.as_ref().expect("the reference resolved");
         assert_eq!(target.r#ref, "#/texts/1");
+        assert_eq!(
+            span.reference_kind,
+            Some(doc::ReferenceKind::Section as i32),
+            "an equation reference points at a numbered part of the document"
+        );
         assert_eq!(
             document.anchors,
             vec![doc::NamedAnchor {
@@ -1942,7 +2180,18 @@ mod tests {
         let meta = document.source_meta.as_ref().expect("declared metadata");
         assert_eq!(meta.title.as_deref(), Some("Sketch of the Engine"));
         assert_eq!(meta.authors, vec!["Ada Lovelace", "Grace Hopper"]);
-        assert_eq!(meta.created.as_deref(), Some("1843-10-01"));
+        assert_eq!(meta.created_raw.as_deref(), Some("1843-10-01"));
+        assert_eq!(
+            meta.created_civil,
+            Some(doc::CivilDateTime {
+                year: 1843,
+                month: 10,
+                day: 1,
+                ..doc::CivilDateTime::default()
+            }),
+            "a date with no time of day states no instant"
+        );
+        assert!(meta.created.is_none(), "and no instant is invented for it");
         assert_eq!(meta.language.as_deref(), Some("en"));
         assert_eq!(meta.keywords, vec!["engine", "looms"]);
         assert_eq!(
@@ -1951,6 +2200,53 @@ mod tests {
             "a scalar with no first-class slot keeps its own name"
         );
         assert!(!meta.extra.contains_key("authors"), "no key lands twice");
+    }
+
+    #[test]
+    fn a_declared_date_lands_in_the_shape_the_source_actually_stated() {
+        // No time of day: a wall-clock date, and no invented timezone.
+        let (instant, civil) = declared_time("1843-10-01");
+        assert!(instant.is_none());
+        assert_eq!(
+            civil,
+            Some(doc::CivilDateTime {
+                year: 1843,
+                month: 10,
+                day: 1,
+                ..doc::CivilDateTime::default()
+            })
+        );
+
+        // A time but no offset is still wall-clock.
+        let (instant, civil) = declared_time("2026-08-25T09:30:00");
+        assert!(instant.is_none());
+        let civil = civil.expect("a civil datetime");
+        assert_eq!(
+            (civil.hour, civil.minute, civil.second),
+            (Some(9), Some(30), Some(0))
+        );
+        assert!(civil.utc_offset_minutes.is_none());
+
+        // An offset states an instant.
+        let (instant, civil) = declared_time("1970-01-01T00:00:00Z");
+        assert!(civil.is_none());
+        assert_eq!(instant.expect("an instant").seconds, 0);
+        let (instant, _) = declared_time("2026-08-25T09:30:00.5-04:00");
+        let instant = instant.expect("an instant");
+        assert_eq!(instant.seconds, 1_787_664_600);
+        assert_eq!(instant.nanos, 500_000_000);
+
+        // Anything the grammar does not cover parses to neither shape; the
+        // caller still keeps the source's own spelling.
+        for unreadable in [
+            "October 1843",
+            "1843",
+            "1843-13-01",
+            "2026-08-25T25:00:00Z",
+            "",
+        ] {
+            assert_eq!(declared_time(unreadable), (None, None), "{unreadable}");
+        }
     }
 
     #[test]
