@@ -16,28 +16,37 @@
 //!   `BLOCK_LABEL_SECTION_HEADER` with a fixed level table
 //!   (part/chapter/section 1 through subparagraph 5).
 //! - Text runs split into paragraphs at blank lines; inline commands
-//!   flatten (`\textbf{x}` to its text, `\cite`/`\ref` to a bracketed
-//!   `[key]` placeholder, `\href{u}{t}` to `[t](u)`, `~` to a space,
-//!   escaped characters to themselves); `%` comments are stripped with
-//!   `\%` respected.
+//!   flatten to their text and leave the run they covered: `\textbf`,
+//!   `\emph` and their siblings as styles, `\cite`/`\ref`/`\eqref` as
+//!   typed references to their key, `\href{u}{t}` and `\url{u}` as links,
+//!   `$..$` as a math run keeping its TeX, `~` as a space, escaped
+//!   characters as themselves; `%` comments are stripped with `\%`
+//!   respected.
 //! - `itemize` / `enumerate` / `description` nest; every flushed run
 //!   inside an item is a `BLOCK_LABEL_LIST_ITEM`, `enumerated` for
 //!   `enumerate`, a `description` term prefixed `term: `.
-//! - `tabular` becomes table events: `&` splits cells, `\\` ends rows,
-//!   rule macros (`\hline`, `\toprule`, ...) are dropped, `\multicolumn`
+//! - `tabular` becomes table events: the preamble (`{|l|c|p{5cm}|}`) is
+//!   the table's column geometry, `&` splits cells, `\\` ends rows, rule
+//!   macros (`\hline`, `\toprule`, ...) are dropped, `\multicolumn`
 //!   carries `column_span` and `\multirow` `row_span`.
 //! - `verbatim` / `lstlisting` / `minted` keep their body verbatim as
 //!   `BLOCK_LABEL_CODE` (a `[language=x]` option declares the language);
 //!   `tikzpicture` keeps its source as code declared `tikz`.
 //! - `equation` and its display-math family, `$$..$$` and `\[..\]` are
-//!   `BLOCK_LABEL_FORMULA`, verbatim with `\label{...}` removed; `$..$`
-//!   stays inline in the enclosing text.
-//! - `\includegraphics` is an `ImageBlock` with the path verbatim.
+//!   `BLOCK_LABEL_FORMULA`, verbatim with `\label{...}` lifted out into the
+//!   block's `anchor_id`, which is what an `\eqref` resolves to; `$..$`
+//!   stays inline in the enclosing text as a math run.
+//! - `\includegraphics` is an `ImageBlock` with the path verbatim; a
+//!   `\footnote` leaves a marker run where it interrupted the paragraph,
+//!   pointing at the anchor its body carries.
+//! - A `\label` anchors the block it follows (a heading, a caption) or the
+//!   paragraph it sits inside.
 //! - `quote` / `quotation` / `verse` paragraphs are `BLOCK_LABEL_QUOTE`;
 //!   `abstract` opens a level-1 `Abstract` header with `role: "abstract"`;
 //!   theorem environments and `proof` lead with a labelled paragraph;
 //!   `thebibliography` becomes a `References` header plus one list item
-//!   per `\bibitem`, `[key]` first.
+//!   per `\bibitem`, the key its `anchor_id` rather than a prefix on its
+//!   text.
 //! - An unknown environment is descended into and flattened, with one
 //!   aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per environment name —
 //!   tolerance, made visible.
@@ -49,6 +58,7 @@ use std::collections::HashMap;
 
 use crate::parse::{Block, Emitter, ParseError};
 use crate::proto::v1 as pb;
+use crate::spans::{Inline, Mark};
 
 /// Heading macros and their docling levels.
 const HEADINGS: &[(&str, u32)] = &[
@@ -61,22 +71,53 @@ const HEADINGS: &[(&str, u32)] = &[
     ("subparagraph", 5),
 ];
 
-/// Macros whose single argument flattens to its own text.
-const TEXT_WRAPPERS: &[&str] = &[
-    "textbf",
-    "textit",
-    "emph",
-    "texttt",
-    "underline",
-    "textsc",
-    "textsf",
-    "textrm",
-    "textnormal",
-    "mbox",
+/// Macros whose single argument flattens to its own text, each with the
+/// run that argument carries. The macro name is an exact styling signal;
+/// the ones with no run (`\textsf`, `\mbox`) say nothing the wire models.
+const TEXT_WRAPPERS: &[(&str, Option<pb::SpanStyle>)] = &[
+    ("textbf", Some(pb::SpanStyle::Bold)),
+    ("textit", Some(pb::SpanStyle::Italic)),
+    ("emph", Some(pb::SpanStyle::Italic)),
+    ("texttt", Some(pb::SpanStyle::Code)),
+    ("underline", Some(pb::SpanStyle::Underline)),
+    ("textsc", Some(pb::SpanStyle::SmallCaps)),
+    ("textsf", None),
+    ("textrm", None),
+    ("textnormal", None),
+    ("mbox", None),
 ];
 
-/// Citation and reference macros: their key surfaces as `[key]`.
-const CITATIONS: &[&str] = &["cite", "citep", "citet", "ref", "eqref"];
+/// True when a macro wraps text it does not otherwise change.
+fn is_text_wrapper(name: &str) -> bool {
+    TEXT_WRAPPERS.iter().any(|(wrapper, _)| *wrapper == name)
+}
+
+/// The run one text wrapper puts over its argument.
+fn wrapper_mark(name: &str) -> Option<Mark> {
+    TEXT_WRAPPERS
+        .iter()
+        .find(|(wrapper, _)| *wrapper == name)
+        .and_then(|(_, style)| *style)
+        .map(Mark::style)
+}
+
+/// Citation and reference macros, each with what its key points at. The
+/// keys used to become the string `[key]`, which nothing could read back.
+const CITATIONS: &[(&str, pb::ReferenceKind)] = &[
+    ("cite", pb::ReferenceKind::Citation),
+    ("citep", pb::ReferenceKind::Citation),
+    ("citet", pb::ReferenceKind::Citation),
+    ("ref", pb::ReferenceKind::CrossRef),
+    ("eqref", pb::ReferenceKind::EquationRef),
+];
+
+/// What a citation or cross-reference macro's key points at.
+fn citation_kind(name: &str) -> Option<pb::ReferenceKind> {
+    CITATIONS
+        .iter()
+        .find(|(macro_name, _)| *macro_name == name)
+        .map(|(_, kind)| *kind)
+}
 
 /// Escaped characters that are their own macro name.
 const ESCAPED: &[&str] = &["&", "%", "$", "#", "_", "{", "}"];
@@ -248,6 +289,8 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         emitter,
         macros,
         title_taken: false,
+        pending_anchor: None,
+        footnotes: 0,
     };
     if let Some(text) = title {
         walk.title_taken = true;
@@ -331,8 +374,8 @@ fn signature(name: &str) -> Sig {
         return Sig::Fixed(3);
     }
     let fixed_one = HEADINGS.iter().any(|(heading, _)| *heading == name)
-        || TEXT_WRAPPERS.contains(&name)
-        || CITATIONS.contains(&name)
+        || is_text_wrapper(name)
+        || citation_kind(name).is_some()
         || matches!(
             name,
             "title"
@@ -766,23 +809,22 @@ fn collect_newcommands(text: &str, macros: &mut HashMap<String, String>) {
 
 // ----------------------------------------------------------- text flatten
 
-/// Nodes flattened to inline text: docling's `_nodes_to_text`.
+/// Nodes flattened to inline text, with the runs they carry recorded.
 fn flatten_nodes(nodes: &[Node], macros: &HashMap<String, String>) -> String {
-    let mut out = String::new();
+    let mut out = Inline::default();
     flatten_into(nodes, macros, 0, &mut out);
-    collapse(&out)
+    out.take().0
 }
 
-fn flatten_into(nodes: &[Node], macros: &HashMap<String, String>, depth: usize, out: &mut String) {
+fn flatten_into(nodes: &[Node], macros: &HashMap<String, String>, depth: usize, out: &mut Inline) {
     for node in nodes {
         match node {
-            Node::Text(text) => out.push_str(text),
+            Node::Text(text) => out.push(text),
             Node::Group(inner) => flatten_into(inner, macros, depth, out),
-            Node::Math { text, display } => {
-                let delim = if *display { "$$" } else { "$" };
-                out.push_str(delim);
-                out.push_str(text);
-                out.push_str(delim);
+            Node::Math { text, .. } => {
+                // The delimiters no longer ride in the text; the run says
+                // it is math and `raw` carries the TeX.
+                out.push_marked(text, Mark::style(pb::SpanStyle::Math).with_raw(text));
             }
             Node::Environment { body, .. } => flatten_into(body, macros, depth, out),
             Node::Macro { name, opt, args } => {
@@ -792,36 +834,56 @@ fn flatten_into(nodes: &[Node], macros: &HashMap<String, String>, depth: usize, 
     }
 }
 
-/// One macro's inline text: docling's `_macro_node_to_text`.
+/// One macro's inline text and the run it carries.
 fn flatten_macro(
     name: &str,
     opt: Option<&str>,
     args: &[Vec<Node>],
     macros: &HashMap<String, String>,
     depth: usize,
-    out: &mut String,
+    out: &mut Inline,
 ) {
     if ESCAPED.contains(&name) {
-        out.push_str(name);
+        out.push(name);
         return;
     }
     match name {
-        "~" | " " | "\\" => out.push(' '),
-        _ if TEXT_WRAPPERS.contains(&name) => {
+        "~" | " " | "\\" => out.space(),
+        _ if is_text_wrapper(name) => {
             if let Some(arg) = args.first() {
-                flatten_into(arg, macros, depth, out);
+                match wrapper_mark(name) {
+                    Some(mark) => {
+                        out.open(mark);
+                        flatten_into(arg, macros, depth, out);
+                        out.close();
+                    }
+                    None => flatten_into(arg, macros, depth, out),
+                }
             }
         }
-        _ if CITATIONS.contains(&name) => {
-            if let Some(arg) = args.first() {
-                out.push('[');
-                flatten_into(arg, macros, depth, out);
-                out.push(']');
+        _ if citation_kind(name).is_some() => {
+            let kind = citation_kind(name).expect("just matched");
+            let Some(arg) = args.first() else { return };
+            let keys = flatten_nodes(arg, macros);
+            // `\cite{a,b}` names two works, so it leaves two references.
+            for (position, key) in keys.split(',').map(str::trim).enumerate() {
+                if key.is_empty() {
+                    continue;
+                }
+                if position > 0 {
+                    out.push(", ");
+                }
+                out.push_marked(key, Mark::reference(key, kind));
             }
         }
         "url" => {
             if let Some(arg) = args.first() {
-                flatten_into(arg, macros, depth, out);
+                let url = flatten_nodes(arg, macros);
+                if !url.is_empty() {
+                    out.open_link(&url, None);
+                    out.push(&url);
+                    out.close_link();
+                }
             }
         }
         "href" => {
@@ -829,9 +891,13 @@ fn flatten_macro(
             let display = args.get(1).map(|arg| flatten_nodes(arg, macros));
             match (display, url) {
                 (Some(display), Some(url)) if !display.is_empty() && !url.is_empty() => {
-                    out.push_str(&format!("[{display}]({url})"));
+                    // The link used to be smuggled into the prose as the
+                    // literal `[text](url)`; it is a run now.
+                    out.open_link(&url, None);
+                    out.push(&display);
+                    out.close_link();
                 }
-                (Some(text), _) | (_, Some(text)) => out.push_str(&text),
+                (Some(text), _) | (_, Some(text)) => out.push(&text),
                 _ => {}
             }
         }
@@ -841,10 +907,10 @@ fn flatten_macro(
             }
         }
         "item" => {
-            // A description term reads as a lead-in, docling's `opt: `.
+            // A description term reads as a lead-in.
             if let Some(term) = opt {
-                out.push_str(term.trim());
-                out.push_str(": ");
+                out.push(term.trim());
+                out.push(": ");
             }
         }
         "footnote" | "marginpar" | "caption" | "label" => {}
@@ -858,31 +924,37 @@ fn flatten_macro(
                 return;
             }
             // Unknown macro: its argument text survives, the command
-            // itself does not — docling's `_extract_all_macro_args_inline`.
+            // itself does not.
             for arg in args {
                 flatten_into(arg, macros, depth, out);
-                out.push(' ');
+                out.space();
             }
         }
     }
 }
 
-/// Runs of whitespace collapsed to single spaces, ends trimmed.
-fn collapse(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// A formula body cleaned the way docling cleans it: `\label{...}`
-/// removed, delimiters trimmed.
-fn clean_math(text: &str) -> String {
+/// A formula body cleaned: `\label{...}` lifted out, delimiters trimmed.
+///
+/// The label used to be deleted here, which is why every `\eqref` pointed
+/// at nothing. It comes back as the formula's anchor.
+fn clean_math(text: &str) -> (String, Option<String>) {
     let mut out = String::with_capacity(text.len());
+    let mut label = None;
     let mut rest = text;
     while let Some(hit) = rest.find("\\label") {
         out.push_str(&rest[..hit]);
         let after = rest[hit + 6..].trim_start();
         if let Some(braced) = after.strip_prefix('{') {
             match braced.find('}') {
-                Some(close) => rest = &braced[close + 1..],
+                Some(close) => {
+                    if label.is_none() {
+                        let key = braced[..close].trim();
+                        if !key.is_empty() {
+                            label = Some(key.to_owned());
+                        }
+                    }
+                    rest = &braced[close + 1..];
+                }
                 None => {
                     rest = "";
                 }
@@ -893,7 +965,7 @@ fn clean_math(text: &str) -> String {
         }
     }
     out.push_str(rest);
-    out.trim().to_owned()
+    (out.trim().to_owned(), label)
 }
 
 // ---------------------------------------------------------------- mapping
@@ -912,14 +984,23 @@ struct Walk<'w, 'e> {
     emitter: &'w mut Emitter<'e>,
     macros: HashMap<String, String>,
     title_taken: bool,
+    /// A `\label` seen inside running text, waiting for the block that
+    /// text becomes.
+    pending_anchor: Option<String>,
+    /// Footnotes emitted so far, for minting the marker a `\footnote`
+    /// leaves behind in the paragraph it interrupts.
+    footnotes: u32,
 }
 
 impl Walk<'_, '_> {
     /// Process a node run: buffer inline content, flush at block
     /// boundaries — docling's `_process_nodes`.
     fn nodes(&mut self, nodes: &[Node], ctx: &Ctx) -> Result<(), ParseError> {
-        let mut buffer = String::new();
-        for node in nodes {
+        let mut buffer = Inline::default();
+        // A `\label` that follows a structural macro belongs to the block
+        // that macro made, not to the text after it.
+        let mut claimed: Option<usize> = None;
+        for (index, node) in nodes.iter().enumerate() {
             match node {
                 Node::Text(text) => {
                     // A blank line closes the paragraph before it; the text
@@ -927,11 +1008,11 @@ impl Walk<'_, '_> {
                     // can continue into the following inline nodes.
                     let mut parts = text.split("\n\n");
                     if let Some(first) = parts.next() {
-                        buffer.push_str(first);
+                        buffer.push(first);
                     }
                     for part in parts {
                         self.flush(&mut buffer, ctx)?;
-                        buffer.push_str(part);
+                        buffer.push(part);
                     }
                 }
                 Node::Group(inner) => {
@@ -945,17 +1026,42 @@ impl Walk<'_, '_> {
                 Node::Math { display, text } => {
                     if *display {
                         self.flush(&mut buffer, ctx)?;
-                        self.formula(text)?;
+                        self.formula(text, None)?;
                     } else {
-                        buffer.push('$');
-                        buffer.push_str(text);
-                        buffer.push('$');
+                        buffer.push_marked(text, Mark::style(pb::SpanStyle::Math).with_raw(text));
                     }
                 }
                 Node::Macro { name, opt, args } => {
+                    if name == "label" {
+                        if claimed == Some(index) {
+                            continue;
+                        }
+                        // A bare `\label` inside running text anchors the
+                        // block that text is about to become.
+                        if let Some(key) = label_key(args, &self.macros) {
+                            self.pending_anchor = Some(key);
+                        }
+                        continue;
+                    }
                     if self.is_structural(name) {
+                        let found = label_after(nodes, index, &self.macros);
+                        claimed = found.as_ref().map(|(_, at)| *at);
+                        let mut anchor = found.map(|(key, _)| key);
+                        if matches!(name.as_str(), "footnote" | "marginpar") {
+                            // The footnote body interrupts the paragraph;
+                            // the marker it leaves behind is what says
+                            // where in the paragraph it belonged.
+                            let (key, marker) = self.footnote_key();
+                            let key = anchor.clone().unwrap_or(key);
+                            buffer.push_marked(
+                                &marker,
+                                Mark::reference(&key, pb::ReferenceKind::Footnote)
+                                    .with_style(pb::SpanStyle::Superscript),
+                            );
+                            anchor = Some(key);
+                        }
                         self.flush(&mut buffer, ctx)?;
-                        self.structural(name, opt.as_deref(), args)?;
+                        self.structural(name, opt.as_deref(), args, anchor)?;
                     } else {
                         flatten_macro(name, opt.as_deref(), args, &self.macros, 0, &mut buffer);
                     }
@@ -998,6 +1104,7 @@ impl Walk<'_, '_> {
         name: &str,
         _opt: Option<&str>,
         args: &[Vec<Node>],
+        anchor: Option<String>,
     ) -> Result<(), ParseError> {
         let arg_text = args
             .first()
@@ -1011,6 +1118,7 @@ impl Walk<'_, '_> {
                 label: pb::BlockLabel::SectionHeader,
                 text: arg_text,
                 level: Some(*level),
+                anchor_id: anchor,
                 ..Block::default()
             });
         }
@@ -1053,6 +1161,7 @@ impl Walk<'_, '_> {
                 self.emitter.text_block(Block {
                     label: pb::BlockLabel::Caption,
                     text: arg_text,
+                    anchor_id: anchor,
                     ..Block::default()
                 })
             }
@@ -1063,6 +1172,9 @@ impl Walk<'_, '_> {
                 self.emitter.text_block(Block {
                     label: pb::BlockLabel::Footnote,
                     text: arg_text,
+                    // The body is the anchor the marker left behind in the
+                    // paragraph it interrupted points at.
+                    anchor_id: anchor,
                     ..Block::default()
                 })
             }
@@ -1107,7 +1219,7 @@ impl Walk<'_, '_> {
                 })?;
                 self.nodes(body, ctx)
             }
-            _ if MATH_ENVS.contains(&base) => self.formula(raw),
+            _ if MATH_ENVS.contains(&base) => self.formula(raw, None),
             _ if THEOREM_ENVS.contains(&base) => {
                 let mut lead = base.to_owned();
                 lead[..1].make_ascii_uppercase();
@@ -1192,17 +1304,29 @@ impl Walk<'_, '_> {
         }
     }
 
-    /// A display formula, cleaned.
-    fn formula(&mut self, raw: &str) -> Result<(), ParseError> {
-        let text = clean_math(raw);
+    /// A display formula, cleaned. Its own `\label` is the anchor an
+    /// `\eqref` resolves to, rather than something the cleaning deletes.
+    fn formula(&mut self, raw: &str, anchor: Option<String>) -> Result<(), ParseError> {
+        let (text, label) = clean_math(raw);
         if text.is_empty() {
             return Ok(());
         }
         self.emitter.text_block(Block {
             label: pb::BlockLabel::Formula,
             text,
+            anchor_id: anchor.or(label),
             ..Block::default()
         })
+    }
+
+    /// The anchor a footnote body carries when the source names none, and
+    /// the marker its reference leaves in the text.
+    fn footnote_key(&mut self) -> (String, String) {
+        self.footnotes += 1;
+        (
+            format!("footnote-{}", self.footnotes),
+            self.footnotes.to_string(),
+        )
     }
 
     /// An `itemize` / `enumerate` / `description` body: nodes split on
@@ -1239,25 +1363,13 @@ impl Walk<'_, '_> {
         Ok(())
     }
 
-    /// A `thebibliography` body: one list item per `\bibitem`, `[key]`
-    /// first.
+    /// A `thebibliography` body: one list item per `\bibitem`, its key the
+    /// anchor every `\cite` of that entry resolves to rather than a
+    /// bracketed prefix on the text.
     fn bibliography(&mut self, body: &[Node]) -> Result<(), ParseError> {
-        let mut current = String::new();
+        let mut current = Inline::default();
+        let mut key: Option<String> = None;
         let mut in_item = false;
-        let flush = |walk: &mut Self, text: &mut String| -> Result<(), ParseError> {
-            let collapsed = collapse(text);
-            text.clear();
-            if collapsed.is_empty() {
-                return Ok(());
-            }
-            walk.emitter.text_block(Block {
-                label: pb::BlockLabel::ListItem,
-                role: "bibliography".to_owned(),
-                text: collapsed,
-                list_depth: Some(1),
-                ..Block::default()
-            })
-        };
         for node in body {
             if !in_item && matches!(node, Node::Group(_)) {
                 // The environment's widest-label argument (`{9}`), not an
@@ -1268,41 +1380,57 @@ impl Walk<'_, '_> {
                 && name == "bibitem"
             {
                 if in_item {
-                    flush(self, &mut current)?;
+                    self.bib_entry(&mut current, key.take())?;
                 }
                 in_item = true;
-                let key = args
+                key = args
                     .first()
                     .map(|arg| flatten_nodes(arg, &self.macros))
-                    .unwrap_or_default();
-                if !key.is_empty() {
-                    current.push_str(&format!("[{key}] "));
-                }
+                    .filter(|key| !key.is_empty());
                 continue;
             }
             flatten_into(std::slice::from_ref(node), &self.macros, 0, &mut current);
         }
         if in_item {
-            flush(self, &mut current)?;
+            self.bib_entry(&mut current, key)?;
         }
         Ok(())
     }
 
+    /// One bibliography entry, anchored by its `\bibitem` key.
+    fn bib_entry(&mut self, current: &mut Inline, key: Option<String>) -> Result<(), ParseError> {
+        let (text, spans) = current.take();
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.emitter.text_block(Block {
+            label: pb::BlockLabel::ListItem,
+            role: "bibliography".to_owned(),
+            text,
+            list_depth: Some(1),
+            spans,
+            anchor_id: key,
+            ..Block::default()
+        })
+    }
+
     /// A `tabular` body as table events.
     fn table(&mut self, body: &[Node]) -> Result<(), ParseError> {
-        // The first group is the column specification, not a cell.
+        // The first group is the column specification, not a cell. It used
+        // to be skipped past; it is the table's column geometry.
+        let mut columns = Vec::new();
         let cells_start = body
             .iter()
             .position(|node| !matches!(node, Node::Text(text) if text.trim().is_empty()))
-            .map_or(0, |first| {
-                if matches!(body.get(first), Some(Node::Group(_))) {
+            .map_or(0, |first| match body.get(first) {
+                Some(Node::Group(spec)) => {
+                    columns = column_specs(spec);
                     first + 1
-                } else {
-                    first
                 }
+                _ => first,
             });
 
-        self.emitter.table_start(None, None)?;
+        self.emitter.table_start_with_columns(None, None, columns)?;
         let mut row = RowBuilder::default();
         for node in &body[cells_start..] {
             match node {
@@ -1310,14 +1438,14 @@ impl Walk<'_, '_> {
                     if text.contains('&') {
                         let mut parts = text.split('&');
                         if let Some(first) = parts.next() {
-                            row.cell.push_str(first);
+                            row.cell.push(first);
                         }
                         for part in parts {
                             row.finish_cell();
-                            row.cell.push_str(part);
+                            row.cell.push(part);
                         }
                     } else {
-                        row.cell.push_str(text);
+                        row.cell.push(text);
                     }
                 }
                 Node::Macro { name, opt, args } => match name.as_str() {
@@ -1367,12 +1495,14 @@ impl Walk<'_, '_> {
     }
 
     /// Flush the inline buffer as one block, labelled by context.
-    fn flush(&mut self, buffer: &mut String, ctx: &Ctx) -> Result<(), ParseError> {
-        let text = collapse(buffer);
-        buffer.clear();
+    fn flush(&mut self, buffer: &mut Inline, ctx: &Ctx) -> Result<(), ParseError> {
+        let hyperlink = buffer.hyperlink();
+        let (text, spans) = buffer.take();
         if text.is_empty() {
+            self.pending_anchor = None;
             return Ok(());
         }
+        let anchor = self.pending_anchor.take();
         let block = if let Some((enumerated, depth)) = ctx.list {
             Block {
                 label: pb::BlockLabel::ListItem,
@@ -1382,6 +1512,9 @@ impl Walk<'_, '_> {
                 // written" to carry.
                 marker: None,
                 list_depth: Some(depth),
+                hyperlink,
+                spans,
+                anchor_id: anchor,
                 ..Block::default()
             }
         } else {
@@ -1392,6 +1525,9 @@ impl Walk<'_, '_> {
                     pb::BlockLabel::Paragraph
                 },
                 text,
+                hyperlink,
+                spans,
+                anchor_id: anchor,
                 ..Block::default()
             }
         };
@@ -1399,11 +1535,121 @@ impl Walk<'_, '_> {
     }
 }
 
+/// The `\label` key of a label macro's argument.
+fn label_key(args: &[Vec<Node>], macros: &HashMap<String, String>) -> Option<String> {
+    args.first()
+        .map(|arg| flatten_nodes(arg, macros))
+        .filter(|key| !key.is_empty())
+}
+
+/// The `\label` that follows the node at `index`, skipping only
+/// whitespace: `\section{Intro}\label{sec:intro}` anchors the heading, not
+/// the text after it. Returns the key and the index it was found at.
+fn label_after(
+    nodes: &[Node],
+    index: usize,
+    macros: &HashMap<String, String>,
+) -> Option<(String, usize)> {
+    for (at, node) in nodes.iter().enumerate().skip(index + 1) {
+        match node {
+            Node::Text(text) if text.trim().is_empty() => {}
+            Node::Macro { name, args, .. } if name == "label" => {
+                return label_key(args, macros).map(|key| (key, at));
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The column geometry a `tabular` preamble declares, one entry per
+/// column. Rules (`|`), spacing (`@{...}`) and cell decorators (`>{...}`)
+/// are not columns and are skipped.
+fn column_specs(spec: &[Node]) -> Vec<pb::ColumnSpec> {
+    let text = spec_text(spec);
+    let mut columns = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let align = match c {
+            'l' => pb::Alignment::Left,
+            'c' => pb::Alignment::Center,
+            'r' => pb::Alignment::Right,
+            // A fixed-width column sets its own width and justifies.
+            'p' | 'm' | 'b' => pb::Alignment::Justify,
+            '@' | '>' | '<' | '!' => {
+                braced(&mut chars);
+                continue;
+            }
+            _ => continue,
+        };
+        let width = matches!(c, 'p' | 'm' | 'b')
+            .then(|| braced(&mut chars))
+            .flatten();
+        columns.push(pb::ColumnSpec {
+            align: align as i32,
+            valign: match c {
+                'm' => pb::Alignment::Middle as i32,
+                'b' => pb::Alignment::Bottom as i32,
+                'p' => pb::Alignment::Top as i32,
+                _ => pb::Alignment::Unspecified as i32,
+            },
+            width,
+        });
+    }
+    columns
+}
+
+/// The content of a `{...}` group at the cursor, consumed.
+fn braced(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+    if chars.peek() != Some(&'{') {
+        return None;
+    }
+    chars.next();
+    let mut depth = 1usize;
+    let mut out = String::new();
+    for c in chars.by_ref() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    Some(out).filter(|text| !text.is_empty())
+}
+
+/// A column specification rendered back to source-ish text, braces kept,
+/// so `p{5cm}` stays one column with a width.
+fn spec_text(nodes: &[Node]) -> String {
+    let mut out = String::new();
+    for node in nodes {
+        match node {
+            Node::Text(text) => out.push_str(text),
+            Node::Group(inner) => {
+                out.push('{');
+                out.push_str(&spec_text(inner));
+                out.push('}');
+            }
+            Node::Macro { name, .. } => {
+                out.push('\\');
+                out.push_str(name);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// One `tabular` row being assembled: the pending cell's text, its spans
 /// (set by `\multicolumn` / `\multirow`), and the finished cells.
 #[derive(Default)]
 struct RowBuilder {
-    cell: String,
+    cell: Inline,
     spans: (u32, u32),
     column: u32,
     cells: Vec<pb::TableCell>,
@@ -1415,22 +1661,23 @@ impl RowBuilder {
         let (column_span, row_span) = self.spans;
         let column_span = column_span.max(1);
         self.spans = (1, 1);
+        let (text, spans) = self.cell.take();
         self.cells.push(pb::TableCell {
             column_index: self.column,
-            text: collapse(&self.cell),
+            text,
             column_span,
             row_span: row_span.max(1),
             is_header: false,
+            spans,
             ..pb::TableCell::default()
         });
-        self.cell.clear();
         self.column += column_span;
     }
 
     /// Close the row, returning its cells when it carries any content.
     /// Rule-only and whitespace-only rows dissolve.
     fn take_row(&mut self) -> Option<Vec<pb::TableCell>> {
-        if !self.cell.trim().is_empty() || !self.cells.is_empty() {
+        if !self.cell.is_empty() || !self.cells.is_empty() {
             self.finish_cell();
         }
         self.column = 0;
@@ -1477,19 +1724,110 @@ mod tests {
         assert_eq!(flat("50\\% \\& \\$5"), "50% & $5");
     }
 
-    #[test]
-    fn citations_and_refs_become_bracketed_placeholders() {
-        assert_eq!(flat("see \\cite{knuth84}"), "see [knuth84]");
-        assert_eq!(flat("Fig.~\\ref{fig:a}"), "Fig. [fig:a]");
+    /// The text and the runs a snippet flattens to.
+    fn runs(latex: &str) -> (String, Vec<pb::InlineSpan>) {
+        let nodes = Parser::new(latex).nodes(None);
+        let mut out = Inline::default();
+        flatten_into(&nodes, &HashMap::new(), 0, &mut out);
+        out.take()
+    }
+
+    /// The text one run covers, sliced by code points.
+    fn covered(text: &str, span: &pb::InlineSpan) -> String {
+        let range = span.range.expect("a run has a range");
+        text.chars()
+            .skip(range.start as usize)
+            .take((range.end - range.start) as usize)
+            .collect()
     }
 
     #[test]
-    fn href_renders_text_and_url() {
+    fn citations_and_refs_keep_their_keys_and_their_kind() {
+        let (text, spans) = runs("see \\cite{knuth84}");
+        assert_eq!(text, "see knuth84", "no bracketed placeholder");
+        assert_eq!(covered(&text, &spans[0]), "knuth84");
+        assert_eq!(spans[0].reference.as_deref(), Some("knuth84"));
+        assert_eq!(spans[0].reference_kind, pb::ReferenceKind::Citation as i32);
+
+        let (text, spans) = runs("Fig.~\\ref{fig:a}");
+        assert_eq!(text, "Fig. fig:a");
         assert_eq!(
-            flat("\\href{https://example.com}{Docs}"),
-            "[Docs](https://example.com)"
+            spans[0].reference_kind,
+            pb::ReferenceKind::CrossRef as i32,
+            "a cross reference is not a citation"
         );
-        assert_eq!(flat("\\url{https://example.com}"), "https://example.com");
+
+        let (text, spans) = runs("\\eqref{eq:mass}");
+        assert_eq!(text, "eq:mass");
+        assert_eq!(
+            spans[0].reference_kind,
+            pb::ReferenceKind::EquationRef as i32
+        );
+
+        // One macro, two works.
+        let (text, spans) = runs("\\cite{a,b}");
+        assert_eq!(text, "a, b");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(covered(&text, &spans[1]), "b");
+    }
+
+    #[test]
+    fn href_and_url_leave_a_link_run_not_punctuation() {
+        let (text, spans) = runs("\\href{https://example.com}{Docs}");
+        assert_eq!(text, "Docs", "the URL is not smuggled into the prose");
+        assert_eq!(covered(&text, &spans[0]), "Docs");
+        assert_eq!(spans[0].hyperlink.as_deref(), Some("https://example.com"));
+
+        let (text, spans) = runs("\\url{https://example.com}");
+        assert_eq!(text, "https://example.com");
+        assert_eq!(spans[0].hyperlink.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn text_wrappers_name_the_run_they_cover() {
+        let (text, spans) = runs("\\textbf{bold} et \\emph{prêt} et \\texttt{code}");
+        assert_eq!(text, "bold et prêt et code");
+        let seen: Vec<(String, Vec<i32>)> = spans
+            .iter()
+            .map(|span| (covered(&text, span), span.styles.clone()))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("bold".to_owned(), vec![pb::SpanStyle::Bold as i32]),
+                ("prêt".to_owned(), vec![pb::SpanStyle::Italic as i32]),
+                ("code".to_owned(), vec![pb::SpanStyle::Code as i32]),
+            ],
+            "the accented run's range is in code points"
+        );
+    }
+
+    #[test]
+    fn a_column_specification_is_geometry_rather_than_something_to_skip() {
+        let nodes = Parser::new("{|l|c|r|}").nodes(None);
+        let Some(Node::Group(spec)) = nodes.first() else {
+            panic!("one group, got {nodes:?}");
+        };
+        assert_eq!(
+            column_specs(spec)
+                .iter()
+                .map(|column| column.align)
+                .collect::<Vec<_>>(),
+            vec![
+                pb::Alignment::Left as i32,
+                pb::Alignment::Center as i32,
+                pb::Alignment::Right as i32,
+            ]
+        );
+
+        let nodes = Parser::new("{l p{5cm}}").nodes(None);
+        let Some(Node::Group(spec)) = nodes.first() else {
+            panic!("one group");
+        };
+        let columns = column_specs(spec);
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[1].align, pb::Alignment::Justify as i32);
+        assert_eq!(columns[1].width.as_deref(), Some("5cm"));
     }
 
     #[test]
@@ -1522,9 +1860,17 @@ mod tests {
     }
 
     #[test]
-    fn math_cleaning_strips_labels_and_trims() {
-        assert_eq!(clean_math("  E = mc^2 \\label{eq:emc}  "), "E = mc^2");
-        assert_eq!(clean_math("a\\label{x}b"), "ab");
+    fn math_cleaning_lifts_the_label_out_instead_of_deleting_it() {
+        let (text, label) = clean_math("  E = mc^2 \\label{eq:emc}  ");
+        assert_eq!(text, "E = mc^2");
+        assert_eq!(
+            label.as_deref(),
+            Some("eq:emc"),
+            "the anchor every eqref points at"
+        );
+        let (text, label) = clean_math("a\\label{x}b");
+        assert_eq!(text, "ab");
+        assert_eq!(label.as_deref(), Some("x"));
     }
 
     #[test]

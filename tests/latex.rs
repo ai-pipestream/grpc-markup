@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    blocks_labelled, client, images, info, options, parse, parse_ok, sniff_options, status,
-    table_rows, texts, warning,
+    blocks_labelled, client, images, info, options, parse, parse_ok, sniff_options, spanned,
+    status, styles, table_rows, table_starts, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -129,20 +129,48 @@ async fn inline_commands_flatten_and_custom_macros_expand() {
     let client = client().await;
     let events = parse_ok(&client, LATEX, options(pb::MarkupFormat::Latex)).await;
     let paragraphs = blocks_labelled(&events, pb::BlockLabel::Paragraph);
-    assert!(
-        paragraphs.iter().any(|p| p.text
-            == "An opening paragraph with bold and emphasis, citing [menabrea1843] about the \
-                Analytical Engine."),
-        "{:?}",
-        texts(&paragraphs)
+    let opening = paragraphs
+        .iter()
+        .find(|p| p.text.starts_with("An opening paragraph"))
+        .unwrap_or_else(|| panic!("{:?}", texts(&paragraphs)));
+    assert_eq!(
+        opening.text,
+        "An opening paragraph with bold and emphasis, citing menabrea1843 about the \
+         Analytical Engine."
     );
-    assert!(
-        paragraphs
-            .iter()
-            .any(|p| p.text == "It even has $x^2$ inline math."),
-        "inline math stays in the text stream: {:?}",
-        texts(&paragraphs)
+    let styled: Vec<(String, Vec<pb::SpanStyle>)> = opening
+        .spans
+        .iter()
+        .filter(|span| !span.styles.is_empty())
+        .map(|span| (spanned(&opening.text, span), styles(span)))
+        .collect();
+    assert_eq!(
+        styled,
+        vec![
+            ("bold".to_owned(), vec![pb::SpanStyle::Bold]),
+            ("emphasis".to_owned(), vec![pb::SpanStyle::Italic]),
+        ],
+        "the macro name is an exact styling signal and now reaches the wire"
     );
+    let citation = opening
+        .spans
+        .iter()
+        .find(|span| span.reference_kind == pb::ReferenceKind::Citation as i32)
+        .expect("a citation run");
+    assert_eq!(citation.reference.as_deref(), Some("menabrea1843"));
+    assert_eq!(spanned(&opening.text, citation), "menabrea1843");
+
+    let math = paragraphs
+        .iter()
+        .find(|p| p.text.starts_with("It even has"))
+        .expect("the math paragraph");
+    assert_eq!(math.text, "It even has x^2 inline math.");
+    let run = math
+        .spans
+        .iter()
+        .find(|span| styles(span).contains(&pb::SpanStyle::Math))
+        .expect("an inline math run");
+    assert_eq!(run.raw.as_deref(), Some("x^2"));
 }
 
 #[tokio::test]
@@ -303,8 +331,10 @@ async fn theorems_and_bibliographies_map_as_docling_maps_them() {
     let items = blocks_labelled(&events, pb::BlockLabel::ListItem);
     assert_eq!(
         texts(&items),
-        ["[menabrea1843] L. Menabrea, Sketch of the Analytical Engine."]
+        ["L. Menabrea, Sketch of the Analytical Engine."],
+        "the key is an anchor, not a prefix on the text"
     );
+    assert_eq!(items[0].anchor_id.as_deref(), Some("menabrea1843"));
 }
 
 #[tokio::test]
@@ -365,4 +395,122 @@ async fn comments_never_reach_the_stream() {
         ["kept still kept. 100% escaped."]
     );
     assert_eq!(status(&events).counts.as_ref().unwrap().text_blocks, 1);
+}
+
+// -------------------------------------------------- anchors and geometry
+
+/// A document whose reference graph is the point: labelled sections and
+/// equations, cross references to both, a link, a footnote, and a tabular
+/// preamble that declares its columns.
+const ANCHORED: &str = r"\documentclass{article}
+\begin{document}
+\section{Method}\label{sec:method}
+
+See \ref{sec:method} and \eqref{eq:mass}, and the
+\href{https://example.com}{project page}\footnote{Hosted elsewhere.}.
+
+\begin{equation}\label{eq:mass}
+E = mc^2
+\end{equation}
+
+\begin{tabular}{|l|c|p{5cm}|}
+Name & Role & Notes \\
+\end{tabular}
+\end{document}
+";
+
+#[tokio::test]
+async fn labels_become_anchors_and_references_point_at_them() {
+    let client = client().await;
+    let events = parse_ok(&client, ANCHORED, options(pb::MarkupFormat::Latex)).await;
+    let headers = blocks_labelled(&events, pb::BlockLabel::SectionHeader);
+    let method = headers
+        .iter()
+        .find(|header| header.text == "Method")
+        .expect("the labelled section");
+    assert_eq!(
+        method.anchor_id.as_deref(),
+        Some("sec:method"),
+        "a label following a sectioning command anchors it"
+    );
+
+    let formulas = blocks_labelled(&events, pb::BlockLabel::Formula);
+    assert_eq!(texts(&formulas), ["E = mc^2"]);
+    assert_eq!(
+        formulas[0].anchor_id.as_deref(),
+        Some("eq:mass"),
+        "the label the cleaning used to delete"
+    );
+
+    let paragraphs = blocks_labelled(&events, pb::BlockLabel::Paragraph);
+    let referring = paragraphs
+        .iter()
+        .find(|block| block.text.starts_with("See "))
+        .expect("the referring paragraph");
+    let kinds: Vec<(String, i32)> = referring
+        .spans
+        .iter()
+        .filter(|span| {
+            span.reference.is_some() && span.reference_kind != pb::ReferenceKind::Footnote as i32
+        })
+        .map(|span| (spanned(&referring.text, span), span.reference_kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("sec:method".to_owned(), pb::ReferenceKind::CrossRef as i32),
+            ("eq:mass".to_owned(), pb::ReferenceKind::EquationRef as i32),
+        ]
+    );
+    assert!(
+        referring
+            .spans
+            .iter()
+            .any(|span| span.hyperlink.as_deref() == Some("https://example.com")),
+        "the href is a run, not a bracketed string"
+    );
+}
+
+#[tokio::test]
+async fn a_footnote_leaves_a_marker_where_it_interrupted_the_paragraph() {
+    let client = client().await;
+    let events = parse_ok(&client, ANCHORED, options(pb::MarkupFormat::Latex)).await;
+    let notes = blocks_labelled(&events, pb::BlockLabel::Footnote);
+    assert_eq!(texts(&notes), ["Hosted elsewhere."]);
+    let anchor = notes[0].anchor_id.clone().expect("the body is an anchor");
+
+    let paragraphs = blocks_labelled(&events, pb::BlockLabel::Paragraph);
+    let marker = paragraphs
+        .iter()
+        .flat_map(|block| block.spans.iter())
+        .find(|span| span.reference_kind == pb::ReferenceKind::Footnote as i32)
+        .expect("a footnote marker");
+    assert_eq!(
+        marker.reference.as_deref(),
+        Some(anchor.as_str()),
+        "the position in the paragraph was known and is now recorded"
+    );
+}
+
+#[tokio::test]
+async fn the_tabular_column_specification_is_kept_as_geometry() {
+    let client = client().await;
+    let events = parse_ok(&client, ANCHORED, options(pb::MarkupFormat::Latex)).await;
+    let start = table_starts(&events)[0];
+    assert_eq!(
+        start
+            .columns
+            .iter()
+            .map(|column| column.align)
+            .collect::<Vec<_>>(),
+        vec![
+            pb::Alignment::Left as i32,
+            pb::Alignment::Center as i32,
+            pb::Alignment::Justify as i32,
+        ],
+        "the group used to be skipped past as `not a cell`"
+    );
+    assert_eq!(start.columns[2].width.as_deref(), Some("5cm"));
+    let rows = table_rows(&events);
+    assert_eq!(rows[0].cells[0].text, "Name");
 }
