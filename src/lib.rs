@@ -23,7 +23,8 @@
 //! are, [`parse`] is the shared driver that owns event ordering, warning
 //! aggregation and the fold registry, the format modules ([`markdown`],
 //! [`html`], [`asciidoc`], [`latex`], [`vtt`], [`boxnote`], [`docling_json`])
-//! each map one input family, and
+//! each map one input family, [`spans`] is the shared inline flattener that
+//! records where the formatted, linked and referring runs landed, and
 //! [`service`] wires it all to tonic. [`document_fold`] is the optional
 //! second consumer of the same event stream: it folds a parse into one
 //! `ai.pipestream.document.v1.Document` when a caller asks for one.
@@ -39,6 +40,7 @@ pub mod metrics;
 pub mod parse;
 pub mod service;
 pub mod sniff;
+pub mod spans;
 pub mod vtt;
 
 /// Generated protobuf messages and gRPC stubs for `ai.pipestream.markup.v1`.

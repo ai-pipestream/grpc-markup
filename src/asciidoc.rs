@@ -305,6 +305,7 @@ impl Walk<'_, '_> {
                         column_span: 1,
                         row_span: 1,
                         is_header: self.table_row_index == 0,
+                        ..pb::TableCell::default()
                     })
                     .collect();
                 let is_header = self.table_row_index == 0;

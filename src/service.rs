@@ -217,6 +217,9 @@ impl MarkupParseService for MarkupGrpc {
         let config = ParseConfig {
             format: Format::from_proto(format),
             emit_document: options.emit_document,
+            // Unset means on: the field exists to turn spans off, not to
+            // opt into them.
+            emit_inline_spans: options.emit_inline_spans.unwrap_or(true),
         };
         let limit = self.resolve_cap(options.max_document_mib);
 

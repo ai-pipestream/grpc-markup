@@ -6,18 +6,18 @@
 //! then unambiguous signatures — the `WEBVTT` header, a JSON payload whose
 //! shape names itself, an HTML doctype or root, a LaTeX preamble — and only
 //! when no signature matched may a structure heuristic classify the bytes as
-//! Markdown or AsciiDoc. The rule that matters is that the heuristic is a
-//! *fallback*, not a vote: a document with a signature is never overruled by
-//! its texture.
+//! Markdown, AsciiDoc or reStructuredText. The rule that matters is that the
+//! heuristic is a *fallback*, not a vote: a document with a signature is
+//! never overruled by its texture.
 //!
 //! The server never guesses between two candidates it cannot separate. Bytes
-//! that look like both Markdown and AsciiDoc, or that look like nothing at
+//! that look like more than one of the three, or that look like nothing at
 //! all, fail closed with `UNIMPLEMENTED` and a message naming what was seen,
 //! rather than being parsed as whichever format was tried first.
 
 use crate::proto::v1 as pb;
 
-/// The seven input families the contract names.
+/// The eight input families the contract names.
 ///
 /// A Rust-side mirror of [`pb::MarkupFormat`] minus its unspecified variant,
 /// so the folds can match exhaustively on a value that is known to be real.
@@ -41,6 +41,9 @@ pub enum Format {
     Boxnote,
     /// A `DoclingDocument` serialized as JSON, re-ingested.
     DoclingJson,
+    /// reStructuredText source. Recognized so `.rst` bytes resolve to
+    /// themselves; no fold in this build maps it.
+    Rst,
 }
 
 impl Format {
@@ -55,6 +58,7 @@ impl Format {
             Self::Vtt => "vtt",
             Self::Boxnote => "boxnote",
             Self::DoclingJson => "docling-json",
+            Self::Rst => "rst",
         }
     }
 
@@ -69,6 +73,7 @@ impl Format {
             Self::Vtt => pb::MarkupFormat::Vtt,
             Self::Boxnote => pb::MarkupFormat::Boxnote,
             Self::DoclingJson => pb::MarkupFormat::DoclingJson,
+            Self::Rst => pb::MarkupFormat::Rst,
         }
     }
 
@@ -84,6 +89,7 @@ impl Format {
             pb::MarkupFormat::Vtt => Some(Self::Vtt),
             pb::MarkupFormat::Boxnote => Some(Self::Boxnote),
             pb::MarkupFormat::DoclingJson => Some(Self::DoclingJson),
+            pb::MarkupFormat::Rst => Some(Self::Rst),
         }
     }
 
@@ -99,6 +105,8 @@ impl Format {
             Self::Html => Some(4),
             Self::Asciidoc => Some(5),
             Self::Latex => Some(6),
+            // Recognized but not mapped: no fold, so no metrics slot.
+            Self::Rst => None,
         }
     }
 }
@@ -154,7 +162,8 @@ impl std::fmt::Display for SniffError {
 /// # Errors
 ///
 /// [`SniffError`] when the request left the format unspecified and no
-/// signature or heuristic matched — or two heuristics matched at once.
+/// signature or heuristic matched — or more than one heuristic matched at
+/// once.
 pub fn resolve(requested: Option<Format>, text: &str) -> Result<(Format, Evidence), SniffError> {
     if let Some(format) = requested {
         return Ok((format, Evidence::Requested));
@@ -162,15 +171,33 @@ pub fn resolve(requested: Option<Format>, text: &str) -> Result<(Format, Evidenc
     if let Some(format) = signature(text) {
         return Ok((format, Evidence::Signature));
     }
-    match (looks_like_markdown(text), looks_like_asciidoc(text)) {
-        (true, false) => Ok((Format::Markdown, Evidence::Heuristic)),
-        (false, true) => Ok((Format::Asciidoc, Evidence::Heuristic)),
-        (true, true) => Err(SniffError {
-            detail: "the structure matches both Markdown and AsciiDoc".to_owned(),
-        }),
-        (false, false) => Err(SniffError {
-            detail: "no signature matched and the structure is neither Markdown nor AsciiDoc"
+    let matched: Vec<(Format, &str)> = [
+        (Format::Markdown, "Markdown", looks_like_markdown(text)),
+        (Format::Asciidoc, "AsciiDoc", looks_like_asciidoc(text)),
+        (Format::Rst, "reStructuredText", looks_like_rst(text)),
+    ]
+    .into_iter()
+    .filter_map(|(format, name, hit)| hit.then_some((format, name)))
+    .collect();
+    match matched.as_slice() {
+        [(format, _)] => Ok((*format, Evidence::Heuristic)),
+        [] => Err(SniffError {
+            detail: "no signature matched and the structure is none of Markdown, AsciiDoc or \
+                     reStructuredText"
                 .to_owned(),
+        }),
+        [(_, first), (_, second)] => Err(SniffError {
+            detail: format!("the structure matches both {first} and {second}"),
+        }),
+        several => Err(SniffError {
+            detail: format!(
+                "the structure matches {}",
+                several
+                    .iter()
+                    .map(|(_, name)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }),
     }
 }
@@ -270,6 +297,76 @@ pub fn looks_like_asciidoc(text: &str) -> bool {
     }
     text.lines().any(|line| {
         line.starts_with("== ") || line.trim_end() == "----" || is_asciidoc_attribute(line)
+    })
+}
+
+/// True when the bytes carry reStructuredText's own punctuation.
+///
+/// Two shapes, in order of how much they prove: an explicit-markup block
+/// (see [`is_rst_explicit_markup`]), which nothing else in the set writes,
+/// and a section adornment — a title line underlined by a run of one
+/// adornment character at least as long as the title.
+///
+/// The adornment test deliberately refuses `=` and `-`: those are Markdown
+/// setext headings and AsciiDoc's own punctuation, and the sniff never
+/// guesses between two candidates it cannot separate.
+#[must_use]
+pub fn looks_like_rst(text: &str) -> bool {
+    if is_rst_explicit_markup(text) {
+        return true;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    lines.windows(2).any(|pair| {
+        let title = pair[0].trim_end();
+        let adornment = pair[1].trim_end();
+        !title.trim().is_empty()
+            && adornment.chars().count() >= title.chars().count()
+            && is_rst_adornment(adornment)
+    })
+}
+
+/// True when a line is a run of two or more of one reStructuredText
+/// adornment character, excluding the two that another format in the set
+/// also owns.
+fn is_rst_adornment(line: &str) -> bool {
+    const ADORNMENTS: &[char] = &['~', '^', '"', '\'', '+', '#', '*', '`'];
+    let mut chars = line.chars();
+    let Some(first) = chars.next().filter(|c| ADORNMENTS.contains(c)) else {
+        return false;
+    };
+    line.chars().count() >= 2 && chars.all(|c| c == first)
+}
+
+/// True when the text carries a reStructuredText explicit-markup block: a
+/// `.. directive::`, a `.. _target:` hyperlink target, or a `.. [ref]`
+/// citation. The `::` and `_name:` shapes are what separate these from an
+/// AsciiDoc `.. item`, which is a second-level ordered list marker.
+#[must_use]
+pub fn is_rst_explicit_markup(text: &str) -> bool {
+    text.lines().any(|line| {
+        let Some(rest) = line.strip_prefix("..") else {
+            return false;
+        };
+        let Some(rest) = rest.strip_prefix([' ', '\t']).map(str::trim_start) else {
+            return false;
+        };
+        if let Some(target) = rest.strip_prefix('_') {
+            return target
+                .split_once(':')
+                .is_some_and(|(name, _)| !name.trim().is_empty());
+        }
+        if let Some(reference) = rest.strip_prefix('[') {
+            return reference
+                .split_once(']')
+                .is_some_and(|(key, _)| !key.trim().is_empty());
+        }
+        let name = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .count();
+        name > 0
+            && rest[name..].starts_with("::")
+            && rest.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
     })
 }
 
@@ -388,6 +485,45 @@ mod tests {
     }
 
     #[test]
+    fn restructuredtext_resolves_to_itself_rather_than_to_markdown() {
+        let directive = "Guide\n#####\n\n.. note:: mind the gap\n";
+        assert_eq!(
+            resolve(None, directive).unwrap(),
+            (Format::Rst, Evidence::Heuristic)
+        );
+        let target = "See the spec.\n\n.. _spec: https://example.com/spec\n";
+        assert_eq!(
+            resolve(None, target).unwrap(),
+            (Format::Rst, Evidence::Heuristic)
+        );
+        let adorned = "Chapter One\n~~~~~~~~~~~\n\nBody text.\n";
+        assert_eq!(
+            resolve(None, adorned).unwrap(),
+            (Format::Rst, Evidence::Heuristic)
+        );
+    }
+
+    #[test]
+    fn the_rst_tests_do_not_steal_the_other_two_textures() {
+        // An AsciiDoc second-level ordered item is not a directive.
+        assert!(!is_rst_explicit_markup(".. second level item\n"));
+        assert!(!looks_like_rst("# Heading\n\nSome prose.\n"));
+        // Setext underlines belong to Markdown, dashes to AsciiDoc; neither
+        // adornment character is one this heuristic will claim.
+        assert!(!looks_like_rst("Title\n=====\n"));
+        assert!(!looks_like_rst("Title\n-----\n"));
+        // An adornment shorter than its title is not a section adornment.
+        assert!(!looks_like_rst("A long title\n~~~\n"));
+    }
+
+    #[test]
+    fn bytes_matching_two_textures_still_fail_closed_with_rst_in_the_running() {
+        let err = resolve(None, "# Markdown heading\n\n.. note:: and a directive\n").unwrap_err();
+        assert!(err.to_string().contains("both"), "{err}");
+        assert!(err.to_string().contains("reStructuredText"), "{err}");
+    }
+
+    #[test]
     fn every_wire_format_round_trips() {
         for format in [
             Format::Markdown,
@@ -397,6 +533,7 @@ mod tests {
             Format::Vtt,
             Format::Boxnote,
             Format::DoclingJson,
+            Format::Rst,
         ] {
             assert_eq!(Format::from_proto(format.to_proto()), Some(format));
         }

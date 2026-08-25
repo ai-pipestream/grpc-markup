@@ -844,6 +844,7 @@ impl Project<'_, '_> {
                         column_span: u32::try_from(cell.col_span.max(1)).unwrap_or(1),
                         row_span: u32::try_from(cell.row_span.max(1)).unwrap_or(1),
                         is_header: cell.column_header,
+                        ..pb::TableCell::default()
                     })
                     .collect();
                 let is_header = row.cells.iter().all(|cell| cell.column_header);

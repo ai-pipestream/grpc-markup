@@ -49,6 +49,216 @@ enum MarkupFormat {
   // A DoclingDocument serialized as JSON, re-ingested losslessly into the
   // Document plane.
   MARKUP_FORMAT_DOCLING_JSON = 7;
+
+  // reStructuredText source. Named so `.rst` bytes resolve to themselves
+  // rather than being mistaken for Markdown by the structure heuristic; a
+  // build without the fold refuses them with `UNIMPLEMENTED` naming this
+  // format.
+  MARKUP_FORMAT_RST = 8;
+}
+
+// IntRange is a half-open `[start, end)` range of Unicode scalar values.
+//
+// Offsets count code points, not bytes, and index the text the same event
+// carries after flattening, so a consumer slices the string it was already
+// given without re-deriving anything.
+message IntRange {
+  // First code point of the range.
+  uint32 start = 1;
+
+  // One past the last code point of the range.
+  uint32 end = 2;
+}
+
+// SpanStyle names one rendering signal a run of text carries.
+//
+// A run may carry several (bold and code at once), which is why the field
+// holding these is repeated rather than an enum-valued scalar.
+enum SpanStyle {
+  // Never sent. Present because proto3 requires a zero value.
+  SPAN_STYLE_UNSPECIFIED = 0;
+
+  // Bold: Markdown `**`, HTML `b`/`strong`, LaTeX `\textbf`.
+  SPAN_STYLE_BOLD = 1;
+
+  // Italic: Markdown `*`, HTML `i`/`em`, LaTeX `\textit`/`\emph`.
+  SPAN_STYLE_ITALIC = 2;
+
+  // Underline: HTML `u`, LaTeX `\underline`.
+  SPAN_STYLE_UNDERLINE = 3;
+
+  // Struck through: Markdown `~~`, HTML `s`/`del`/`strike`.
+  SPAN_STYLE_STRIKETHROUGH = 4;
+
+  // An inline code run: Markdown backticks, HTML `code`, LaTeX `\texttt`.
+  SPAN_STYLE_CODE = 5;
+
+  // Raised: Markdown `^`, HTML `sup`.
+  SPAN_STYLE_SUPERSCRIPT = 6;
+
+  // Lowered: Markdown `~`, HTML `sub`.
+  SPAN_STYLE_SUBSCRIPT = 7;
+
+  // Highlighted: HTML `mark`.
+  SPAN_STYLE_MARK = 8;
+
+  // Small capitals: HTML `small`, LaTeX `\textsc`.
+  SPAN_STYLE_SMALL_CAPS = 9;
+
+  // An inline math run. `InlineSpan.raw` carries the source notation.
+  SPAN_STYLE_MATH = 10;
+
+  // Inserted text: HTML `ins`.
+  SPAN_STYLE_INSERTION = 11;
+
+  // An abbreviation whose expansion is in `InlineSpan.raw`: HTML `abbr`.
+  SPAN_STYLE_ABBREVIATION = 12;
+
+  // A quoted run inside a larger text: HTML `q`.
+  SPAN_STYLE_QUOTE = 13;
+}
+
+// ReferenceKind names what an `InlineSpan.reference` points at.
+enum ReferenceKind {
+  // The span carries no reference.
+  REFERENCE_KIND_UNSPECIFIED = 0;
+
+  // A footnote marker, pointing at the `BLOCK_LABEL_FOOTNOTE` body whose
+  // `anchor_id` is the same key.
+  REFERENCE_KIND_FOOTNOTE = 1;
+
+  // A bibliographic citation: LaTeX `\cite` and its siblings.
+  REFERENCE_KIND_CITATION = 2;
+
+  // An internal cross-reference to a labelled block: LaTeX `\ref`, an
+  // intra-document `#anchor` link.
+  REFERENCE_KIND_CROSS_REF = 3;
+
+  // A cross-reference to a numbered equation: LaTeX `\eqref`.
+  REFERENCE_KIND_EQUATION_REF = 4;
+
+  // A reference to a bibliography entry declared by `\bibitem`.
+  REFERENCE_KIND_BIBLIOGRAPHY = 5;
+}
+
+// InlineSpan is one contiguous run of a block's text that carries something
+// the flat string cannot say: emphasis, a link, or a reference.
+//
+// Spans are emitted in the order their runs start, they may nest and
+// overlap (bold inside a link is two spans), and every offset is a code
+// point into the text of the event that carries the span. A consumer that
+// ignores this field reads exactly what it read before spans existed.
+message InlineSpan {
+  // The run this span covers, in code points into the enclosing text.
+  // Always set, always within the text's length.
+  IntRange range = 1;
+
+  // Rendering signals the run carries. May be empty when the span exists
+  // only for its link or its reference.
+  repeated SpanStyle styles = 2;
+
+  // Link target for a run the source linked, as written; never
+  // dereferenced. Set for every in-prose link, not only for a block that is
+  // entirely one link.
+  optional string hyperlink = 3;
+
+  // The link's title or tooltip text, when the source wrote one.
+  optional string link_title = 4;
+
+  // The anchor this run defines, when the source names one inside the text
+  // (a LaTeX `\label`, an HTML `id` on an inline element).
+  optional string anchor_id = 5;
+
+  // The key this run points at: a footnote label, a citation key, a
+  // cross-reference target.
+  optional string reference = 6;
+
+  // What `reference` points at. `REFERENCE_KIND_UNSPECIFIED` whenever
+  // `reference` is unset.
+  ReferenceKind reference_kind = 7;
+
+  // The source notation behind the run, when flattening lost it: the TeX
+  // of an inline formula, the expansion of an abbreviation.
+  optional string raw = 8;
+
+  // The run's own font family, as the source names it.
+  optional string font_family = 9;
+
+  // The run's own font size in points.
+  optional double font_size_pt = 10;
+
+  // The run's own text color as `#rrggbb`.
+  optional string color = 11;
+
+  // The run's own BCP 47 language tag, when it differs from the block's.
+  optional string language = 12;
+
+  // The source field code a generated run came from (a page number, a
+  // date, a resolved cross-reference), so generated text stays
+  // distinguishable from authored text.
+  optional string field_code = 13;
+}
+
+// AdmonitionKind names the callout a block is marked as.
+enum AdmonitionKind {
+  // The block is not an admonition.
+  ADMONITION_KIND_UNSPECIFIED = 0;
+
+  // AsciiDoc `NOTE:`, a GFM `[!NOTE]` alert.
+  ADMONITION_KIND_NOTE = 1;
+
+  // AsciiDoc `TIP:`, a GFM `[!TIP]` alert.
+  ADMONITION_KIND_TIP = 2;
+
+  // AsciiDoc `IMPORTANT:`, a GFM `[!IMPORTANT]` alert.
+  ADMONITION_KIND_IMPORTANT = 3;
+
+  // AsciiDoc `WARNING:`, a GFM `[!WARNING]` alert.
+  ADMONITION_KIND_WARNING = 4;
+
+  // AsciiDoc `CAUTION:`, a GFM `[!CAUTION]` alert.
+  ADMONITION_KIND_CAUTION = 5;
+}
+
+// Alignment names how a table column or cell places its content. The
+// horizontal members apply to `align`, the vertical ones to `valign`.
+enum Alignment {
+  // The source declares no alignment.
+  ALIGNMENT_UNSPECIFIED = 0;
+
+  // Horizontal: flush left (Markdown `:---`, AsciiDoc `<`, LaTeX `l`).
+  ALIGNMENT_LEFT = 1;
+
+  // Horizontal: centered (Markdown `:---:`, AsciiDoc `^`, LaTeX `c`).
+  ALIGNMENT_CENTER = 2;
+
+  // Horizontal: flush right (Markdown `---:`, AsciiDoc `>`, LaTeX `r`).
+  ALIGNMENT_RIGHT = 3;
+
+  // Horizontal: justified (LaTeX `p{width}`, HTML `align="justify"`).
+  ALIGNMENT_JUSTIFY = 4;
+
+  // Vertical: flush to the top of the cell (AsciiDoc `.<`).
+  ALIGNMENT_TOP = 5;
+
+  // Vertical: centered in the cell (AsciiDoc `.^`).
+  ALIGNMENT_MIDDLE = 6;
+
+  // Vertical: flush to the bottom of the cell (AsciiDoc `.>`).
+  ALIGNMENT_BOTTOM = 7;
+}
+
+// ColumnSpec is one column's declared geometry, in column order.
+message ColumnSpec {
+  // Horizontal alignment the source declares for the column.
+  Alignment align = 1;
+
+  // Vertical alignment the source declares for the column.
+  Alignment valign = 2;
+
+  // The column's declared width, verbatim in the source's own units (`20%`,
+  // `5cm`, `120`). Absent when the source declares none.
+  optional string width = 3;
 }
 
 // FormatEvidence names the signal that resolved the format.
@@ -66,8 +276,8 @@ enum FormatEvidence {
   FORMAT_EVIDENCE_SIGNATURE = 2;
 
   // No signature matched and the bytes were classified by structure. Only
-  // Markdown and AsciiDoc are ever resolved this way, and only when the
-  // request left the format unspecified.
+  // Markdown, AsciiDoc and reStructuredText are ever resolved this way, and
+  // only when the request left the format unspecified.
   FORMAT_EVIDENCE_HEURISTIC = 3;
 }
 
@@ -236,6 +446,21 @@ message TextBlock {
 
   // Provenance, always set.
   CollectorSource source = 12;
+
+  // Formatting, link and reference runs inside `text`, in start order.
+  // Empty when the block is uniform prose, and empty for every block when
+  // the request cleared `ParseOptions.emit_inline_spans`.
+  repeated InlineSpan spans = 13;
+
+  // The anchor this block declares, as the source names it: a Markdown
+  // `{#id}` heading attribute, an HTML `id`, a LaTeX `\label`, a footnote
+  // definition's own label, a `\bibitem` key. Absent when the source names
+  // none.
+  optional string anchor_id = 14;
+
+  // The callout kind the source marks the block as. Never set for a block
+  // the source did not mark.
+  AdmonitionKind admonition = 15;
 }
 
 // TableStart opens a streamed table. Rows follow, then `TableEnd`.
@@ -258,6 +483,12 @@ message TableStart {
 
   // Provenance, always set.
   CollectorSource source = 5;
+
+  // The column geometry the source declares, in column order: a Markdown
+  // delimiter row, an HTML `<colgroup>`, a LaTeX column specification.
+  // Empty when the source declares none; shorter than the widest row when
+  // the source declares only some.
+  repeated ColumnSpec columns = 6;
 }
 
 // TableCell is one cell of a streamed table row.
@@ -277,6 +508,19 @@ message TableCell {
   // True when the source marks the cell as a header: a `th`, a cell in
   // `thead`, or a cell in a Markdown or AsciiDoc header row.
   bool is_header = 5;
+
+  // Formatting, link and reference runs inside `text`, in start order.
+  // Empty when the cell is uniform prose, and empty for every cell when the
+  // request cleared `ParseOptions.emit_inline_spans`.
+  repeated InlineSpan spans = 6;
+
+  // Horizontal alignment the source declares on the cell itself, which
+  // overrides the column's. `ALIGNMENT_UNSPECIFIED` when it declares none.
+  Alignment align = 7;
+
+  // Vertical alignment the source declares on the cell itself, which
+  // overrides the column's. `ALIGNMENT_UNSPECIFIED` when it declares none.
+  Alignment valign = 8;
 }
 
 // TableRow is one row of a table, emitted as soon as it is parsed.

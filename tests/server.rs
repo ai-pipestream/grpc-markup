@@ -328,6 +328,33 @@ async fn asking_for_a_format_outside_the_advertised_list_matches_the_contract() 
     }
 }
 
+#[tokio::test]
+async fn restructuredtext_is_refused_by_name_rather_than_parsed_as_markdown() {
+    let client = client().await;
+    let document = "Guide\n#####\n\n.. note:: mind the gap\n";
+    // Sniffed: the bytes resolve to reStructuredText, which this build has
+    // no fold for, so the refusal names it instead of mapping the file as
+    // Markdown.
+    let sniffed = parse(&client, document, sniff_options())
+        .await
+        .expect_err("no rst fold in this build");
+    assert_eq!(sniffed.code(), Code::Unimplemented);
+    assert!(sniffed.message().contains("rst"), "{}", sniffed.message());
+
+    // Requested: the same refusal, without the sniff running at all.
+    let requested = parse(&client, "anything\n", options(pb::MarkupFormat::Rst))
+        .await
+        .expect_err("no rst fold in this build");
+    assert_eq!(requested.code(), Code::Unimplemented);
+    assert!(
+        requested
+            .message()
+            .contains("rst fold is not in this build"),
+        "{}",
+        requested.message()
+    );
+}
+
 // ----------------------------------------------------------------- helpers
 
 /// Drain a call to completion: events on success, the ending status

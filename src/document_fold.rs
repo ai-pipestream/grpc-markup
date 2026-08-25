@@ -722,6 +722,7 @@ const fn model_name(format: pb::MarkupFormat) -> &'static str {
         pb::MarkupFormat::Vtt => "vtt",
         pb::MarkupFormat::Boxnote => "boxnote",
         pb::MarkupFormat::DoclingJson => "docling-json",
+        pb::MarkupFormat::Rst => "rst",
     }
 }
 
@@ -777,6 +778,7 @@ const fn mimetype(format: pb::MarkupFormat) -> &'static str {
         pb::MarkupFormat::Vtt => "text/vtt",
         pb::MarkupFormat::Boxnote => "application/vnd.box.boxnote",
         pb::MarkupFormat::DoclingJson => "application/json",
+        pb::MarkupFormat::Rst => "text/x-rst",
     }
 }
 
@@ -1325,6 +1327,7 @@ mod tests {
                 caption: Some("Numbers".to_owned()),
                 source_line: Some(3),
                 source: None,
+                columns: Vec::new(),
             },
         ));
         fold_state.consume(&pb::parse_markup_response::Event::TableRow(pb::TableRow {
@@ -1338,6 +1341,7 @@ mod tests {
                     column_span: 1,
                     row_span: 1,
                     is_header: true,
+                    ..pb::TableCell::default()
                 },
                 pb::TableCell {
                     column_index: 1,
@@ -1345,6 +1349,7 @@ mod tests {
                     column_span: 2,
                     row_span: 1,
                     is_header: true,
+                    ..pb::TableCell::default()
                 },
             ],
         }));

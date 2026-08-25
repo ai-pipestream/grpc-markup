@@ -256,6 +256,45 @@ pub fn images(events: &[pb::ParseMarkupResponse]) -> Vec<&pb::ImageBlock> {
         .collect()
 }
 
+/// Every `TableStart` in a stream.
+pub fn table_starts(events: &[pb::ParseMarkupResponse]) -> Vec<&pb::TableStart> {
+    events
+        .iter()
+        .filter_map(|e| match e.event.as_ref() {
+            Some(pb::parse_markup_response::Event::TableStart(start)) => Some(start),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The run of `text` one span covers, sliced by code points exactly as the
+/// contract says a consumer indexes it. Every span assertion in these tests
+/// goes through this, so a range that is right in bytes and wrong in code
+/// points fails here rather than passing quietly.
+pub fn spanned(text: &str, span: &pb::InlineSpan) -> String {
+    let range = span.range.expect("a span always carries its range");
+    assert!(range.start <= range.end, "a range is not inverted");
+    let covered: String = text
+        .chars()
+        .skip(range.start as usize)
+        .take((range.end - range.start) as usize)
+        .collect();
+    assert_eq!(
+        covered.chars().count(),
+        (range.end - range.start) as usize,
+        "the range fits inside the text it indexes"
+    );
+    covered
+}
+
+/// The styles one span carries, as the enum rather than its numbers.
+pub fn styles(span: &pb::InlineSpan) -> Vec<pb::SpanStyle> {
+    span.styles
+        .iter()
+        .map(|style| pb::SpanStyle::try_from(*style).expect("a known style"))
+        .collect()
+}
+
 /// Every `TableRow` in a stream.
 pub fn table_rows(events: &[pb::ParseMarkupResponse]) -> Vec<&pb::TableRow> {
     events

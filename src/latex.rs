@@ -1421,6 +1421,7 @@ impl RowBuilder {
             column_span,
             row_span: row_span.max(1),
             is_header: false,
+            ..pb::TableCell::default()
         });
         self.cell.clear();
         self.column += column_span;

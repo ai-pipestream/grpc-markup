@@ -633,6 +633,7 @@ impl Walk<'_, '_> {
                         column_span: 1,
                         row_span: 1,
                         is_header: table.in_head,
+                        ..pb::TableCell::default()
                     });
                     table.next_column += 1;
                 }

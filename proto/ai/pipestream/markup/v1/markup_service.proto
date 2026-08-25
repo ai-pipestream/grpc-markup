@@ -71,6 +71,16 @@ message ParseOptions {
   // `MARKUP_FORMAT_DOCLING_JSON` the projection is the point: the payload
   // already is a Document, and the fold carries it over losslessly.
   bool emit_document = 3;
+
+  // Emit `InlineSpan` runs on `TextBlock` and `TableCell`, and the
+  // `InlineSpan` counterpart on Document items.
+  //
+  // Unset means true: every fold already computes the emphasis, link and
+  // reference structure while flattening, so carrying it is the default and
+  // this field exists to turn it *off*. Clearing it makes the stream
+  // exactly as narrow as it was before spans existed, for a consumer that
+  // only wants flat text.
+  optional bool emit_inline_spans = 4;
 }
 
 // ParseMarkupRequest is one frame of the upload.

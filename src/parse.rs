@@ -63,12 +63,29 @@ pub fn fold_for(format: Format) -> Option<FoldFn> {
 }
 
 /// Settings for one parse.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ParseConfig {
     /// Format the caller asked for, or `None` to sniff.
     pub format: Option<Format>,
     /// Also fold the parse into one Document, sent just before the trailer.
     pub emit_document: bool,
+    /// Carry the inline formatting, link and reference runs the folds
+    /// compute while flattening. On by default; clearing it makes the
+    /// stream exactly as narrow as it was before spans existed.
+    pub emit_inline_spans: bool,
+}
+
+impl Default for ParseConfig {
+    /// Spans on: every fold has the structure in hand at the moment it
+    /// flattens, so carrying it costs a vector and losing it costs the
+    /// document's link graph.
+    fn default() -> Self {
+        Self {
+            format: None,
+            emit_document: false,
+            emit_inline_spans: true,
+        }
+    }
 }
 
 /// Why a parse ended early.
@@ -193,6 +210,12 @@ pub struct Block {
     pub hyperlink: Option<String>,
     /// One-based source line, when the fold tracks lines.
     pub source_line: Option<u32>,
+    /// Formatting, link and reference runs inside `text`, in start order.
+    pub spans: Vec<pb::InlineSpan>,
+    /// The anchor the source declares on this block.
+    pub anchor_id: Option<String>,
+    /// The callout kind the source marks the block as.
+    pub admonition: Option<pb::AdmonitionKind>,
 }
 
 /// The one way onto the wire.
@@ -222,6 +245,8 @@ pub struct Emitter<'a> {
     /// A fold that ingests a whole Document ([`docling_json`]) sets the
     /// result here instead of relying on the event fold.
     document: Option<doc::Document>,
+    /// Whether the inline runs the folds compute reach the wire.
+    emit_inline_spans: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -254,6 +279,7 @@ impl<'a> Emitter<'a> {
             open_table: None,
             fold: config.emit_document.then(DocumentFold::new),
             document: None,
+            emit_inline_spans: config.emit_inline_spans,
         }
     }
 
@@ -299,6 +325,7 @@ impl<'a> Emitter<'a> {
         debug_assert!(!block.text.is_empty(), "TextBlock.text is never empty");
         let index = self.next_index();
         self.counts.text_blocks += 1;
+        let spans = self.kept_spans(block.spans);
         self.send(pb::parse_markup_response::Event::TextBlock(pb::TextBlock {
             index,
             label: block.label as i32,
@@ -312,6 +339,9 @@ impl<'a> Emitter<'a> {
             hyperlink: block.hyperlink,
             source_line: block.source_line,
             source: Some(self.source.clone()),
+            spans,
+            anchor_id: block.anchor_id,
+            admonition: block.admonition.unwrap_or(pb::AdmonitionKind::Unspecified) as i32,
         }))
     }
 
@@ -325,6 +355,20 @@ impl<'a> Emitter<'a> {
         caption: Option<String>,
         source_line: Option<u32>,
     ) -> Result<String, ParseError> {
+        self.table_start_with_columns(caption, source_line, Vec::new())
+    }
+
+    /// Open a table whose source declares its column geometry.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::ConsumerGone`] when the client stopped reading.
+    pub fn table_start_with_columns(
+        &mut self,
+        caption: Option<String>,
+        source_line: Option<u32>,
+        columns: Vec<pb::ColumnSpec>,
+    ) -> Result<String, ParseError> {
         let table_ref = format!("t{}", self.tables_opened);
         self.tables_opened += 1;
         let index = self.next_index();
@@ -337,6 +381,7 @@ impl<'a> Emitter<'a> {
                 caption,
                 source_line,
                 source: Some(self.source.clone()),
+                columns,
             },
         ))?;
         Ok(table_ref)
@@ -350,8 +395,13 @@ impl<'a> Emitter<'a> {
     pub fn table_row(
         &mut self,
         is_header: bool,
-        cells: Vec<pb::TableCell>,
+        mut cells: Vec<pb::TableCell>,
     ) -> Result<(), ParseError> {
+        if !self.emit_inline_spans {
+            for cell in &mut cells {
+                cell.spans.clear();
+            }
+        }
         let (table_ref, row_index) = {
             let open = self
                 .open_table
@@ -505,6 +555,16 @@ impl<'a> Emitter<'a> {
         self.send(pb::parse_markup_response::Event::Status(status))
     }
 
+    /// The runs a block keeps: all of them, or none when the request asked
+    /// for a flat stream.
+    fn kept_spans(&self, spans: Vec<pb::InlineSpan>) -> Vec<pb::InlineSpan> {
+        if self.emit_inline_spans {
+            spans
+        } else {
+            Vec::new()
+        }
+    }
+
     /// The next stream index, shared across every indexed event kind.
     fn next_index(&mut self) -> u64 {
         let index = self.index;
@@ -582,6 +642,7 @@ mod tests {
         let config = ParseConfig {
             format: Some(Format::Markdown),
             emit_document: false,
+            ..ParseConfig::default()
         };
         let (_, events) = collect(&bytes, &config).expect("lossy parse succeeds");
         let Some(pb::parse_markup_response::Event::Status(status)) =
@@ -668,6 +729,7 @@ mod tests {
         let config = ParseConfig {
             format: Some(Format::Markdown),
             emit_document: false,
+            ..ParseConfig::default()
         };
         let mut emit = |_| false;
         let result = run(b"# T\n\nbody\n", &config, Instant::now(), &mut emit);

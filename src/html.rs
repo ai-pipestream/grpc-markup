@@ -673,6 +673,7 @@ impl Walk<'_, '_> {
                     column_span,
                     row_span,
                     is_header,
+                    ..pb::TableCell::default()
                 });
                 column = column.saturating_add(column_span);
             }
