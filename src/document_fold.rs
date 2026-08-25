@@ -78,6 +78,15 @@ pub struct DocumentFold {
     /// ref). Any non-list-item content closes the whole stack, which is
     /// what makes a group "one contiguous list".
     lists: Vec<(u32, bool, String)>,
+    /// Anchor name to the ref of the item that declares it, first
+    /// declaration winning. Both `Document.anchors` and every cross
+    /// reference resolve through this.
+    anchors: BTreeMap<String, doc::FineRef>,
+    /// Cross references waiting for their anchor: (text-item index, span
+    /// index, the key the span points at). A document refers forward as
+    /// often as backward, so resolution is a pass at
+    /// [`take`](DocumentFold::take) rather than a lookup at fold time.
+    pending_refs: Vec<(usize, usize, String)>,
 }
 
 /// A table being assembled from `table_start` / `table_row` / `table_end`.
@@ -114,6 +123,8 @@ impl DocumentFold {
             table: None,
             headings: Vec::new(),
             lists: Vec::new(),
+            anchors: BTreeMap::new(),
+            pending_refs: Vec::new(),
         }
     }
 
@@ -145,9 +156,47 @@ impl DocumentFold {
         if let Some(pending) = self.table.take() {
             self.append_table(pending);
         }
+        self.resolve_references();
+        self.document.anchors = self
+            .anchors
+            .iter()
+            .map(|(name, target)| doc::NamedAnchor {
+                name: name.clone(),
+                target: Some(target.clone()),
+            })
+            .collect();
         self.headings.clear();
         self.lists.clear();
+        self.anchors.clear();
+        self.pending_refs.clear();
         std::mem::replace(&mut self.document, skeleton())
+    }
+
+    /// Point every cross reference at the item that declares its anchor.
+    ///
+    /// A reference whose anchor the document never declares keeps no
+    /// target: the Document plane models a resolved pointer, and inventing
+    /// one that resolves to nothing would be worse than the wire's own
+    /// `reference` field, which still carries the key either way.
+    fn resolve_references(&mut self) {
+        for (item, span, key) in std::mem::take(&mut self.pending_refs) {
+            let Some(target) = self.anchors.get(&key).cloned() else {
+                continue;
+            };
+            let Some(spans) = self
+                .document
+                .texts
+                .get_mut(item)
+                .and_then(|item| item.item.as_mut())
+                .and_then(text_base_mut)
+                .map(|base| &mut base.spans)
+            else {
+                continue;
+            };
+            if let Some(span) = spans.get_mut(span) {
+                span.target = Some(target);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ info
@@ -172,6 +221,7 @@ impl DocumentFold {
             uri: None,
             ..doc::DocumentOrigin::default()
         });
+        self.document.source_meta = source_meta(info.title.as_deref(), &info.metadata);
         if !info.metadata.is_empty()
             && let Some(body) = self.document.body.as_mut()
         {
@@ -217,10 +267,25 @@ impl DocumentFold {
             pb::BlockLabel::Code => doc::base_text_item::Item::Code(self.code_item(block, base)),
             _ => doc::base_text_item::Item::Text(doc::TextItem { base: Some(base) }),
         };
+        let index = self.document.texts.len();
         self.document.texts.push(doc::BaseTextItem {
             item: Some(variant),
         });
+        self.register_refs(index, &self_ref, block);
         self.link_child(&parent, &self_ref);
+        if matches!(label, pb::BlockLabel::Title | pb::BlockLabel::SectionHeader) {
+            // The heading ladder is the document's own table of contents;
+            // a source that declares one of its own would overwrite this.
+            self.document.outline.push(doc::OutlineEntry {
+                title: block.text.clone(),
+                level: int(level),
+                page_no: None,
+                target: Some(doc::FineRef {
+                    r#ref: self_ref.clone(),
+                    range: None,
+                }),
+            });
+        }
         if label == pb::BlockLabel::SectionHeader {
             self.headings.push((level, self_ref.clone()));
         }
@@ -287,7 +352,36 @@ impl DocumentFold {
             text: block.text.clone(),
             hyperlink: block.hyperlink.clone(),
             source: vec![self.collector_source()],
+            spans: doc_spans(&block.spans),
+            admonition_kind: admonition_name(block.admonition).map(str::to_owned),
             ..doc::TextItemBase::default()
+        }
+    }
+
+    /// Record what a block just appended at `index` declares and points at:
+    /// the anchor on the block itself, the anchors its spans declare, and
+    /// every cross reference waiting for one.
+    fn register_refs(&mut self, index: usize, self_ref: &str, block: &pb::TextBlock) {
+        if let Some(anchor) = block.anchor_id.as_ref().filter(|id| !id.is_empty()) {
+            self.anchors.entry(anchor.clone()).or_insert(doc::FineRef {
+                r#ref: self_ref.to_owned(),
+                range: None,
+            });
+        }
+        for (position, span) in block.spans.iter().enumerate() {
+            let range = span.range.map(|range| doc::IntSpan {
+                start: int(range.start),
+                end: int(range.end),
+            });
+            if let Some(anchor) = span.anchor_id.as_ref().filter(|id| !id.is_empty()) {
+                self.anchors.entry(anchor.clone()).or_insert(doc::FineRef {
+                    r#ref: self_ref.to_owned(),
+                    range,
+                });
+            }
+            if let Some(key) = span.reference.as_ref().filter(|key| !key.is_empty()) {
+                self.pending_refs.push((index, position, key.clone()));
+            }
         }
     }
 
@@ -336,6 +430,7 @@ impl DocumentFold {
             .expect("a group was just ensured");
         let self_ref = format!("#/texts/{}", self.document.texts.len());
         let base = self.text_base(&self_ref, &parent, block, doc::DocItemLabel::ListItem);
+        let index = self.document.texts.len();
         self.document.texts.push(doc::BaseTextItem {
             item: Some(doc::base_text_item::Item::ListItem(doc::ListItem {
                 base: Some(base),
@@ -343,6 +438,7 @@ impl DocumentFold {
                 marker: block.marker.clone(),
             })),
         });
+        self.register_refs(index, &self_ref, block);
         self.link_child(&parent, &self_ref);
     }
 
@@ -470,6 +566,7 @@ impl DocumentFold {
                 // A cell is a header when its row is one or when the source
                 // marked the cell itself.
                 column_header: row.is_header || cell.is_header,
+                spans: doc_spans(&cell.spans),
                 ..doc::TableCell::default()
             });
             table.num_cols = table.num_cols.max(end_col);
@@ -1059,6 +1156,152 @@ impl Walk {
     }
 }
 
+/// What the source declares about itself, in the Document plane's own
+/// first-class slots.
+///
+/// The wire delivers metadata keyed as the source spelled it, so the names
+/// are matched case-insensitively and with a format's own prefix (the HTML
+/// fold's `meta.`) stripped. A key with a first-class slot lands in it; a
+/// scalar with none lands in `extra` under its own name. A key whose value
+/// is a tree has no honest string form and stays where it already is, in
+/// the body's custom fields, which carry the whole tree either way.
+fn source_meta(
+    title: Option<&str>,
+    metadata: &HashMap<String, pb::MetaValue>,
+) -> Option<doc::DocumentMeta> {
+    let mut meta = doc::DocumentMeta {
+        title: title.filter(|title| !title.is_empty()).map(str::to_owned),
+        ..doc::DocumentMeta::default()
+    };
+    // Deterministic order for a map the wire delivers unordered.
+    for (key, value) in metadata.iter().collect::<BTreeMap<_, _>>() {
+        let name = key.rsplit('.').next().unwrap_or(key).to_ascii_lowercase();
+        let slot = match name.as_str() {
+            "title" | "doctitle" => &mut meta.title,
+            "date" | "created" | "revdate" | "published" => &mut meta.created,
+            "modified" | "updated" | "lastmod" => &mut meta.modified,
+            "lang" | "language" | "content-language" => &mut meta.language,
+            "generator" => &mut meta.generator,
+            "author" | "authors" | "creator" => {
+                // An author list stays a list: one entry per author, never
+                // one string with separators in it.
+                meta.authors.extend(each_scalar(value));
+                continue;
+            }
+            "keywords" | "tags" | "categories" => {
+                meta.keywords.extend(keyword_list(value));
+                continue;
+            }
+            _ => {
+                if let Some(text) = scalar_of(value) {
+                    meta.extra.insert(key.clone(), text);
+                }
+                continue;
+            }
+        };
+        if slot.is_none() {
+            *slot = scalar_of(value);
+        }
+    }
+    (meta != doc::DocumentMeta::default()).then_some(meta)
+}
+
+/// One metadata value as verbatim text, or nothing when it is a tree.
+fn scalar_of(value: &pb::MetaValue) -> Option<String> {
+    match value.kind.as_ref() {
+        Some(pb::meta_value::Kind::Value(text)) if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// Every scalar a value holds: one for a scalar, one per item for a
+/// sequence, none for a mapping.
+fn each_scalar(value: &pb::MetaValue) -> Vec<String> {
+    match value.kind.as_ref() {
+        Some(pb::meta_value::Kind::Value(text)) if !text.is_empty() => vec![text.clone()],
+        Some(pb::meta_value::Kind::List(list)) => list.items.iter().filter_map(scalar_of).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A keyword list: a sequence stays a sequence, and a scalar splits on
+/// commas, which is what both an HTML `keywords` meta tag and a
+/// front-matter `tags: a, b` line mean by one.
+fn keyword_list(value: &pb::MetaValue) -> Vec<String> {
+    match value.kind.as_ref() {
+        Some(pb::meta_value::Kind::Value(text)) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|keyword| !keyword.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => each_scalar(value),
+    }
+}
+
+/// One wire run as the Document plane's own span.
+///
+/// `target` stays empty here: a cross reference points at an item, and
+/// which item that is only becomes knowable once the whole parse has been
+/// seen, so [`DocumentFold::resolve_references`] fills it at the end.
+fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
+    let styles: Vec<pb::SpanStyle> = span
+        .styles
+        .iter()
+        .filter_map(|style| pb::SpanStyle::try_from(*style).ok())
+        .collect();
+    let has = |wanted: pb::SpanStyle| styles.contains(&wanted);
+    let script = if has(pb::SpanStyle::Superscript) {
+        doc::Script::Super
+    } else if has(pb::SpanStyle::Subscript) {
+        doc::Script::Sub
+    } else {
+        doc::Script::Unspecified
+    };
+    let formatting = doc::Formatting {
+        bold: has(pb::SpanStyle::Bold),
+        italic: has(pb::SpanStyle::Italic),
+        underline: has(pb::SpanStyle::Underline),
+        strikethrough: has(pb::SpanStyle::Strikethrough),
+        script: script as i32,
+        script_raw: None,
+    };
+    doc::InlineSpan {
+        range: span.range.map(|range| doc::IntSpan {
+            start: int(range.start),
+            end: int(range.end),
+        }),
+        // A run that says nothing about its typography carries no
+        // formatting rather than an all-false one.
+        formatting: (formatting != doc::Formatting::default()).then_some(formatting),
+        hyperlink: span.hyperlink.clone(),
+        target: None,
+        font_family: span.font_family.clone(),
+        font_size_pt: span.font_size_pt,
+        color: span.color.clone(),
+        language: span.language.clone(),
+        field_code: span.field_code.clone(),
+    }
+}
+
+/// Every wire run of one text, in the order the wire sent them.
+fn doc_spans(spans: &[pb::InlineSpan]) -> Vec<doc::InlineSpan> {
+    spans.iter().map(doc_span).collect()
+}
+
+/// The admonition kind's name in the Document plane's own lower-case
+/// vocabulary, or `None` when the block is not an admonition.
+fn admonition_name(kind: i32) -> Option<&'static str> {
+    match pb::AdmonitionKind::try_from(kind).ok()? {
+        pb::AdmonitionKind::Unspecified => None,
+        pb::AdmonitionKind::Note => Some("note"),
+        pb::AdmonitionKind::Tip => Some("tip"),
+        pb::AdmonitionKind::Important => Some("important"),
+        pb::AdmonitionKind::Warning => Some("warning"),
+        pb::AdmonitionKind::Caution => Some("caution"),
+    }
+}
+
 /// The shared base of every text variant that has one. `CodeItem` has
 /// none: its base fields are inlined.
 fn text_base(item: &doc::base_text_item::Item) -> Option<&doc::TextItemBase> {
@@ -1070,6 +1313,21 @@ fn text_base(item: &doc::base_text_item::Item) -> Option<&doc::TextItemBase> {
         doc::base_text_item::Item::Text(i) => i.base.as_ref(),
         doc::base_text_item::Item::FieldHeading(i) => i.base.as_ref(),
         doc::base_text_item::Item::FieldValue(i) => i.base.as_ref(),
+        doc::base_text_item::Item::Code(_) => None,
+    }
+}
+
+/// The mutable shared base of a text variant, for the passes that finish an
+/// item after it was appended. `CodeItem` has none, and carries no spans.
+fn text_base_mut(item: &mut doc::base_text_item::Item) -> Option<&mut doc::TextItemBase> {
+    match item {
+        doc::base_text_item::Item::Title(i) => i.base.as_mut(),
+        doc::base_text_item::Item::SectionHeader(i) => i.base.as_mut(),
+        doc::base_text_item::Item::ListItem(i) => i.base.as_mut(),
+        doc::base_text_item::Item::Formula(i) => i.base.as_mut(),
+        doc::base_text_item::Item::Text(i) => i.base.as_mut(),
+        doc::base_text_item::Item::FieldHeading(i) => i.base.as_mut(),
+        doc::base_text_item::Item::FieldValue(i) => i.base.as_mut(),
         doc::base_text_item::Item::Code(_) => None,
     }
 }
@@ -1471,6 +1729,202 @@ mod tests {
             missing.iter().any(|e| e.contains(FURNITURE_REF)),
             "{missing:?}"
         );
+    }
+
+    /// A block carrying inline runs, for the span mapping tests.
+    fn spanned_block(text: &str, spans: Vec<pb::InlineSpan>) -> pb::TextBlock {
+        pb::TextBlock {
+            label: pb::BlockLabel::Paragraph as i32,
+            text: text.to_owned(),
+            spans,
+            ..pb::TextBlock::default()
+        }
+    }
+
+    fn span(start: u32, end: u32) -> pb::InlineSpan {
+        pb::InlineSpan {
+            range: Some(pb::IntRange { start, end }),
+            ..pb::InlineSpan::default()
+        }
+    }
+
+    #[test]
+    fn styles_fold_onto_the_formatting_the_schema_already_has() {
+        let bold_italic = pb::InlineSpan {
+            styles: vec![
+                pb::SpanStyle::Bold as i32,
+                pb::SpanStyle::Italic as i32,
+                pb::SpanStyle::Superscript as i32,
+            ],
+            ..span(0, 4)
+        };
+        let linked = pb::InlineSpan {
+            hyperlink: Some("https://example.com".to_owned()),
+            ..span(5, 9)
+        };
+        let document = fold(&[pb::parse_markup_response::Event::TextBlock(spanned_block(
+            "bold link",
+            vec![bold_italic, linked],
+        ))]);
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+            panic!("a paragraph folds to a TextItem");
+        };
+        let spans = &item.base.as_ref().unwrap().spans;
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].range, Some(doc::IntSpan { start: 0, end: 4 }));
+        let formatting = spans[0].formatting.as_ref().expect("styled");
+        assert!(formatting.bold && formatting.italic);
+        assert!(!formatting.underline);
+        assert_eq!(formatting.script, doc::Script::Super as i32);
+        assert_eq!(
+            spans[1].hyperlink.as_deref(),
+            Some("https://example.com"),
+            "an in-prose link survives as a span, not only as an item hyperlink"
+        );
+        assert!(
+            spans[1].formatting.is_none(),
+            "a run with no typography carries no all-false formatting"
+        );
+    }
+
+    #[test]
+    fn a_cross_reference_resolves_to_the_item_that_declares_its_anchor() {
+        // The reference comes first: a document refers forward as often as
+        // backward, so the fold cannot resolve at the moment it sees one.
+        let referring = spanned_block(
+            "as shown in eq:mass",
+            vec![pb::InlineSpan {
+                reference: Some("eq:mass".to_owned()),
+                reference_kind: pb::ReferenceKind::EquationRef as i32,
+                ..span(12, 19)
+            }],
+        );
+        let anchored = pb::TextBlock {
+            label: pb::BlockLabel::Formula as i32,
+            text: "E = mc^2".to_owned(),
+            anchor_id: Some("eq:mass".to_owned()),
+            ..pb::TextBlock::default()
+        };
+        let document = fold(&[
+            pb::parse_markup_response::Event::TextBlock(referring),
+            pb::parse_markup_response::Event::TextBlock(anchored),
+        ]);
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+            panic!("a paragraph folds to a TextItem");
+        };
+        let target = item.base.as_ref().unwrap().spans[0]
+            .target
+            .as_ref()
+            .expect("the reference resolved");
+        assert_eq!(target.r#ref, "#/texts/1");
+        assert_eq!(
+            document.anchors,
+            vec![doc::NamedAnchor {
+                name: "eq:mass".to_owned(),
+                target: Some(doc::FineRef {
+                    r#ref: "#/texts/1".to_owned(),
+                    range: None,
+                }),
+            }],
+            "the anchor itself is registered, not only pointed at"
+        );
+    }
+
+    #[test]
+    fn a_reference_nothing_declares_keeps_no_invented_target() {
+        let document = fold(&[pb::parse_markup_response::Event::TextBlock(spanned_block(
+            "see nowhere",
+            vec![pb::InlineSpan {
+                reference: Some("missing".to_owned()),
+                reference_kind: pb::ReferenceKind::CrossRef as i32,
+                ..span(4, 11)
+            }],
+        ))]);
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+            panic!("a paragraph folds to a TextItem");
+        };
+        assert!(item.base.as_ref().unwrap().spans[0].target.is_none());
+        assert!(document.anchors.is_empty());
+    }
+
+    #[test]
+    fn headings_build_the_outline_and_admonitions_keep_their_kind() {
+        let document = fold(&[
+            block(pb::BlockLabel::Title, "The Title"),
+            pb::parse_markup_response::Event::TextBlock(pb::TextBlock {
+                label: pb::BlockLabel::SectionHeader as i32,
+                text: "Setup".to_owned(),
+                level: Some(2),
+                ..pb::TextBlock::default()
+            }),
+            pb::parse_markup_response::Event::TextBlock(pb::TextBlock {
+                label: pb::BlockLabel::Paragraph as i32,
+                text: "Mind the gap.".to_owned(),
+                admonition: pb::AdmonitionKind::Warning as i32,
+                ..pb::TextBlock::default()
+            }),
+        ]);
+        assert_eq!(
+            document
+                .outline
+                .iter()
+                .map(|entry| (entry.title.as_str(), entry.level))
+                .collect::<Vec<_>>(),
+            vec![("The Title", 1), ("Setup", 2)],
+            "only the headings, at their own levels"
+        );
+        assert_eq!(
+            document.outline[1].target.as_ref().unwrap().r#ref,
+            "#/texts/1"
+        );
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[2].item.as_ref() else {
+            panic!("a paragraph folds to a TextItem");
+        };
+        assert_eq!(
+            item.base.as_ref().unwrap().admonition_kind.as_deref(),
+            Some("warning")
+        );
+    }
+
+    #[test]
+    fn declared_metadata_lands_in_the_first_class_slots() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "authors".to_owned(),
+            pb::MetaValue {
+                kind: Some(pb::meta_value::Kind::List(pb::MetaList {
+                    items: vec![
+                        crate::parse::scalar("Ada Lovelace"),
+                        crate::parse::scalar("Grace Hopper"),
+                    ],
+                })),
+            },
+        );
+        metadata.insert("date".to_owned(), crate::parse::scalar("1843-10-01"));
+        metadata.insert(
+            "meta.keywords".to_owned(),
+            crate::parse::scalar("engine, looms"),
+        );
+        metadata.insert("meta.language".to_owned(), crate::parse::scalar("en"));
+        metadata.insert("licence".to_owned(), crate::parse::scalar("CC-BY-4.0"));
+        let document = fold(&[pb::parse_markup_response::Event::Info(pb::MarkupInfo {
+            format: pb::MarkupFormat::Markdown as i32,
+            evidence: pb::FormatEvidence::Requested as i32,
+            title: Some("Sketch of the Engine".to_owned()),
+            metadata,
+        })]);
+        let meta = document.source_meta.as_ref().expect("declared metadata");
+        assert_eq!(meta.title.as_deref(), Some("Sketch of the Engine"));
+        assert_eq!(meta.authors, vec!["Ada Lovelace", "Grace Hopper"]);
+        assert_eq!(meta.created.as_deref(), Some("1843-10-01"));
+        assert_eq!(meta.language.as_deref(), Some("en"));
+        assert_eq!(meta.keywords, vec!["engine", "looms"]);
+        assert_eq!(
+            meta.extra.get("licence").map(String::as_str),
+            Some("CC-BY-4.0"),
+            "a scalar with no first-class slot keeps its own name"
+        );
+        assert!(!meta.extra.contains_key("authors"), "no key lands twice");
     }
 
     #[test]
