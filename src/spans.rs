@@ -43,6 +43,12 @@ pub struct Mark {
     pub reference_kind: pb::ReferenceKind,
     /// Source notation flattening lost.
     pub raw: Option<String>,
+    /// The run's own font family, as the source names it.
+    pub font_family: Option<String>,
+    /// The run's own font size, in points.
+    pub font_size_pt: Option<f64>,
+    /// The run's own text color, as `#rrggbb`.
+    pub color: Option<String>,
 }
 
 impl Default for Mark {
@@ -55,6 +61,9 @@ impl Default for Mark {
             reference: None,
             reference_kind: pb::ReferenceKind::Unspecified,
             raw: None,
+            font_family: None,
+            font_size_pt: None,
+            color: None,
         }
     }
 }
@@ -110,6 +119,9 @@ impl Mark {
             && self.anchor_id.is_none()
             && self.reference.is_none()
             && self.raw.is_none()
+            && self.font_family.is_none()
+            && self.font_size_pt.is_none()
+            && self.color.is_none()
     }
 }
 
@@ -210,12 +222,11 @@ impl Inline {
             reference: mark.reference,
             reference_kind: mark.reference_kind as i32,
             raw: mark.raw,
-            // Character-run typography: markup declares none, so these
-            // stay unset here and are filled by the pass-through fold,
-            // whose source already carries them.
-            font_family: None,
-            font_size_pt: None,
-            color: None,
+            font_family: mark.font_family,
+            font_size_pt: mark.font_size_pt,
+            color: mark.color,
+            // A per-run language tag and a field code are things a word
+            // processor declares; no markup format in this build does.
             language: None,
             field_code: None,
         });

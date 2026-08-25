@@ -9,7 +9,11 @@
 //! - `heading` collapses its inline runs; the first level-1 heading is the
 //!   title, deeper ones are section headers at their level.
 //! - `paragraph` flattens to one block; a paragraph that is entirely one
-//!   link (of a safe scheme) carries `hyperlink`.
+//!   link (of a safe scheme) carries `hyperlink`, and every mark on every
+//!   run leaves an `InlineSpan`: bold, italic, underline, strikethrough,
+//!   code, highlight, sub and superscript as styles, text colour, font
+//!   family and font size as the run's own typography, and each link as a
+//!   link run whether or not the block holds anything else.
 //! - `bullet_list` / `ordered_list` / `check_list` yield one
 //!   `BLOCK_LABEL_LIST_ITEM` per item, `enumerated` for ordered lists,
 //!   nesting depth tracked; BoxNote writes no markers, so `marker` stays
@@ -33,6 +37,7 @@ use serde_json::Value;
 
 use crate::parse::{Block, Emitter, ParseError};
 use crate::proto::v1 as pb;
+use crate::spans::{Inline, Mark};
 
 /// Link schemes kept as hyperlinks. A stray `javascript:` or a bare string
 /// is dropped rather than mis-read as a link.
@@ -90,8 +95,9 @@ fn content(node: &serde_json::Map<String, Value>) -> &[Value] {
         .map_or(&[], Vec::as_slice)
 }
 
-/// (text, hyperlink) for one styled span of a block.
-type Run = (String, Option<String>);
+/// One block's flattened text, the runs inside it, and its hyperlink when
+/// the whole block is one link.
+type Collapsed = (String, Vec<pb::InlineSpan>, Option<String>);
 
 /// The walk state of one note.
 struct Walk<'w, 'e> {
@@ -148,7 +154,7 @@ impl Walk<'_, '_> {
     }
 
     fn heading(&mut self, node: &serde_json::Map<String, Value>) -> Result<(), ParseError> {
-        let (text, hyperlink) = collapse(content(node));
+        let (text, spans, hyperlink) = collapse(content(node));
         if text.is_empty() {
             return Ok(());
         }
@@ -170,12 +176,13 @@ impl Walk<'_, '_> {
             text,
             level,
             hyperlink,
+            spans,
             ..Block::default()
         })
     }
 
     fn paragraph(&mut self, node: &serde_json::Map<String, Value>) -> Result<(), ParseError> {
-        let (text, hyperlink) = collapse(content(node));
+        let (text, spans, hyperlink) = collapse(content(node));
         if text.is_empty() {
             return Ok(());
         }
@@ -188,6 +195,7 @@ impl Walk<'_, '_> {
             label,
             text,
             hyperlink,
+            spans,
             ..Block::default()
         })
     }
@@ -229,13 +237,14 @@ impl Walk<'_, '_> {
     ) -> Result<(), ParseError> {
         let mut nested: Vec<&Value> = Vec::new();
         let mut text = String::new();
+        let mut spans = Vec::new();
         let mut hyperlink = None;
         for child in content(item) {
             let is_leading_paragraph =
                 text.is_empty() && child.get("type").and_then(Value::as_str) == Some("paragraph");
             if is_leading_paragraph {
                 let child_content = child.as_object().map_or(&[][..], |node| content(node));
-                (text, hyperlink) = collapse(child_content);
+                (text, spans, hyperlink) = collapse(child_content);
             } else {
                 nested.push(child);
             }
@@ -255,6 +264,7 @@ impl Walk<'_, '_> {
                 marker: None,
                 list_depth: Some(depth),
                 hyperlink,
+                spans,
                 ..Block::default()
             })?;
         }
@@ -331,12 +341,14 @@ impl Walk<'_, '_> {
                 }
                 let is_header = cell_type == "table_header";
                 all_headers &= is_header;
+                let (text, spans) = cell_text(content(cell));
                 cells.push(pb::TableCell {
                     column_index: column,
-                    text: cell_text(content(cell)),
+                    text,
                     column_span,
                     row_span,
                     is_header,
+                    spans,
                     ..pb::TableCell::default()
                 });
                 column += column_span;
@@ -374,60 +386,76 @@ impl Walk<'_, '_> {
     }
 }
 
-/// Reduce inline content to a single run.
+/// Flatten inline content, keeping every run the note's marks describe.
 ///
-/// Headings and list items take one text and one hyperlink, so a single
-/// styled span keeps its link and a mixed span falls back to plain joined
-/// text — the same rule as the docling backend's `_collapse`.
-fn collapse(nodes: &[Value]) -> Run {
-    let mut runs = runs(nodes);
-    if runs.len() == 1 {
-        let (text, hyperlink) = runs.remove(0);
-        return (normalize(&text), hyperlink);
-    }
-    let joined: String = runs.into_iter().map(|(text, _)| text).collect();
-    (normalize(&joined), None)
+/// The fold used to read one mark type, `link`, and only when the block
+/// held exactly one run: a paragraph of two runs lost its URL as well as
+/// its bold. Every mark now leaves a run, and `hyperlink` keeps its old
+/// meaning, "this whole block is one link", which is a question about the
+/// block rather than about the runs.
+fn collapse(nodes: &[Value]) -> Collapsed {
+    let mut inline = Inline::default();
+    collapse_into(nodes, &mut inline);
+    let hyperlink = inline.hyperlink();
+    let (text, spans) = inline.take();
+    (text, spans, hyperlink)
 }
 
-/// The styled spans of an inline `content` array.
-fn runs(nodes: &[Value]) -> Vec<Run> {
-    let mut out = Vec::new();
-    for node in nodes {
-        let Some(node) = node.as_object() else {
+/// Everything one text node's marks say about the run they cover.
+fn run_mark(node: &serde_json::Map<String, Value>) -> Mark {
+    let mut mark = Mark::default();
+    let Some(marks) = node.get("marks").and_then(Value::as_array) else {
+        return mark;
+    };
+    for entry in marks {
+        let Some(entry) = entry.as_object() else {
             continue;
         };
-        match node.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                let text = node.get("text").and_then(Value::as_str).unwrap_or("");
-                if !text.is_empty() {
-                    out.push((text.to_owned(), link_mark(node)));
+        let name = entry.get("type").and_then(Value::as_str).unwrap_or("");
+        let attr = |key: &str| {
+            entry
+                .get("attrs")
+                .and_then(|attrs| attrs.get(key))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        };
+        match name {
+            "strong" | "bold" => mark.styles.push(pb::SpanStyle::Bold),
+            "em" | "italic" => mark.styles.push(pb::SpanStyle::Italic),
+            "underline" => mark.styles.push(pb::SpanStyle::Underline),
+            "strikethrough" | "strike" | "del" => {
+                mark.styles.push(pb::SpanStyle::Strikethrough);
+            }
+            "code" => mark.styles.push(pb::SpanStyle::Code),
+            "highlight" | "background_color" => mark.styles.push(pb::SpanStyle::Mark),
+            "subscript" => mark.styles.push(pb::SpanStyle::Subscript),
+            "superscript" => mark.styles.push(pb::SpanStyle::Superscript),
+            "font_color" | "text_color" | "color" => {
+                mark.color = attr("color").or_else(|| attr("value")).map(str::to_owned);
+            }
+            "font_family" | "font" => {
+                mark.font_family = attr("font").or_else(|| attr("value")).map(str::to_owned);
+            }
+            "font_size" => {
+                mark.font_size_pt = attr("size")
+                    .or_else(|| attr("value"))
+                    .and_then(|size| size.trim_end_matches("pt").trim().parse().ok());
+            }
+            "link" => {
+                if let Some(href) = attr("href").filter(|href| {
+                    let lower = href.to_ascii_lowercase();
+                    SAFE_LINK_SCHEMES
+                        .iter()
+                        .any(|scheme| lower.starts_with(scheme))
+                }) {
+                    mark.hyperlink = Some(href.to_owned());
+                    mark.link_title = attr("title").map(str::to_owned);
                 }
             }
-            Some("hard_break") => out.push((" ".to_owned(), None)),
             _ => {}
         }
     }
-    out
-}
-
-/// The hyperlink of a text node's marks, when it carries a safe one.
-fn link_mark(node: &serde_json::Map<String, Value>) -> Option<String> {
-    let marks = node.get("marks")?.as_array()?;
-    for mark in marks {
-        let mark = mark.as_object()?;
-        if mark.get("type").and_then(Value::as_str) == Some("link")
-            && let Some(href) = mark
-                .get("attrs")
-                .and_then(|attrs| attrs.get("href"))
-                .and_then(Value::as_str)
-            && SAFE_LINK_SCHEMES
-                .iter()
-                .any(|scheme| href.to_ascii_lowercase().starts_with(scheme))
-        {
-            return Some(href.to_owned());
-        }
-    }
-    None
+    mark
 }
 
 /// Every text of a node tree, joined, hard breaks as newlines. Used for
@@ -447,44 +475,116 @@ fn plain_text(nodes: &[Value]) -> String {
     out
 }
 
-/// One table cell's flattened text: block texts joined with single spaces.
-fn cell_text(blocks: &[Value]) -> String {
-    let texts: Vec<String> = blocks
-        .iter()
-        .filter_map(Value::as_object)
-        .map(|block| normalize(&plain_text(content(block))))
-        .filter(|text| !text.is_empty())
-        .collect();
-    texts.join(" ")
+/// One table cell's flattened text and the runs inside it: the cell's
+/// blocks joined with single spaces, each block's own marks kept.
+fn cell_text(blocks: &[Value]) -> (String, Vec<pb::InlineSpan>) {
+    let mut inline = Inline::default();
+    for block in blocks.iter().filter_map(Value::as_object) {
+        inline.space();
+        collapse_into(content(block), &mut inline);
+    }
+    inline.take()
 }
 
-/// Runs of whitespace collapsed to single spaces, ends trimmed.
-fn normalize(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+/// Flatten inline content into an existing flattener, so a cell's blocks
+/// share one offset space. A node that is neither text nor a break is a
+/// wrapper whose own content is what carries the text.
+fn collapse_into(nodes: &[Value], inline: &mut Inline) {
+    for node in nodes {
+        let Some(node) = node.as_object() else {
+            continue;
+        };
+        match node.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                let text = node.get("text").and_then(Value::as_str).unwrap_or("");
+                if text.is_empty() {
+                    continue;
+                }
+                let mark = run_mark(node);
+                if mark.hyperlink.is_some() {
+                    inline.open_link_mark(mark);
+                    inline.push(text);
+                    inline.close_link();
+                } else {
+                    inline.open(mark);
+                    inline.push(text);
+                    inline.close();
+                }
+            }
+            Some("hard_break") => inline.space(),
+            // A cell holds blocks; their inline content is what carries
+            // the text.
+            _ => collapse_into(content(node), inline),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The text one run covers, sliced by code points.
+    fn covered(text: &str, span: &pb::InlineSpan) -> String {
+        let range = span.range.expect("a run has a range");
+        text.chars()
+            .skip(range.start as usize)
+            .take((range.end - range.start) as usize)
+            .collect()
+    }
+
     #[test]
-    fn a_single_linked_run_keeps_its_link_and_a_mixed_span_drops_it() {
+    fn a_whole_block_link_still_lands_on_the_block_and_never_only_there() {
         let single = serde_json::json!([
             {"type": "text", "text": "Box docs",
              "marks": [{"type": "link", "attrs": {"href": "https://box.com"}}]}
         ]);
-        let (text, link) = collapse(single.as_array().unwrap());
+        let (text, spans, link) = collapse(single.as_array().unwrap());
         assert_eq!(text, "Box docs");
         assert_eq!(link.as_deref(), Some("https://box.com"));
+        assert_eq!(spans[0].hyperlink.as_deref(), Some("https://box.com"));
 
         let mixed = serde_json::json!([
             {"type": "text", "text": "see "},
             {"type": "text", "text": "docs",
              "marks": [{"type": "link", "attrs": {"href": "https://box.com"}}]}
         ]);
-        let (text, link) = collapse(mixed.as_array().unwrap());
+        let (text, spans, link) = collapse(mixed.as_array().unwrap());
         assert_eq!(text, "see docs");
-        assert!(link.is_none());
+        assert!(link.is_none(), "the block is not one link");
+        assert_eq!(
+            covered(&text, &spans[0]),
+            "docs",
+            "the URL survives the second run, which used to delete it"
+        );
+        assert_eq!(spans[0].hyperlink.as_deref(), Some("https://box.com"));
+    }
+
+    #[test]
+    fn every_mark_the_note_carries_leaves_a_run() {
+        let nodes = serde_json::json!([
+            {"type": "text", "text": "café ",
+             "marks": [{"type": "strong"}, {"type": "underline"}]},
+            {"type": "text", "text": "prêt",
+             "marks": [{"type": "em"},
+                       {"type": "font_color", "attrs": {"color": "#ff0000"}},
+                       {"type": "font_size", "attrs": {"size": "14pt"}}]}
+        ]);
+        let (text, spans, _) = collapse(nodes.as_array().unwrap());
+        assert_eq!(text, "café prêt");
+        assert_eq!(covered(&text, &spans[0]), "café");
+        assert_eq!(
+            spans[0].styles,
+            vec![pb::SpanStyle::Bold as i32, pb::SpanStyle::Underline as i32],
+            "one run may carry several marks"
+        );
+        assert_eq!(
+            covered(&text, &spans[1]),
+            "prêt",
+            "the accented first run does not shift the second's range"
+        );
+        assert_eq!(spans[1].styles, vec![pb::SpanStyle::Italic as i32]);
+        assert_eq!(spans[1].color.as_deref(), Some("#ff0000"));
+        assert_eq!(spans[1].font_size_pt, Some(14.0));
     }
 
     #[test]
@@ -493,8 +593,9 @@ mod tests {
             {"type": "text", "text": "x",
              "marks": [{"type": "link", "attrs": {"href": "javascript:alert(1)"}}]}
         ]);
-        let (_, link) = collapse(node.as_array().unwrap());
+        let (_, spans, link) = collapse(node.as_array().unwrap());
         assert!(link.is_none());
+        assert!(spans.is_empty(), "and it is not smuggled in as a run");
     }
 
     #[test]
@@ -504,7 +605,7 @@ mod tests {
             {"type": "hard_break"},
             {"type": "text", "text": "b"}
         ]);
-        let (text, _) = collapse(nodes.as_array().unwrap());
+        let (text, _, _) = collapse(nodes.as_array().unwrap());
         assert_eq!(text, "a b");
         assert_eq!(plain_text(nodes.as_array().unwrap()), "a\nb");
     }

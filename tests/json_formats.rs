@@ -7,7 +7,7 @@ mod common;
 
 use common::{
     BOXNOTE, DOCLING, blocks_labelled, client, images, info, meta_scalar, options, parse, parse_ok,
-    status, table_rows, text_blocks, texts, warning,
+    spanned, status, styles, table_rows, text_blocks, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -29,11 +29,16 @@ async fn a_boxnote_maps_headings_lists_and_paragraphs() {
     assert_eq!(headers[0].level, Some(2));
 
     let paragraphs = blocks_labelled(&events, pb::BlockLabel::Paragraph);
-    assert!(
-        paragraphs.iter().any(|p| p.text == "Agreed to ship"),
-        "styled runs join into one flattened text: {:?}",
-        texts(&paragraphs)
+    let agreed = paragraphs
+        .iter()
+        .find(|p| p.text == "Agreed to ship")
+        .unwrap_or_else(|| panic!("{:?}", texts(&paragraphs)));
+    assert_eq!(
+        styles(&agreed.spans[0]),
+        vec![pb::SpanStyle::Bold],
+        "the styled run joins the flattened text and says it was styled"
     );
+    assert_eq!(spanned(&agreed.text, &agreed.spans[0]), "ship");
 
     let items = blocks_labelled(&events, pb::BlockLabel::ListItem);
     assert_eq!(
@@ -228,4 +233,53 @@ async fn docling_refusals_are_invalid_argument() {
             error.message()
         );
     }
+}
+
+/// A note whose marks are the point: several on one run, a colour and a
+/// size, and a link in a paragraph that holds more than one run.
+const MARKED: &str = r##"{
+  "title": "Marks",
+  "doc": {"type": "doc", "content": [
+    {"type": "paragraph", "content": [
+      {"type": "text", "text": "Le café ", "marks": [{"type": "strong"}]},
+      {"type": "text", "text": "est prêt",
+       "marks": [{"type": "em"},
+                 {"type": "font_color", "attrs": {"color": "#336699"}}]},
+      {"type": "text", "text": ", voir "},
+      {"type": "text", "text": "les notes",
+       "marks": [{"type": "link", "attrs": {"href": "https://box.com/notes"}}]}
+    ]}
+  ]}
+}"##;
+
+#[tokio::test]
+async fn boxnote_marks_beyond_link_reach_the_wire() {
+    let client = client().await;
+    let events = parse_ok(&client, MARKED, options(pb::MarkupFormat::Boxnote)).await;
+    let paragraph = text_blocks(&events)[0];
+    assert_eq!(paragraph.text, "Le café est prêt, voir les notes");
+    assert!(
+        paragraph.hyperlink.is_none(),
+        "four runs is not a whole-block link"
+    );
+    let seen: Vec<(String, Vec<pb::SpanStyle>)> = paragraph
+        .spans
+        .iter()
+        .map(|span| (spanned(&paragraph.text, span), styles(span)))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("Le café".to_owned(), vec![pb::SpanStyle::Bold]),
+            ("est prêt".to_owned(), vec![pb::SpanStyle::Italic]),
+            ("les notes".to_owned(), Vec::new()),
+        ],
+        "the accented runs do not shift the ranges after them"
+    );
+    assert_eq!(paragraph.spans[1].color.as_deref(), Some("#336699"));
+    assert_eq!(
+        paragraph.spans[2].hyperlink.as_deref(),
+        Some("https://box.com/notes"),
+        "a second run in the block used to delete the link outright"
+    );
 }
