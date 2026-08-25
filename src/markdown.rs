@@ -16,7 +16,9 @@
 //! - The first H1 is `BLOCK_LABEL_TITLE`; every other heading is
 //!   `BLOCK_LABEL_SECTION_HEADER` with its Markdown level.
 //! - Paragraphs flatten their inline markup to text with whitespace
-//!   collapsed; a paragraph that is entirely one link carries `hyperlink`.
+//!   collapsed; a paragraph that is entirely one link carries `hyperlink`,
+//!   and every formatted, linked or referring run inside it leaves an
+//!   `InlineSpan` over the text it covers.
 //! - List items carry `enumerated`, the marker as written in the source, and
 //!   the nesting depth. A task-list item records its checkbox in `role`.
 //! - Fenced and indented code keeps its text verbatim; the info string's
@@ -27,8 +29,15 @@
 //!   header row flagged.
 //! - Images become `ImageBlock` events with `src`, `alt` and `title` as
 //!   written; nothing is fetched.
-//! - Footnote definitions emit `BLOCK_LABEL_FOOTNOTE` blocks whose `role` is
-//!   the footnote label.
+//! - Footnote definitions emit `BLOCK_LABEL_FOOTNOTE` blocks whose `role`
+//!   and `anchor_id` are the footnote label; a reference to one is a span
+//!   over the label text carrying the key it points at.
+//! - Definition lists map onto the same `definition-term` /
+//!   `definition-description` role vocabulary the HTML fold uses, and a GFM
+//!   alert blockquote carries its `admonition` kind.
+//! - A pipe table's delimiter row becomes `TableStart.columns`, one spec
+//!   per column, and a heading attribute block becomes the block's
+//!   `anchor_id`.
 //! - Display math is `BLOCK_LABEL_FORMULA`, verbatim.
 //! - Raw HTML — block or inline — is flattened to its text with
 //!   `WARNING_CODE_EMBEDDED_HTML_FLATTENED`; this collector never parses
@@ -39,11 +48,14 @@
 
 use std::collections::HashMap;
 
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd,
+};
 use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::parse::{Block, Emitter, ParseError};
 use crate::proto::v1 as pb;
+use crate::spans::{Inline, Mark};
 
 /// Map one Markdown document. Empty input is a valid empty parse.
 ///
@@ -62,6 +74,15 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_MATH);
+    // Four extensions whose events this fold now maps rather than
+    // discarding: definition lists onto the same role vocabulary the HTML
+    // fold uses, sub/superscript onto span styles, heading attributes onto
+    // `anchor_id`, and GFM alerts onto `admonition`.
+    options.insert(Options::ENABLE_DEFINITION_LIST);
+    options.insert(Options::ENABLE_SUPERSCRIPT);
+    options.insert(Options::ENABLE_SUBSCRIPT);
+    options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
+    options.insert(Options::ENABLE_GFM);
 
     let mut walk = Walk {
         emitter,
@@ -72,6 +93,8 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         captures: Vec::new(),
         lists: Vec::new(),
         quote_depth: 0,
+        alerts: Vec::new(),
+        definitions: 0,
         footnotes: Vec::new(),
         table: None,
     };
@@ -205,98 +228,16 @@ impl LineIndex {
     }
 }
 
-/// Inline text being flattened: entity decoding is pulldown-cmark's, runs of
-/// whitespace collapse to one space here.
-#[derive(Default)]
-struct Flat {
-    buf: String,
-    pending_space: bool,
-}
-
-impl Flat {
-    fn push(&mut self, text: &str) {
-        for c in text.chars() {
-            if c.is_whitespace() {
-                self.pending_space = !self.buf.is_empty();
-            } else {
-                if self.pending_space {
-                    self.buf.push(' ');
-                    self.pending_space = false;
-                }
-                self.buf.push(c);
-            }
-        }
-    }
-
-    fn space(&mut self) {
-        self.pending_space = !self.buf.is_empty();
-    }
-
-    fn is_empty(&self) -> bool {
-        self.buf.is_empty()
-    }
-
-    fn take(&mut self) -> String {
-        self.pending_space = false;
-        std::mem::take(&mut self.buf)
-    }
-}
-
-/// Whether a block is, in its entirety, one hyperlink.
-#[derive(Default)]
-struct LinkTrack {
-    /// Destination of the first link seen.
-    url: Option<String>,
-    /// Links seen.
-    count: usize,
-    /// Depth of open links, so text inside one is not "outside".
-    open: usize,
-    /// Non-whitespace text seen outside any link.
-    outside: bool,
-}
-
-impl LinkTrack {
-    fn open(&mut self, url: &str) {
-        if self.count == 0 {
-            self.url = Some(url.to_owned());
-        }
-        self.count += 1;
-        self.open += 1;
-    }
-
-    fn close(&mut self) {
-        self.open = self.open.saturating_sub(1);
-    }
-
-    fn text(&mut self, text: &str) {
-        if self.open == 0 && !text.trim().is_empty() {
-            self.outside = true;
-        }
-    }
-
-    fn whole_block_link(&self) -> Option<String> {
-        if self.count == 1 && !self.outside {
-            self.url.clone()
-        } else {
-            None
-        }
-    }
-}
-
 /// A block whose text is still being captured.
 enum Capture {
     /// A paragraph, or the leading text of a loose list item.
-    Para {
-        line: u32,
-        flat: Flat,
-        link: LinkTrack,
-    },
-    /// A heading.
+    Para { line: u32, inline: Inline },
+    /// A heading, with the anchor its attribute block declares.
     Heading {
         level: u32,
         line: u32,
-        flat: Flat,
-        link: LinkTrack,
+        anchor: Option<String>,
+        inline: Inline,
     },
     /// A code block; text is kept verbatim.
     Code {
@@ -307,13 +248,19 @@ enum Capture {
     /// A list item: its own inline text, in a tight or loose list.
     Item {
         line: u32,
-        flat: Flat,
-        link: LinkTrack,
+        inline: Inline,
         marker: Option<String>,
         depth: u32,
         enumerated: bool,
         role: String,
         emitted: bool,
+    },
+    /// One term or description of a definition list.
+    Definition {
+        line: u32,
+        role: &'static str,
+        depth: u32,
+        inline: Inline,
     },
     /// An HTML block, captured raw and flattened at the end.
     HtmlBlock { line: u32, buf: String },
@@ -322,10 +269,10 @@ enum Capture {
         line: u32,
         src: String,
         title: String,
-        flat: Flat,
+        inline: Inline,
     },
     /// One table cell.
-    Cell { flat: Flat },
+    Cell { inline: Inline },
 }
 
 /// A pipe table being streamed.
@@ -349,6 +296,11 @@ struct Walk<'w, 'e> {
     /// Open lists, innermost last: `true` for ordered.
     lists: Vec<bool>,
     quote_depth: u32,
+    /// Open block quotes, innermost last, each with the GFM alert kind it
+    /// declares. A paragraph takes the innermost kind it sits inside.
+    alerts: Vec<Option<pb::AdmonitionKind>>,
+    /// Open definition lists, for the nesting depth of their items.
+    definitions: u32,
     /// Open footnote definitions, innermost label last.
     footnotes: Vec<String>,
     table: Option<TableState>,
@@ -361,13 +313,12 @@ impl Walk<'_, '_> {
             Event::Start(tag) => self.start(tag, line, offset)?,
             Event::End(tag) => self.end(tag)?,
             Event::Text(text) => self.text(&text),
-            Event::Code(code) => {
-                self.mark_outside_link();
-                self.text(&code);
-            }
+            Event::Code(code) => self.marked(&code, Mark::style(pb::SpanStyle::Code)),
             Event::InlineMath(math) => {
-                self.mark_outside_link();
-                self.text(&math);
+                // The delimiters are gone from the text; `raw` is what a
+                // consumer needs to tell `$x$` from a currency amount.
+                let mark = Mark::style(pb::SpanStyle::Math).with_raw(&math);
+                self.marked(&math, mark);
             }
             Event::DisplayMath(math) => {
                 self.emitter.text_block(Block {
@@ -392,10 +343,16 @@ impl Walk<'_, '_> {
                     self.text(&stripped);
                 }
             }
-            Event::FootnoteReference(label) => self.text(&format!("[{label}]")),
+            Event::FootnoteReference(label) => {
+                // The marker is the label itself, not a bracketed string
+                // nothing can parse back: the span says what it points at.
+                let mark = Mark::reference(&label, pb::ReferenceKind::Footnote)
+                    .with_style(pb::SpanStyle::Superscript);
+                self.marked(&label, mark);
+            }
             Event::SoftBreak | Event::HardBreak => {
-                if let Some(flat) = self.top_flat() {
-                    flat.space();
+                if let Some(inline) = self.top_inline() {
+                    inline.space();
                 }
             }
             Event::Rule => self
@@ -425,16 +382,15 @@ impl Walk<'_, '_> {
                 self.flush_started_item()?;
                 self.captures.push(Capture::Para {
                     line,
-                    flat: Flat::default(),
-                    link: LinkTrack::default(),
+                    inline: Inline::default(),
                 });
             }
-            Tag::Heading { level, .. } => {
+            Tag::Heading { level, id, .. } => {
                 self.captures.push(Capture::Heading {
                     level: level as u32,
                     line,
-                    flat: Flat::default(),
-                    link: LinkTrack::default(),
+                    anchor: id.map(|id| id.into_string()).filter(|id| !id.is_empty()),
+                    inline: Inline::default(),
                 });
             }
             Tag::CodeBlock(kind) => {
@@ -466,8 +422,7 @@ impl Walk<'_, '_> {
                 let depth = u32::try_from(self.lists.len()).unwrap_or(u32::MAX);
                 self.captures.push(Capture::Item {
                     line,
-                    flat: Flat::default(),
-                    link: LinkTrack::default(),
+                    inline: Inline::default(),
                     marker: self.marker_at(offset),
                     depth: depth.max(1),
                     enumerated: self.lists.last().copied().unwrap_or(false),
@@ -475,10 +430,15 @@ impl Walk<'_, '_> {
                     emitted: false,
                 });
             }
-            Tag::BlockQuote(_) => self.quote_depth += 1,
+            Tag::BlockQuote(kind) => {
+                self.quote_depth += 1;
+                self.alerts.push(kind.map(alert_kind));
+            }
             Tag::FootnoteDefinition(label) => self.footnotes.push(label.into_string()),
-            Tag::Table(_) => {
-                self.emitter.table_start(None, Some(line))?;
+            Tag::Table(alignments) => {
+                let columns = alignments.iter().copied().map(column_spec).collect();
+                self.emitter
+                    .table_start_with_columns(None, Some(line), columns)?;
                 self.table = Some(TableState {
                     in_head: false,
                     next_column: 0,
@@ -492,7 +452,7 @@ impl Walk<'_, '_> {
             }
             Tag::TableRow => {}
             Tag::TableCell => self.captures.push(Capture::Cell {
-                flat: Flat::default(),
+                inline: Inline::default(),
             }),
             Tag::Image {
                 dest_url, title, ..
@@ -501,25 +461,44 @@ impl Walk<'_, '_> {
                     line,
                     src: dest_url.into_string(),
                     title: title.into_string(),
-                    flat: Flat::default(),
+                    inline: Inline::default(),
                 });
             }
-            Tag::Link { dest_url, .. } => {
-                if let Some(link) = self.top_link() {
-                    link.open(&dest_url);
+            Tag::Link {
+                dest_url, title, ..
+            } => {
+                if let Some(inline) = self.top_inline() {
+                    inline.open_link(&dest_url, Some(&title));
                 }
             }
-            // Emphasis and its siblings shape rendering, not structure: the
-            // text inside them flows into the enclosing block unchanged.
-            Tag::Emphasis | Tag::Strong | Tag::Strikethrough => {}
-            // Not enabled in this build's option set; named so a future
-            // enablement is a decision rather than an accident.
-            Tag::MetadataBlock(_)
-            | Tag::DefinitionList
-            | Tag::DefinitionListTitle
-            | Tag::DefinitionListDefinition
-            | Tag::Superscript
-            | Tag::Subscript => {}
+            // Emphasis and its siblings shape the run they cover: the text
+            // flows into the enclosing block and the run is recorded.
+            Tag::Emphasis => self.open(Mark::style(pb::SpanStyle::Italic)),
+            Tag::Strong => self.open(Mark::style(pb::SpanStyle::Bold)),
+            Tag::Strikethrough => self.open(Mark::style(pb::SpanStyle::Strikethrough)),
+            Tag::Superscript => self.open(Mark::style(pb::SpanStyle::Superscript)),
+            Tag::Subscript => self.open(Mark::style(pb::SpanStyle::Subscript)),
+            Tag::DefinitionList => {
+                self.flush_started_item()?;
+                self.definitions += 1;
+            }
+            Tag::DefinitionListTitle => self.captures.push(Capture::Definition {
+                line,
+                role: "definition-term",
+                depth: self.definitions.max(1),
+                inline: Inline::default(),
+            }),
+            Tag::DefinitionListDefinition => self.captures.push(Capture::Definition {
+                line,
+                role: "definition-description",
+                // A description sits one level under its term, the same
+                // shape the HTML fold gives `dt` and `dd`.
+                depth: self.definitions.max(1) + 1,
+                inline: Inline::default(),
+            }),
+            // Front matter is hand-scanned before the parser runs, so a
+            // metadata block reaching here is one that is not leading.
+            Tag::MetadataBlock(_) => {}
         }
         Ok(())
     }
@@ -527,22 +506,23 @@ impl Walk<'_, '_> {
     fn end(&mut self, tag: TagEnd) -> Result<(), ParseError> {
         match tag {
             TagEnd::Paragraph => {
-                let Some(Capture::Para { line, flat, link }) = self.captures.pop() else {
+                let Some(Capture::Para { line, inline }) = self.captures.pop() else {
                     return Ok(());
                 };
-                self.finish_para(line, flat, link)?;
+                self.finish_para(line, inline)?;
             }
             TagEnd::Heading(_) => {
                 let Some(Capture::Heading {
                     level,
                     line,
-                    mut flat,
-                    link,
+                    anchor,
+                    mut inline,
                 }) = self.captures.pop()
                 else {
                     return Ok(());
                 };
-                let text = flat.take();
+                let hyperlink = inline.hyperlink();
+                let (text, spans) = inline.take();
                 if text.is_empty() {
                     return Ok(());
                 }
@@ -556,8 +536,10 @@ impl Walk<'_, '_> {
                     label,
                     text,
                     level,
-                    hyperlink: link.whole_block_link(),
+                    hyperlink,
                     source_line: Some(line),
+                    spans,
+                    anchor_id: anchor,
                     ..Block::default()
                 })?;
             }
@@ -589,9 +571,9 @@ impl Walk<'_, '_> {
                     pb::WarningCode::EmbeddedHtmlFlattened,
                     "an HTML block was flattened to its text",
                 );
-                let mut flat = Flat::default();
-                flat.push(&strip_tags(&buf));
-                let text = flat.take();
+                let mut inline = Inline::default();
+                inline.push(&strip_tags(&buf));
+                let (text, _) = inline.take();
                 if !text.is_empty() {
                     self.emitter.text_block(Block {
                         label: pb::BlockLabel::Paragraph,
@@ -611,7 +593,10 @@ impl Walk<'_, '_> {
                     self.captures.pop();
                 }
             }
-            TagEnd::BlockQuote(_) => self.quote_depth = self.quote_depth.saturating_sub(1),
+            TagEnd::BlockQuote(_) => {
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+                self.alerts.pop();
+            }
             TagEnd::FootnoteDefinition => {
                 self.footnotes.pop();
             }
@@ -623,16 +608,18 @@ impl Walk<'_, '_> {
             TagEnd::TableHead => self.finish_row(true)?,
             TagEnd::TableRow => self.finish_row(false)?,
             TagEnd::TableCell => {
-                let Some(Capture::Cell { mut flat }) = self.captures.pop() else {
+                let Some(Capture::Cell { mut inline }) = self.captures.pop() else {
                     return Ok(());
                 };
+                let (text, spans) = inline.take();
                 if let Some(table) = self.table.as_mut() {
                     table.cells.push(pb::TableCell {
                         column_index: table.next_column,
-                        text: flat.take(),
+                        text,
                         column_span: 1,
                         row_span: 1,
                         is_header: table.in_head,
+                        spans,
                         ..pb::TableCell::default()
                     });
                     table.next_column += 1;
@@ -643,52 +630,80 @@ impl Walk<'_, '_> {
                     line,
                     src,
                     title,
-                    mut flat,
+                    mut inline,
                 }) = self.captures.pop()
                 else {
                     return Ok(());
                 };
-                self.emitter.image(src, flat.take(), title, Some(line))?;
+                let (alt, _) = inline.take();
+                self.emitter.image(src, alt, title, Some(line))?;
             }
             TagEnd::Link => {
-                if let Some(link) = self.top_link() {
-                    link.close();
+                if let Some(inline) = self.top_inline() {
+                    inline.close_link();
                 }
             }
-            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {}
-            TagEnd::MetadataBlock(_)
-            | TagEnd::DefinitionList
-            | TagEnd::DefinitionListTitle
-            | TagEnd::DefinitionListDefinition
+            TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
             | TagEnd::Superscript
-            | TagEnd::Subscript => {}
+            | TagEnd::Subscript => self.close(),
+            TagEnd::DefinitionList => {
+                self.definitions = self.definitions.saturating_sub(1);
+            }
+            TagEnd::DefinitionListTitle | TagEnd::DefinitionListDefinition => {
+                let Some(Capture::Definition {
+                    line,
+                    role,
+                    depth,
+                    mut inline,
+                }) = self.captures.pop()
+                else {
+                    return Ok(());
+                };
+                let hyperlink = inline.hyperlink();
+                let (text, spans) = inline.take();
+                if text.is_empty() {
+                    return Ok(());
+                }
+                self.emitter.text_block(Block {
+                    label: pb::BlockLabel::ListItem,
+                    role: role.to_owned(),
+                    text,
+                    list_depth: Some(depth),
+                    hyperlink,
+                    source_line: Some(line),
+                    spans,
+                    ..Block::default()
+                })?;
+            }
+            TagEnd::MetadataBlock(_) => {}
         }
         Ok(())
     }
 
-    /// A finished paragraph: a list item's own text when it is the item's
-    /// first, otherwise a block labelled by where it sits.
-    fn finish_para(
-        &mut self,
-        line: u32,
-        mut flat: Flat,
-        link: LinkTrack,
-    ) -> Result<(), ParseError> {
-        if flat.is_empty() {
+    /// A finished paragraph: the text of the item or definition it opens,
+    /// when it is that container's first, otherwise a block labelled by
+    /// where it sits.
+    fn finish_para(&mut self, line: u32, mut inline: Inline) -> Result<(), ParseError> {
+        if inline.is_empty() {
             return Ok(());
         }
-        if let Some(Capture::Item {
-            flat: item_flat,
-            link: item_link,
-            emitted: false,
-            ..
-        }) = self.captures.last_mut()
-            && item_flat.is_empty()
-        {
-            *item_flat = flat;
-            *item_link = link;
-            return Ok(());
+        match self.captures.last_mut() {
+            Some(Capture::Item {
+                inline: held,
+                emitted: false,
+                ..
+            })
+            | Some(Capture::Definition { inline: held, .. })
+                if held.is_empty() =>
+            {
+                *held = inline;
+                return Ok(());
+            }
+            _ => {}
         }
+        let alert = self.alerts.iter().rev().find_map(|kind| *kind);
         let label = if !self.footnotes.is_empty() {
             pb::BlockLabel::Footnote
         } else if self.quote_depth > 0 {
@@ -696,12 +711,25 @@ impl Walk<'_, '_> {
         } else {
             pb::BlockLabel::Paragraph
         };
+        // A footnote body is the anchor its markers point at; the label the
+        // source wrote is both its role and its anchor.
+        let key = self.footnotes.last().cloned();
+        let hyperlink = inline.hyperlink();
+        let (text, spans) = inline.take();
         self.emitter.text_block(Block {
             label,
-            role: self.footnotes.last().cloned().unwrap_or_default(),
-            text: flat.take(),
-            hyperlink: link.whole_block_link(),
+            // A GFM alert is an admonition first; the role is the same one
+            // the AsciiDoc fold writes, so both formats land together.
+            role: alert.map_or_else(
+                || key.clone().unwrap_or_default(),
+                |_| "admonition".to_owned(),
+            ),
+            text,
+            hyperlink,
             source_line: Some(line),
+            spans,
+            anchor_id: key,
+            admonition: alert,
             ..Block::default()
         })
     }
@@ -712,8 +740,7 @@ impl Walk<'_, '_> {
     fn flush_started_item(&mut self) -> Result<(), ParseError> {
         let Some(Capture::Item {
             line,
-            flat,
-            link,
+            inline,
             marker,
             depth,
             enumerated,
@@ -723,19 +750,22 @@ impl Walk<'_, '_> {
         else {
             return Ok(());
         };
-        if *emitted || flat.is_empty() {
+        if *emitted || inline.is_empty() {
             return Ok(());
         }
         *emitted = true;
+        let hyperlink = inline.hyperlink();
+        let (text, spans) = inline.take();
         let block = Block {
             label: pb::BlockLabel::ListItem,
             role: std::mem::take(role),
-            text: flat.take(),
+            text,
             enumerated: *enumerated,
             marker: marker.clone(),
             list_depth: Some(*depth),
-            hyperlink: link.whole_block_link(),
+            hyperlink,
             source_line: Some(*line),
+            spans,
             ..Block::default()
         };
         self.emitter.text_block(block)
@@ -759,58 +789,59 @@ impl Walk<'_, '_> {
     /// never actually produces.
     fn text(&mut self, text: &str) {
         match self.captures.last_mut() {
-            Some(
-                Capture::Para { flat, link, .. }
-                | Capture::Heading { flat, link, .. }
-                | Capture::Item { flat, link, .. },
-            ) => {
-                link.text(text);
-                flat.push(text);
-            }
-            Some(Capture::Image { flat, .. } | Capture::Cell { flat }) => flat.push(text),
             Some(Capture::Code { buf, .. } | Capture::HtmlBlock { buf, .. }) => {
                 buf.push_str(text);
             }
-            None => {}
+            _ => {
+                if let Some(inline) = self.top_inline() {
+                    inline.push(text);
+                }
+            }
         }
     }
 
-    /// The flattener of the innermost capture, for word breaks.
-    fn top_flat(&mut self) -> Option<&mut Flat> {
+    /// Push one run that arrives as a single unit: an inline code span, an
+    /// inline formula, a footnote marker.
+    fn marked(&mut self, text: &str, mark: Mark) {
+        if let Some(Capture::Code { buf, .. } | Capture::HtmlBlock { buf, .. }) =
+            self.captures.last_mut()
+        {
+            buf.push_str(text);
+            return;
+        }
+        if let Some(inline) = self.top_inline() {
+            inline.push_marked(text, mark);
+        }
+    }
+
+    /// Open a run on the innermost capture that has a flattener.
+    fn open(&mut self, mark: Mark) {
+        if let Some(inline) = self.top_inline() {
+            inline.open(mark);
+        }
+    }
+
+    /// Close the innermost open run, pairing with [`Walk::open`].
+    fn close(&mut self) {
+        if let Some(inline) = self.top_inline() {
+            inline.close();
+        }
+    }
+
+    /// The flattener of the innermost capture that has one.
+    fn top_inline(&mut self) -> Option<&mut Inline> {
         self.captures
             .iter_mut()
             .rev()
             .find_map(|capture| match capture {
-                Capture::Para { flat, .. }
-                | Capture::Heading { flat, .. }
-                | Capture::Item { flat, .. }
-                | Capture::Image { flat, .. }
-                | Capture::Cell { flat } => Some(flat),
+                Capture::Para { inline, .. }
+                | Capture::Heading { inline, .. }
+                | Capture::Item { inline, .. }
+                | Capture::Definition { inline, .. }
+                | Capture::Image { inline, .. }
+                | Capture::Cell { inline } => Some(inline),
                 Capture::Code { .. } | Capture::HtmlBlock { .. } => None,
             })
-    }
-
-    /// The link tracker of the innermost linkable capture.
-    fn top_link(&mut self) -> Option<&mut LinkTrack> {
-        self.captures
-            .iter_mut()
-            .rev()
-            .find_map(|capture| match capture {
-                Capture::Para { link, .. }
-                | Capture::Heading { link, .. }
-                | Capture::Item { link, .. } => Some(link),
-                _ => None,
-            })
-    }
-
-    /// Non-link inline content inside a link-tracking capture: the block is
-    /// more than one link even if the extra content is not plain text.
-    fn mark_outside_link(&mut self) {
-        if let Some(link) = self.top_link()
-            && link.open == 0
-        {
-            link.outside = true;
-        }
     }
 
     /// The list marker as the source wrote it, read straight from the bytes
@@ -826,6 +857,34 @@ impl Walk<'_, '_> {
             return Some(text[..=digits].to_owned());
         }
         None
+    }
+}
+
+/// One pulldown-cmark column alignment as the column geometry the wire
+/// carries. A table whose delimiter row declares nothing still sends a spec
+/// per column, so a consumer can index `columns` by column number.
+const fn column_spec(alignment: Alignment) -> pb::ColumnSpec {
+    let align = match alignment {
+        Alignment::None => pb::Alignment::Unspecified,
+        Alignment::Left => pb::Alignment::Left,
+        Alignment::Center => pb::Alignment::Center,
+        Alignment::Right => pb::Alignment::Right,
+    };
+    pb::ColumnSpec {
+        align: align as i32,
+        valign: pb::Alignment::Unspecified as i32,
+        width: None,
+    }
+}
+
+/// One GFM alert kind as the wire's admonition vocabulary.
+const fn alert_kind(kind: BlockQuoteKind) -> pb::AdmonitionKind {
+    match kind {
+        BlockQuoteKind::Note => pb::AdmonitionKind::Note,
+        BlockQuoteKind::Tip => pb::AdmonitionKind::Tip,
+        BlockQuoteKind::Important => pb::AdmonitionKind::Important,
+        BlockQuoteKind::Warning => pb::AdmonitionKind::Warning,
+        BlockQuoteKind::Caution => pb::AdmonitionKind::Caution,
     }
 }
 

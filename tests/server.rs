@@ -8,7 +8,7 @@ mod common;
 
 use common::{
     BOXNOTE, CALL_TIMEOUT, DOCLING, LiveUpload, client, client_with, info, options, parse,
-    parse_ok, sniff_options,
+    parse_ok, sniff_options, text_blocks,
 };
 use grpc_markup::proto::v1 as pb;
 use grpc_markup::service::MarkupGrpc;
@@ -352,6 +352,38 @@ async fn restructuredtext_is_refused_by_name_rather_than_parsed_as_markdown() {
             .contains("rst fold is not in this build"),
         "{}",
         requested.message()
+    );
+}
+
+// ------------------------------------------------------------ span option
+
+#[tokio::test]
+async fn inline_spans_are_on_by_default_and_the_option_turns_them_off() {
+    let client = client().await;
+    let document = "A paragraph with **bold** words.\n";
+
+    let default = parse_ok(&client, document, options(pb::MarkupFormat::Markdown)).await;
+    let spans = &text_blocks(&default)[0].spans;
+    assert_eq!(spans.len(), 1, "an unset option still carries the runs");
+
+    let off = parse_ok(
+        &client,
+        document,
+        pb::ParseOptions {
+            format: pb::MarkupFormat::Markdown as i32,
+            emit_inline_spans: Some(false),
+            ..pb::ParseOptions::default()
+        },
+    )
+    .await;
+    assert!(
+        text_blocks(&off)[0].spans.is_empty(),
+        "clearing the option makes the stream flat again"
+    );
+    assert_eq!(
+        text_blocks(&off)[0].text,
+        text_blocks(&default)[0].text,
+        "the text is the same either way"
     );
 }
 

@@ -6,7 +6,7 @@ mod common;
 
 use common::{
     blocks_labelled, client, images, indexes, info, meta_list, meta_map, meta_scalar, options,
-    parse_ok, status, table_rows, text_blocks, texts, warning,
+    parse_ok, spanned, status, styles, table_rows, table_starts, text_blocks, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -373,15 +373,26 @@ async fn footnote_definitions_become_footnote_blocks_named_by_label() {
     let notes = blocks_labelled(&events, pb::BlockLabel::Footnote);
     assert_eq!(texts(&notes), ["The footnote body."]);
     assert_eq!(notes[0].role, "n");
-    // The reference stays in the referring paragraph's text.
-    let paragraphs = blocks_labelled(&events, pb::BlockLabel::Paragraph);
-    assert!(
-        paragraphs
-            .iter()
-            .any(|p| p.text == "A paragraph mentioning[n] a footnote."),
-        "{:?}",
-        texts(&paragraphs)
+    assert_eq!(
+        notes[0].anchor_id.as_deref(),
+        Some("n"),
+        "the body is the anchor its markers point at"
     );
+    // The reference is a typed span over the marker, not a bracketed
+    // string in the middle of the prose.
+    let paragraphs = blocks_labelled(&events, pb::BlockLabel::Paragraph);
+    let referring = paragraphs
+        .iter()
+        .find(|p| p.text.starts_with("A paragraph mentioning"))
+        .expect("the referring paragraph");
+    assert_eq!(referring.text, "A paragraph mentioningn a footnote.");
+    let marker = referring
+        .spans
+        .iter()
+        .find(|span| span.reference_kind == pb::ReferenceKind::Footnote as i32)
+        .expect("a footnote marker span");
+    assert_eq!(marker.reference.as_deref(), Some("n"));
+    assert_eq!(spanned(&referring.text, marker), "n");
 }
 
 #[tokio::test]
@@ -507,4 +518,195 @@ async fn the_trailer_accounts_for_bytes_and_blocks() {
         text_blocks(&events).len() as u64
     );
     assert_eq!(status.counts.as_ref().unwrap().cues, 0);
+}
+
+// ---------------------------------------------------------- inline runs
+
+/// A document whose inline markup is the point: emphasis, links in the
+/// middle of prose, code and math runs, sub/superscript, a heading anchor,
+/// a GFM alert, a definition list, and an aligned table with a linked cell.
+const INLINE: &str = r#"# Inline runs {#runs}
+
+Le **café** est *prêt* et ~~froid~~, dit [Ada](https://ada.example "Her page")
+et [Grace](https://grace.example).
+
+Rendered ^above^ and ~below~, with `let x = 1;` and $e^{i\pi}$.
+
+> [!WARNING]
+> Mind the gap.
+
+Term
+: The definition of the term.
+
+| Left | Middle | Right |
+| :--- | :----: | ----: |
+| a | [b](https://b.example) | c |
+"#;
+
+#[tokio::test]
+async fn emphasis_survives_as_runs_over_the_text_it_covers() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Markdown)).await;
+    let paragraph = blocks_labelled(&events, pb::BlockLabel::Paragraph)
+        .into_iter()
+        .find(|block| block.text.starts_with("Le "))
+        .expect("the first paragraph");
+    assert_eq!(
+        paragraph.text,
+        "Le café est prêt et froid, dit Ada et Grace."
+    );
+    let covered: Vec<(String, Vec<pb::SpanStyle>)> = paragraph
+        .spans
+        .iter()
+        .filter(|span| !span.styles.is_empty())
+        .map(|span| (spanned(&paragraph.text, span), styles(span)))
+        .collect();
+    assert_eq!(
+        covered,
+        vec![
+            ("café".to_owned(), vec![pb::SpanStyle::Bold]),
+            ("prêt".to_owned(), vec![pb::SpanStyle::Italic]),
+            ("froid".to_owned(), vec![pb::SpanStyle::Strikethrough]),
+        ],
+        "the ranges index code points, so the accents do not shift them"
+    );
+}
+
+#[tokio::test]
+async fn every_link_in_a_paragraph_survives_not_only_a_whole_block_one() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Markdown)).await;
+    let paragraph = blocks_labelled(&events, pb::BlockLabel::Paragraph)
+        .into_iter()
+        .find(|block| block.text.starts_with("Le "))
+        .expect("the first paragraph");
+    assert!(
+        paragraph.hyperlink.is_none(),
+        "two links plus prose is not one whole-block link"
+    );
+    let links: Vec<(String, String, Option<String>)> = paragraph
+        .spans
+        .iter()
+        .filter_map(|span| {
+            let url = span.hyperlink.clone()?;
+            Some((spanned(&paragraph.text, span), url, span.link_title.clone()))
+        })
+        .collect();
+    assert_eq!(
+        links,
+        vec![
+            (
+                "Ada".to_owned(),
+                "https://ada.example".to_owned(),
+                Some("Her page".to_owned())
+            ),
+            ("Grace".to_owned(), "https://grace.example".to_owned(), None),
+        ],
+        "both URLs and the title survive"
+    );
+}
+
+#[tokio::test]
+async fn code_math_and_script_runs_carry_their_kind() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Markdown)).await;
+    let paragraph = blocks_labelled(&events, pb::BlockLabel::Paragraph)
+        .into_iter()
+        .find(|block| block.text.starts_with("Rendered"))
+        .expect("the second paragraph");
+    let by_style = |wanted: pb::SpanStyle| -> Vec<String> {
+        paragraph
+            .spans
+            .iter()
+            .filter(|span| styles(span).contains(&wanted))
+            .map(|span| spanned(&paragraph.text, span))
+            .collect()
+    };
+    assert_eq!(by_style(pb::SpanStyle::Subscript), vec!["below"]);
+    assert_eq!(by_style(pb::SpanStyle::Superscript), vec!["above"]);
+    assert_eq!(by_style(pb::SpanStyle::Code), vec!["let x = 1;"]);
+    let math = paragraph
+        .spans
+        .iter()
+        .find(|span| styles(span).contains(&pb::SpanStyle::Math))
+        .expect("an inline math run");
+    assert_eq!(
+        math.raw.as_deref(),
+        Some(r"e^{i\pi}"),
+        "the source notation survives, so $x$ is not a currency amount"
+    );
+}
+
+#[tokio::test]
+async fn a_heading_attribute_becomes_the_block_anchor() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Markdown)).await;
+    let title = blocks_labelled(&events, pb::BlockLabel::Title);
+    assert_eq!(texts(&title), ["Inline runs"]);
+    assert_eq!(title[0].anchor_id.as_deref(), Some("runs"));
+}
+
+#[tokio::test]
+async fn a_gfm_alert_keeps_which_admonition_it_is() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Markdown)).await;
+    let quotes = blocks_labelled(&events, pb::BlockLabel::Quote);
+    assert_eq!(texts(&quotes), ["Mind the gap."]);
+    assert_eq!(quotes[0].admonition, pb::AdmonitionKind::Warning as i32);
+    assert_eq!(
+        quotes[0].role, "admonition",
+        "the same role the AsciiDoc fold writes"
+    );
+}
+
+#[tokio::test]
+async fn a_definition_list_lands_on_the_shared_role_vocabulary() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Markdown)).await;
+    let items: Vec<(&str, &str, Option<u32>)> = blocks_labelled(&events, pb::BlockLabel::ListItem)
+        .into_iter()
+        .filter(|item| item.role.starts_with("definition-"))
+        .map(|item| (item.role.as_str(), item.text.as_str(), item.list_depth))
+        .collect();
+    assert_eq!(
+        items,
+        vec![
+            ("definition-term", "Term", Some(1)),
+            (
+                "definition-description",
+                "The definition of the term.",
+                Some(2)
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn table_alignment_and_cell_runs_reach_the_wire() {
+    let client = client().await;
+    let events = parse_ok(&client, INLINE, options(pb::MarkupFormat::Markdown)).await;
+    let start = table_starts(&events)[0];
+    assert_eq!(
+        start
+            .columns
+            .iter()
+            .map(|column| column.align)
+            .collect::<Vec<_>>(),
+        vec![
+            pb::Alignment::Left as i32,
+            pb::Alignment::Center as i32,
+            pb::Alignment::Right as i32,
+        ],
+        "the delimiter row is parsed and now kept"
+    );
+    let body = table_rows(&events)
+        .into_iter()
+        .find(|row| !row.is_header)
+        .expect("a body row");
+    assert_eq!(body.cells[1].text, "b");
+    assert_eq!(
+        body.cells[1].spans[0].hyperlink.as_deref(),
+        Some("https://b.example"),
+        "a link inside a cell is no longer flattened away"
+    );
 }

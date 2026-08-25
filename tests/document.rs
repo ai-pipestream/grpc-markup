@@ -413,3 +413,134 @@ async fn info_metadata_trees_land_as_the_same_tree_of_struct_values() {
         "the leaf is the verbatim string, not a JSON encoding"
     );
 }
+
+// ------------------------------------------------- runs, anchors, metadata
+
+/// A Markdown document whose inline structure and declared metadata are
+/// what the Document plane is asked to carry.
+const RICH: &str = r#"---
+title: Sketch of the Engine
+authors:
+  - Ada Lovelace
+  - Charles Babbage
+date: 1843-10-01
+keywords: engine, looms
+licence: CC-BY-4.0
+---
+# Sketch of the Engine {#sketch}
+
+An **emphatic** paragraph linking [the notes](https://notes.example) and
+citing a footnote[^m].
+
+## Method
+
+[^m]: The note body.
+"#;
+
+#[tokio::test]
+async fn document_items_carry_the_runs_the_wire_carries() {
+    let client = client().await;
+    let events = parse_ok(&client, RICH, with_document(pb::MarkupFormat::Markdown)).await;
+    let document = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(document).is_empty());
+    let paragraph = document
+        .texts
+        .iter()
+        .find_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::Text(text) => {
+                let base = text.base.as_ref()?;
+                base.text.starts_with("An emphatic").then_some(base)
+            }
+            _ => None,
+        })
+        .expect("the linking paragraph");
+    let bold = paragraph
+        .spans
+        .iter()
+        .find(|span| span.formatting.as_ref().is_some_and(|f| f.bold))
+        .expect("a bold run");
+    let range = bold.range.expect("a run has a range");
+    let covered: String = paragraph
+        .text
+        .chars()
+        .skip(range.start as usize)
+        .take((range.end - range.start) as usize)
+        .collect();
+    assert_eq!(covered, "emphatic");
+    assert!(
+        paragraph
+            .spans
+            .iter()
+            .any(|span| span.hyperlink.as_deref() == Some("https://notes.example")),
+        "an in-prose link reaches the Document plane"
+    );
+}
+
+#[tokio::test]
+async fn anchors_and_the_heading_outline_reach_the_document() {
+    let client = client().await;
+    let events = parse_ok(&client, RICH, with_document(pb::MarkupFormat::Markdown)).await;
+    let document = document(&events).expect("the fold was requested");
+    let anchors: Vec<(&str, &str)> = document
+        .anchors
+        .iter()
+        .map(|anchor| {
+            (
+                anchor.name.as_str(),
+                anchor.target.as_ref().expect("a target").r#ref.as_str(),
+            )
+        })
+        .collect();
+    assert!(
+        anchors.iter().any(|(name, _)| *name == "sketch"),
+        "the heading attribute is an anchor: {anchors:?}"
+    );
+    assert!(
+        anchors.iter().any(|(name, _)| *name == "m"),
+        "the footnote body is an anchor: {anchors:?}"
+    );
+    assert_eq!(
+        document
+            .outline
+            .iter()
+            .map(|entry| (entry.title.as_str(), entry.level))
+            .collect::<Vec<_>>(),
+        vec![("Sketch of the Engine", 1), ("Method", 2)]
+    );
+
+    // The footnote marker points at the body, resolved to a real ref.
+    let target = document
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::Text(text) => text.base.as_ref(),
+            _ => None,
+        })
+        .flat_map(|base| base.spans.iter())
+        .find_map(|span| span.target.clone())
+        .expect("a resolved reference");
+    let (_, anchored) = anchors
+        .iter()
+        .find(|(name, _)| *name == "m")
+        .expect("the footnote anchor");
+    assert_eq!(&target.r#ref, anchored);
+}
+
+#[tokio::test]
+async fn front_matter_lands_in_the_document_metadata_slots() {
+    let client = client().await;
+    let events = parse_ok(&client, RICH, with_document(pb::MarkupFormat::Markdown)).await;
+    let document = document(&events).expect("the fold was requested");
+    let meta = document
+        .source_meta
+        .as_ref()
+        .expect("the source declares metadata");
+    assert_eq!(meta.title.as_deref(), Some("Sketch of the Engine"));
+    assert_eq!(meta.authors, vec!["Ada Lovelace", "Charles Babbage"]);
+    assert_eq!(meta.created.as_deref(), Some("1843-10-01"));
+    assert_eq!(meta.keywords, vec!["engine", "looms"]);
+    assert_eq!(
+        meta.extra.get("licence").map(String::as_str),
+        Some("CC-BY-4.0")
+    );
+}
