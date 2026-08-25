@@ -601,3 +601,162 @@ async fn html_meta_tags_land_in_the_typed_list_not_in_a_free_form_map() {
         "an element id is an anchor"
     );
 }
+
+// ------------------------------------------- declared geometry, every fold
+
+/// The horizontal alignments of a folded table's column schemas.
+fn column_aligns(document: &doc::Document) -> Vec<Option<i32>> {
+    document.tables[0]
+        .data
+        .as_ref()
+        .expect("table data")
+        .columns
+        .iter()
+        .map(|column| column.align)
+        .collect()
+}
+
+#[tokio::test]
+async fn every_dialect_that_declares_column_alignment_lands_it_on_the_schema() {
+    let client = client().await;
+    let left = Some(doc::Alignment::Left as i32);
+    let center = Some(doc::Alignment::Center as i32);
+    let right = Some(doc::Alignment::Right as i32);
+
+    // Markdown: the delimiter row.
+    let markdown = "| Gauche | Milieu | Droite |\n| :--- | :---: | ---: |\n| café | thé | eau |\n";
+    let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+    assert_eq!(column_aligns(folded), vec![left, center, right]);
+
+    // HTML: colgroup, plus a per-cell override the column does not state.
+    let html = r#"<body><table>
+      <colgroup><col align="left"><col align="center" width="40%"><col align="right"></colgroup>
+      <tr><td>café</td><td valign="top">thé</td><td>eau</td></tr>
+    </table></body>"#;
+    let events = parse_ok(&client, html, with_document(pb::MarkupFormat::Html)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+    assert_eq!(column_aligns(folded), vec![left, center, right]);
+    let data = folded.tables[0].data.as_ref().unwrap();
+    assert_eq!(
+        data.columns[1].width_raw.as_deref(),
+        Some("40%"),
+        "a percent spelling is not a page-unit width"
+    );
+    assert_eq!(
+        data.grid[0].cells[1].valign,
+        Some(doc::VerticalAlignment::Top as i32),
+        "the cell's own declaration, which no column states"
+    );
+
+    // AsciiDoc: the cell specifiers.
+    let asciidoc = "= Aligné\n\n|===\n|café ^|thé >|eau\n|===\n";
+    let events = parse_ok(&client, asciidoc, with_document(pb::MarkupFormat::Asciidoc)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+    let data = folded.tables[0].data.as_ref().unwrap();
+    assert!(
+        data.columns.is_empty(),
+        "AsciiDoc declares alignment per cell, so there is no column to declare"
+    );
+    assert_eq!(
+        data.grid[0]
+            .cells
+            .iter()
+            .map(|cell| cell.align)
+            .collect::<Vec<_>>(),
+        vec![None, center, right]
+    );
+
+    // LaTeX: the tabular preamble.
+    let latex = "\\documentclass{article}\n\\begin{document}\n\
+                 \\begin{tabular}{|l|c|p{5cm}|}\ncafé & thé & eau \\\\\n\
+                 \\end{tabular}\n\\end{document}\n";
+    let events = parse_ok(&client, latex, with_document(pb::MarkupFormat::Latex)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+    assert_eq!(
+        column_aligns(folded),
+        vec![left, center, Some(doc::Alignment::Justify as i32)]
+    );
+    let data = folded.tables[0].data.as_ref().unwrap();
+    assert_eq!(data.columns[2].width_raw.as_deref(), Some("5cm"));
+    assert!(
+        data.columns.iter().all(|column| column.name.is_none()),
+        "geometry, not a schema: no column names are invented"
+    );
+}
+
+#[tokio::test]
+async fn keys_titles_and_raw_payloads_reach_the_document_spans() {
+    let client = client().await;
+    let markdown = "Le [café](https://café.example \"La page\") est <abbr>prêt</abbr>, \
+                    voir[^n] et [nulle part](#introuvable).\n\n[^n]: La note.\n";
+    let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+    let spans: Vec<&doc::InlineSpan> = folded
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::Text(text) => text.base.as_ref(),
+            _ => None,
+        })
+        .flat_map(|base| base.spans.iter())
+        .collect();
+
+    let link = spans
+        .iter()
+        .find(|span| span.hyperlink.is_some())
+        .expect("a link run");
+    assert_eq!(
+        link.link_title.as_deref(),
+        Some("La page"),
+        "the title used to be discarded with the rest of the link"
+    );
+
+    let footnote = spans
+        .iter()
+        .find(|span| span.reference_kind == Some(doc::ReferenceKind::Footnote as i32))
+        .expect("a footnote run");
+    assert_eq!(footnote.reference.as_deref(), Some("n"));
+    assert!(
+        footnote.target.is_some(),
+        "the body declares the anchor, so it resolves"
+    );
+}
+
+#[tokio::test]
+async fn an_unresolved_reference_keeps_its_key_on_the_document_plane() {
+    let client = client().await;
+    let html = r##"<body><p>Voir <a href="#introuvable">là</a>.</p></body>"##;
+    let events = parse_ok(&client, html, with_document(pb::MarkupFormat::Html)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+    let span = folded
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::Text(text) => text.base.as_ref(),
+            _ => None,
+        })
+        .flat_map(|base| base.spans.iter())
+        .find(|span| span.reference.is_some())
+        .expect("the fragment link is a reference");
+    assert_eq!(span.reference.as_deref(), Some("introuvable"));
+    assert_eq!(
+        span.reference_kind,
+        Some(doc::ReferenceKind::CrossRef as i32)
+    );
+    assert!(
+        span.target.is_none(),
+        "nothing declares it, so no pointer is invented"
+    );
+    assert_eq!(
+        span.hyperlink.as_deref(),
+        Some("#introuvable"),
+        "and it is still the URL the author wrote"
+    );
+}

@@ -586,6 +586,11 @@ fn map_formatting(value: &Value, unmapped: &mut Unmapped) -> Option<doc::Formatt
         monospace: obj.boolean("monospace"),
         small_caps: obj.boolean("small_caps"),
         math: obj.boolean("math"),
+        mark: obj.boolean("mark"),
+        small: obj.boolean("small"),
+        insertion: obj.boolean("insertion"),
+        abbreviation: obj.boolean("abbreviation"),
+        quote: obj.boolean("quote"),
     };
     obj.finish();
     Some(formatting)

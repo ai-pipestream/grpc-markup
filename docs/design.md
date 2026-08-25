@@ -278,16 +278,29 @@ Carried across from the typed wire, into slots the schema already had:
 - `TextBlock.spans` and `TableCell.spans` become `InlineSpan` runs on
   `TextItemBase.spans` and `TableCell.spans`, styles folded onto
   `Formatting` (bold, italic, underline, strikethrough, monospace, small
-  caps, math) and `Script`. A run with no typography carries no all-false
-  `Formatting`.
+  caps, math, mark, small, insertion, abbreviation, quote) and `Script`. A
+  run with no typography carries no all-false `Formatting`. A link's title
+  and the raw payload behind projected text (an abbreviation's expansion,
+  inline math in its source syntax) ride on the span.
 - A block's `admonition` becomes `TextItemBase.admonition_kind`, lower-cased.
 - Every `anchor_id` becomes a `NamedAnchor` in `Document.anchors`, and every
-  span `reference` becomes a `FineRef` into the item that declares that
-  anchor, plus the plane's own coarser `ReferenceKind` (a cross reference
-  and an equation reference are both `SECTION` there). Resolution is a pass at the end of the parse, because a document
+  span `reference` keeps its key verbatim *and* gains a `FineRef` into the
+  item that declares that anchor. A key nothing declares keeps the key and
+  no pointer. `ReferenceKind` carries across arm for arm, with one
+  refinement read off the resolution rather than guessed from the key's
+  spelling: a bare cross reference that lands on a formula item is an
+  equation reference. Resolution is a pass at the end of the parse, because a document
   refers forward as often as backward; a reference whose anchor the document
   never declares keeps no target rather than an invented one.
 - The heading ladder becomes `Document.outline`.
+- `TableStart.columns` becomes `TableData.columns`, one `TableColumnSchema`
+  per declared column with its alignment; `name` stays unset, because a
+  markup table declares geometry and not a schema, and a header row is not
+  a column-name declaration. A width that is a bare number is a page-unit
+  `width`; `20%` and `5cm` keep their spelling in `width_raw`. A cell's own
+  declared alignment lands on the cell. The wire merges both alignment axes
+  into one enum and the folds keep them in the right field, so the
+  projection splits them and refuses a vertical value in a horizontal slot.
 - `MarkupInfo.metadata` becomes `Document.source_meta`: title, authors,
   dates, language, generator and keywords in their own slots, other scalars
   in `extra` under their own names. A declared date lands in the shape the
@@ -301,11 +314,9 @@ Dropped or demoted per format, deliberately:
 
 - **All formats:** `ParseStatus` (describes the stream, not the document);
   warnings; `evidence`. A block's `role` and `source_line` survive only as
-  custom fields. Four of the run styles (mark, small, insertion,
-  abbreviation, quote) have no slot on this plane, a reference's key
-  survives only as the resolved `FineRef` (an unresolved one keeps
-  nothing), and a table's column alignment has no slot either; all of them
-  stay on the typed wire rather than being faked into a custom field.
+  custom fields. Every other field the typed wire carries now has a
+  first-class slot on this plane, so nothing is faked into a custom field
+  and nothing is dropped at the boundary.
 - **HTML:** anything derived from a rendered page (provenance
   boxes, visibility, forms) never existed here; nested structure inside a
   table cell survives only as the cell's flattened text; `hr` and unmapped

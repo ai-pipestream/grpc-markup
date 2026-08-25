@@ -99,6 +99,9 @@ struct PendingTable {
     grid: Vec<doc::TableRow>,
     cells: Vec<doc::TableCell>,
     num_cols: i32,
+    /// The column geometry the source declared, empty when it declared
+    /// none.
+    columns: Vec<doc::TableColumnSchema>,
 }
 
 impl Default for DocumentFold {
@@ -186,6 +189,12 @@ impl DocumentFold {
             let Some(target) = self.anchors.get(&key).cloned() else {
                 continue;
             };
+            // A bare cross reference that lands on a formula is an equation
+            // reference. That is read off the item it resolved to, not
+            // guessed from how the author spelled the key.
+            let resolved_kind = self
+                .is_formula(&target.r#ref)
+                .then_some(doc::ReferenceKind::Equation as i32);
             let Some(spans) = self
                 .document
                 .texts
@@ -197,9 +206,23 @@ impl DocumentFold {
                 continue;
             };
             if let Some(span) = spans.get_mut(span) {
+                if span.reference_kind == Some(doc::ReferenceKind::CrossRef as i32)
+                    && let Some(kind) = resolved_kind
+                {
+                    span.reference_kind = Some(kind);
+                }
                 span.target = Some(target);
             }
         }
+    }
+
+    /// True when a ref names a formula item.
+    fn is_formula(&self, self_ref: &str) -> bool {
+        self_ref
+            .strip_prefix("#/texts/")
+            .and_then(|index| index.parse::<usize>().ok())
+            .and_then(|index| self.document.texts.get(index)?.item.as_ref())
+            .is_some_and(|item| matches!(item, doc::base_text_item::Item::Formula(_)))
     }
 
     // ------------------------------------------------------------------ info
@@ -539,6 +562,7 @@ impl DocumentFold {
             grid: Vec::new(),
             cells: Vec::new(),
             num_cols: 0,
+            columns: start.columns.iter().map(column_schema).collect(),
         });
     }
 
@@ -571,6 +595,8 @@ impl DocumentFold {
                 // marked the cell itself.
                 column_header: row.is_header || cell.is_header,
                 spans: doc_spans(&cell.spans),
+                align: horizontal(cell.align).map(|align| align as i32),
+                valign: vertical(cell.valign).map(|valign| valign as i32),
                 ..doc::TableCell::default()
             });
             table.num_cols = table.num_cols.max(end_col);
@@ -602,6 +628,7 @@ impl DocumentFold {
             // read.
             table_cells: pending.cells,
             grid: pending.grid,
+            columns: pending.columns,
             ..doc::TableData::default()
         });
         let self_ref = item.self_ref.clone();
@@ -1455,6 +1482,60 @@ fn keyword_list(value: &pb::MetaValue) -> Vec<String> {
     }
 }
 
+/// One declared column as the Document plane's own column schema.
+///
+/// A markup table declares geometry, not a schema: there is no column name
+/// to state, and `name` is presence-tracked precisely so a geometry-only
+/// column says nothing rather than saying "".
+fn column_schema(column: &pb::ColumnSpec) -> doc::TableColumnSchema {
+    // A bare number is a page-unit width; `20%` and `5cm` are spellings
+    // the schema keeps verbatim rather than mangling into one.
+    let declared = column
+        .width
+        .as_deref()
+        .map(str::trim)
+        .filter(|width| !width.is_empty());
+    let width = declared.and_then(|width| width.parse::<f64>().ok());
+    doc::TableColumnSchema {
+        name: None,
+        width,
+        width_raw: declared.filter(|_| width.is_none()).map(str::to_owned),
+        align: horizontal(column.align).map(|align| align as i32),
+        valign: vertical(column.valign).map(|valign| valign as i32),
+        ..doc::TableColumnSchema::default()
+    }
+}
+
+/// The horizontal half of the wire's one alignment vocabulary. The wire
+/// merges both axes into one enum and the folds keep them in the right
+/// field; a vertical value in a horizontal slot is not an alignment here.
+fn horizontal(alignment: i32) -> Option<doc::Alignment> {
+    match pb::Alignment::try_from(alignment).ok()? {
+        pb::Alignment::Left => Some(doc::Alignment::Left),
+        pb::Alignment::Center => Some(doc::Alignment::Center),
+        pb::Alignment::Right => Some(doc::Alignment::Right),
+        pb::Alignment::Justify => Some(doc::Alignment::Justify),
+        pb::Alignment::Unspecified
+        | pb::Alignment::Top
+        | pb::Alignment::Middle
+        | pb::Alignment::Bottom => None,
+    }
+}
+
+/// The vertical half of the same vocabulary.
+fn vertical(alignment: i32) -> Option<doc::VerticalAlignment> {
+    match pb::Alignment::try_from(alignment).ok()? {
+        pb::Alignment::Top => Some(doc::VerticalAlignment::Top),
+        pb::Alignment::Middle => Some(doc::VerticalAlignment::Middle),
+        pb::Alignment::Bottom => Some(doc::VerticalAlignment::Bottom),
+        pb::Alignment::Unspecified
+        | pb::Alignment::Left
+        | pb::Alignment::Center
+        | pb::Alignment::Right
+        | pb::Alignment::Justify => None,
+    }
+}
+
 /// One wire run as the Document plane's own span.
 ///
 /// `target` stays empty here: a cross reference points at an item, and
@@ -1484,6 +1565,11 @@ fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
         monospace: has(pb::SpanStyle::Code),
         small_caps: has(pb::SpanStyle::SmallCaps),
         math: has(pb::SpanStyle::Math),
+        mark: has(pb::SpanStyle::Mark),
+        small: has(pb::SpanStyle::Small),
+        insertion: has(pb::SpanStyle::Insertion),
+        abbreviation: has(pb::SpanStyle::Abbreviation),
+        quote: has(pb::SpanStyle::Quote),
     };
     doc::InlineSpan {
         range: span.range.map(|range| doc::IntSpan {
@@ -1501,15 +1587,18 @@ fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
         language: span.language.clone(),
         field_code: span.field_code.clone(),
         reference_kind: reference_kind(span.reference_kind).map(|kind| kind as i32),
+        // The key rides along whether or not it resolves: a document that
+        // refers to an anchor it never declares still said what it meant.
+        reference: span.reference.clone(),
+        link_title: span.link_title.clone(),
+        raw: span.raw.clone(),
     }
 }
 
 /// The Document plane's own name for what a reference points at.
 ///
-/// Its vocabulary is coarser than the wire's: a cross reference and an
-/// equation reference are both a pointer at a numbered part of the
-/// document, so both land on `SECTION`, and a bibliography entry is a
-/// citation. The wire keeps the finer distinction.
+/// A bibliography entry is a citation; everything else has its own arm on
+/// both sides.
 fn reference_kind(kind: i32) -> Option<doc::ReferenceKind> {
     match pb::ReferenceKind::try_from(kind).ok()? {
         pb::ReferenceKind::Unspecified => None,
@@ -1517,9 +1606,8 @@ fn reference_kind(kind: i32) -> Option<doc::ReferenceKind> {
         pb::ReferenceKind::Citation | pb::ReferenceKind::Bibliography => {
             Some(doc::ReferenceKind::Citation)
         }
-        pb::ReferenceKind::CrossRef | pb::ReferenceKind::EquationRef => {
-            Some(doc::ReferenceKind::Section)
-        }
+        pb::ReferenceKind::CrossRef => Some(doc::ReferenceKind::CrossRef),
+        pb::ReferenceKind::EquationRef => Some(doc::ReferenceKind::Equation),
     }
 }
 
@@ -2042,6 +2130,42 @@ mod tests {
             .as_ref()
             .expect("styled");
         assert!(formatting.monospace && formatting.small_caps && formatting.math);
+
+        // And the five the web and note formats state.
+        let web = pb::InlineSpan {
+            styles: vec![
+                pb::SpanStyle::Mark as i32,
+                pb::SpanStyle::Small as i32,
+                pb::SpanStyle::Insertion as i32,
+                pb::SpanStyle::Abbreviation as i32,
+                pb::SpanStyle::Quote as i32,
+            ],
+            raw: Some("HyperText Markup Language".to_owned()),
+            link_title: Some("Her page".to_owned()),
+            ..span(0, 4)
+        };
+        let document = fold(&[pb::parse_markup_response::Event::TextBlock(spanned_block(
+            "HTML",
+            vec![web],
+        ))]);
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+            panic!("a paragraph folds to a TextItem");
+        };
+        let span = &item.base.as_ref().unwrap().spans[0];
+        let formatting = span.formatting.as_ref().expect("styled");
+        assert!(
+            formatting.mark
+                && formatting.small
+                && formatting.insertion
+                && formatting.abbreviation
+                && formatting.quote
+        );
+        assert_eq!(
+            span.raw.as_deref(),
+            Some("HyperText Markup Language"),
+            "the payload behind the projected text"
+        );
+        assert_eq!(span.link_title.as_deref(), Some("Her page"));
         assert!(
             spans[1].formatting.is_none(),
             "a run with no typography carries no all-false formatting"
@@ -2078,8 +2202,12 @@ mod tests {
         assert_eq!(target.r#ref, "#/texts/1");
         assert_eq!(
             span.reference_kind,
-            Some(doc::ReferenceKind::Section as i32),
-            "an equation reference points at a numbered part of the document"
+            Some(doc::ReferenceKind::Equation as i32)
+        );
+        assert_eq!(
+            span.reference.as_deref(),
+            Some("eq:mass"),
+            "the key rides along beside the resolved pointer"
         );
         assert_eq!(
             document.anchors,
@@ -2091,6 +2219,58 @@ mod tests {
                 }),
             }],
             "the anchor itself is registered, not only pointed at"
+        );
+    }
+
+    #[test]
+    fn a_bare_cross_reference_that_lands_on_a_formula_is_an_equation_reference() {
+        // The wire says only "cross reference"; which one it is, is read
+        // off the item the key actually resolved to.
+        let referring = spanned_block(
+            "see eq:mass and sec:intro",
+            vec![
+                pb::InlineSpan {
+                    reference: Some("eq:mass".to_owned()),
+                    reference_kind: pb::ReferenceKind::CrossRef as i32,
+                    ..span(4, 11)
+                },
+                pb::InlineSpan {
+                    reference: Some("sec:intro".to_owned()),
+                    reference_kind: pb::ReferenceKind::CrossRef as i32,
+                    ..span(16, 25)
+                },
+            ],
+        );
+        let formula = pb::TextBlock {
+            label: pb::BlockLabel::Formula as i32,
+            text: "E = mc^2".to_owned(),
+            anchor_id: Some("eq:mass".to_owned()),
+            ..pb::TextBlock::default()
+        };
+        let heading = pb::TextBlock {
+            label: pb::BlockLabel::SectionHeader as i32,
+            text: "Intro".to_owned(),
+            level: Some(1),
+            anchor_id: Some("sec:intro".to_owned()),
+            ..pb::TextBlock::default()
+        };
+        let document = fold(&[
+            pb::parse_markup_response::Event::TextBlock(referring),
+            pb::parse_markup_response::Event::TextBlock(formula),
+            pb::parse_markup_response::Event::TextBlock(heading),
+        ]);
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+            panic!("a paragraph folds to a TextItem");
+        };
+        let spans = &item.base.as_ref().unwrap().spans;
+        assert_eq!(
+            spans[0].reference_kind,
+            Some(doc::ReferenceKind::Equation as i32)
+        );
+        assert_eq!(
+            spans[1].reference_kind,
+            Some(doc::ReferenceKind::CrossRef as i32),
+            "one that lands on a heading stays a plain cross reference"
         );
     }
 
@@ -2107,7 +2287,13 @@ mod tests {
         let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
             panic!("a paragraph folds to a TextItem");
         };
-        assert!(item.base.as_ref().unwrap().spans[0].target.is_none());
+        let span = &item.base.as_ref().unwrap().spans[0];
+        assert!(span.target.is_none(), "no invented pointer");
+        assert_eq!(
+            span.reference.as_deref(),
+            Some("missing"),
+            "but the key the source wrote is kept"
+        );
         assert!(document.anchors.is_empty());
     }
 
@@ -2247,6 +2433,112 @@ mod tests {
         ] {
             assert_eq!(declared_time(unreadable), (None, None), "{unreadable}");
         }
+    }
+
+    #[test]
+    fn declared_table_geometry_reaches_the_column_schemas_and_the_cells() {
+        let mut fold_state = DocumentFold::new();
+        fold_state.consume(&pb::parse_markup_response::Event::TableStart(
+            pb::TableStart {
+                table_ref: "t0".to_owned(),
+                columns: vec![
+                    pb::ColumnSpec {
+                        align: pb::Alignment::Left as i32,
+                        valign: pb::Alignment::Unspecified as i32,
+                        width: None,
+                    },
+                    pb::ColumnSpec {
+                        align: pb::Alignment::Justify as i32,
+                        valign: pb::Alignment::Top as i32,
+                        width: Some("5cm".to_owned()),
+                    },
+                    pb::ColumnSpec {
+                        align: pb::Alignment::Right as i32,
+                        valign: pb::Alignment::Unspecified as i32,
+                        width: Some("120".to_owned()),
+                    },
+                ],
+                ..pb::TableStart::default()
+            },
+        ));
+        fold_state.consume(&pb::parse_markup_response::Event::TableRow(pb::TableRow {
+            table_ref: "t0".to_owned(),
+            row_index: 0,
+            is_header: false,
+            cells: vec![pb::TableCell {
+                column_index: 0,
+                text: "a".to_owned(),
+                column_span: 1,
+                row_span: 1,
+                align: pb::Alignment::Center as i32,
+                valign: pb::Alignment::Bottom as i32,
+                ..pb::TableCell::default()
+            }],
+        }));
+        fold_state.consume(&pb::parse_markup_response::Event::TableEnd(pb::TableEnd {
+            table_ref: "t0".to_owned(),
+            row_count: 1,
+            column_count: 3,
+        }));
+        let document = fold_state.take();
+        assert!(integrity_errors(&document).is_empty());
+        let data = document.tables[0].data.as_ref().unwrap();
+
+        assert_eq!(data.columns.len(), 3);
+        assert!(
+            data.columns.iter().all(|column| column.name.is_none()),
+            "a markup table declares geometry, not column names"
+        );
+        assert_eq!(
+            data.columns
+                .iter()
+                .map(|column| column.align)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(doc::Alignment::Left as i32),
+                Some(doc::Alignment::Justify as i32),
+                Some(doc::Alignment::Right as i32),
+            ]
+        );
+        assert_eq!(
+            data.columns[1].valign,
+            Some(doc::VerticalAlignment::Top as i32)
+        );
+        assert!(data.columns[0].valign.is_none());
+        assert_eq!(
+            data.columns[1].width_raw.as_deref(),
+            Some("5cm"),
+            "a length spelling is kept verbatim rather than mangled"
+        );
+        assert!(data.columns[1].width.is_none());
+        assert_eq!(
+            data.columns[2].width,
+            Some(120.0),
+            "a bare number is a page-unit width"
+        );
+        assert!(data.columns[2].width_raw.is_none());
+
+        let cell = &data.grid[0].cells[0];
+        assert_eq!(cell.align, Some(doc::Alignment::Center as i32));
+        assert_eq!(cell.valign, Some(doc::VerticalAlignment::Bottom as i32));
+    }
+
+    #[test]
+    fn the_two_alignment_axes_never_cross_over() {
+        // The wire merges both axes into one enum; a vertical value in a
+        // horizontal slot is not an alignment on this plane.
+        assert_eq!(
+            horizontal(pb::Alignment::Justify as i32),
+            Some(doc::Alignment::Justify)
+        );
+        assert!(horizontal(pb::Alignment::Middle as i32).is_none());
+        assert_eq!(
+            vertical(pb::Alignment::Bottom as i32),
+            Some(doc::VerticalAlignment::Bottom)
+        );
+        assert!(vertical(pb::Alignment::Left as i32).is_none());
+        assert!(horizontal(pb::Alignment::Unspecified as i32).is_none());
+        assert!(vertical(pb::Alignment::Unspecified as i32).is_none());
     }
 
     #[test]
