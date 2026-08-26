@@ -84,11 +84,33 @@ pub struct DocumentFold {
     /// declaration winning. Both `Document.anchors` and every cross
     /// reference resolve through this.
     anchors: BTreeMap<String, doc::FineRef>,
-    /// Cross references waiting for their anchor: (text-item index, span
-    /// index, the key the span points at). A document refers forward as
-    /// often as backward, so resolution is a pass at
-    /// [`take`](DocumentFold::take) rather than a lookup at fold time.
-    pending_refs: Vec<(usize, usize, String)>,
+    /// Cross references waiting for their anchor: where the run lives and
+    /// the key it points at. A document refers forward as often as
+    /// backward, so resolution is a pass at [`take`](DocumentFold::take)
+    /// rather than a lookup at fold time.
+    pending_refs: Vec<(Site, String)>,
+}
+
+/// Where one run waiting for its anchor lives.
+///
+/// A table's runs cannot name their site while the table is streaming: the
+/// item has no arena position until it is appended, so the cells record
+/// their positions inside the table and [`DocumentFold::append_table`]
+/// turns them into sites once the index is known.
+#[derive(Debug, Clone, Copy)]
+enum Site {
+    /// Run `span` of the text item at arena index `item`.
+    Text { item: usize, span: usize },
+    /// Run `span` of one cell of the table at arena index `table`. The cell
+    /// is named twice because the fold populates both shapes: `row` and
+    /// `cell` index it in `grid`, `flat` in `table_cells`.
+    Cell {
+        table: usize,
+        row: usize,
+        cell: usize,
+        flat: usize,
+        span: usize,
+    },
 }
 
 /// A table being assembled from `table_start` / `table_row` / `table_end`.
@@ -104,6 +126,12 @@ struct PendingTable {
     /// The column geometry the source declared, empty when it declared
     /// none.
     columns: Vec<doc::TableColumnSchema>,
+    /// Cross references the cells' runs carry, positioned inside this table
+    /// and waiting for the table's own arena index: (row, cell in that row,
+    /// index in the flat cell list, span, the key it points at).
+    cell_refs: Vec<(usize, usize, usize, usize, String)>,
+    /// Anchors the cells' runs declare, in first-declaration order.
+    cell_anchors: Vec<String>,
 }
 
 impl Default for DocumentFold {
@@ -187,7 +215,7 @@ impl DocumentFold {
     /// one that resolves to nothing would be worse than the wire's own
     /// `reference` field, which still carries the key either way.
     fn resolve_references(&mut self) {
-        for (item, span, key) in std::mem::take(&mut self.pending_refs) {
+        for (site, key) in std::mem::take(&mut self.pending_refs) {
             let Some(target) = self.anchors.get(&key).cloned() else {
                 continue;
             };
@@ -197,23 +225,58 @@ impl DocumentFold {
             let resolved_kind = self
                 .is_formula(&target.r#ref)
                 .then_some(doc::ReferenceKind::Equation as i32);
-            let Some(spans) = self
-                .document
-                .texts
-                .get_mut(item)
-                .and_then(|item| item.item.as_mut())
-                .and_then(text_base_mut)
-                .map(|base| &mut base.spans)
-            else {
-                continue;
-            };
-            if let Some(span) = spans.get_mut(span) {
+            for span in self.spans_at(site) {
                 if span.reference_kind == Some(doc::ReferenceKind::CrossRef as i32)
                     && let Some(kind) = resolved_kind
                 {
                     span.reference_kind = Some(kind);
                 }
-                span.target = Some(target);
+                span.target = Some(target.clone());
+            }
+        }
+    }
+
+    /// The run one site names. A cell run is two runs on this plane, one in
+    /// `grid` and one in `table_cells`, and both are the same run: a
+    /// consumer that reads either must see the same pointer.
+    fn spans_at(&mut self, site: Site) -> Vec<&mut doc::InlineSpan> {
+        match site {
+            Site::Text { item, span } => self
+                .document
+                .texts
+                .get_mut(item)
+                .and_then(|item| item.item.as_mut())
+                .and_then(text_base_mut)
+                .and_then(|base| base.spans.get_mut(span))
+                .into_iter()
+                .collect(),
+            Site::Cell {
+                table,
+                row,
+                cell,
+                flat,
+                span,
+            } => {
+                let Some(data) = self
+                    .document
+                    .tables
+                    .get_mut(table)
+                    .and_then(|table| table.data.as_mut())
+                else {
+                    return Vec::new();
+                };
+                let (cells, grid) = (&mut data.table_cells, &mut data.grid);
+                [
+                    cells
+                        .get_mut(flat)
+                        .and_then(|cell| cell.spans.get_mut(span)),
+                    grid.get_mut(row)
+                        .and_then(|row| row.cells.get_mut(cell))
+                        .and_then(|cell| cell.spans.get_mut(span)),
+                ]
+                .into_iter()
+                .flatten()
+                .collect()
             }
         }
     }
@@ -417,7 +480,13 @@ impl DocumentFold {
                 });
             }
             if let Some(key) = span.reference.as_ref().filter(|key| !key.is_empty()) {
-                self.pending_refs.push((index, position, key.clone()));
+                self.pending_refs.push((
+                    Site::Text {
+                        item: index,
+                        span: position,
+                    },
+                    key.clone(),
+                ));
             }
         }
     }
@@ -573,6 +642,8 @@ impl DocumentFold {
             cells: Vec::new(),
             num_cols: 0,
             columns: start.columns.iter().map(column_schema).collect(),
+            cell_refs: Vec::new(),
+            cell_anchors: Vec::new(),
         });
     }
 
@@ -587,8 +658,26 @@ impl DocumentFold {
             return;
         }
         let row_index = int(row.row_index);
+        // Where this row lands in both shapes, so a cell run can name its
+        // own position before the table has an arena index.
+        let grid_row = table.grid.len();
+        let flat_base = table.cells.len();
         let mut cells = Vec::with_capacity(row.cells.len());
-        for cell in &row.cells {
+        for (position, cell) in row.cells.iter().enumerate() {
+            for (span, run) in cell.spans.iter().enumerate() {
+                if let Some(anchor) = run.anchor_id.as_ref().filter(|id| !id.is_empty()) {
+                    table.cell_anchors.push(anchor.clone());
+                }
+                if let Some(key) = run.reference.as_ref().filter(|key| !key.is_empty()) {
+                    table.cell_refs.push((
+                        grid_row,
+                        position,
+                        flat_base + position,
+                        span,
+                        key.clone(),
+                    ));
+                }
+            }
             let start_col = int(cell.column_index);
             let col_span = int(cell.column_span.max(1));
             let row_span = int(cell.row_span.max(1));
@@ -629,7 +718,30 @@ impl DocumentFold {
     /// Give the finished table its arena slot and link it in.
     fn append_table(&mut self, pending: PendingTable) {
         let mut item = pending.item;
-        item.self_ref = format!("#/tables/{}", self.document.tables.len());
+        let index = self.document.tables.len();
+        item.self_ref = format!("#/tables/{index}");
+        // The table's position is only knowable here, which is why its
+        // cells' runs waited for it. An anchor a cell declares points at
+        // the table and states no range: the plane addresses items, and a
+        // range into "the table's text" would name nothing.
+        for anchor in pending.cell_anchors {
+            self.anchors.entry(anchor).or_insert(doc::FineRef {
+                r#ref: item.self_ref.clone(),
+                range: None,
+            });
+        }
+        for (row, cell, flat, span, key) in pending.cell_refs {
+            self.pending_refs.push((
+                Site::Cell {
+                    table: index,
+                    row,
+                    cell,
+                    flat,
+                    span,
+                },
+                key,
+            ));
+        }
         item.data = Some(doc::TableData {
             num_rows: int_from_usize(pending.grid.len()),
             num_cols: pending.num_cols,

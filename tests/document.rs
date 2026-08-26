@@ -760,3 +760,71 @@ async fn an_unresolved_reference_keeps_its_key_on_the_document_plane() {
         "and it is still the URL the author wrote"
     );
 }
+
+#[tokio::test]
+async fn a_table_cell_reference_resolves_the_same_way_a_paragraph_one_does() {
+    let client = client().await;
+    let html = r##"<body>
+<h2 id="méthode">La méthode</h2>
+<p>Voir aussi <a href="#résumé">le résumé</a>.</p>
+<table><tbody>
+<tr><td>renvoi à <a href="#méthode">la méthode</a></td>
+    <td><a id="résumé">Résumé</a> ici</td></tr>
+</tbody></table>
+</body>"##;
+    let events = parse_ok(&client, html, with_document(pb::MarkupFormat::Html)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+
+    let data = folded.tables[0].data.as_ref().expect("the table has data");
+    // Both shapes carry the same cell, so both must carry the same pointer.
+    for (where_, cells) in [
+        ("grid", data.grid[0].cells.as_slice()),
+        ("table_cells", data.table_cells.as_slice()),
+    ] {
+        let span = cells[0]
+            .spans
+            .iter()
+            .find(|span| span.reference.is_some())
+            .unwrap_or_else(|| panic!("{where_} keeps the cell's reference run"));
+        assert_eq!(span.reference.as_deref(), Some("méthode"));
+        assert_eq!(
+            span.target.as_ref().map(|target| target.r#ref.as_str()),
+            Some("#/texts/0"),
+            "{where_}: the cell run points at the header that declares the anchor"
+        );
+        assert_eq!(
+            span.reference_kind,
+            Some(doc::ReferenceKind::CrossRef as i32),
+            "{where_}"
+        );
+    }
+
+    // The anchor a cell run declares is the table, with no range: this plane
+    // addresses items, and a range into a table's text would name nothing.
+    let resume = folded
+        .anchors
+        .iter()
+        .find(|anchor| anchor.name == "résumé")
+        .expect("the cell declares an anchor");
+    let target = resume.target.as_ref().expect("a target");
+    assert_eq!(target.r#ref, "#/tables/0");
+    assert!(target.range.is_none());
+
+    // And the paragraph that refers forward to it now resolves.
+    let forward = folded
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::Text(text) => text.base.as_ref(),
+            _ => None,
+        })
+        .flat_map(|base| base.spans.iter())
+        .find(|span| span.reference.as_deref() == Some("résumé"))
+        .expect("the paragraph refers to the cell's anchor");
+    assert_eq!(
+        forward.target.as_ref().map(|target| target.r#ref.as_str()),
+        Some("#/tables/0"),
+        "a document refers forward as often as backward"
+    );
+}

@@ -323,6 +323,14 @@ Carried across from the typed wire, into slots the schema already had:
   equation reference. Resolution is a pass at the end of the parse, because a document
   refers forward as often as backward; a reference whose anchor the document
   never declares keeps no target rather than an invented one.
+- A table cell's runs go through that same pass. A cell cannot name its site
+  while the table is streaming — the item has no arena position until it is
+  appended — so each cell records where its runs sit inside the table and
+  the append turns those into sites once the index is known. Both shapes are
+  patched, `grid` and `table_cells`, because they are the same run and a
+  consumer that reads either must see the same pointer. An anchor a cell run
+  declares points at the table and states no range: this plane addresses
+  items, and a range into a table's text would name nothing.
 - The heading ladder becomes `Document.outline`.
 - `TableStart.columns` becomes `TableData.columns`, one `TableColumnSchema`
   per declared column with its alignment; `name` stays unset, because a
