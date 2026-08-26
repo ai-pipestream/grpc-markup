@@ -356,6 +356,11 @@ fn text_base(obj: &mut Obj<'_, '_>, label_text: &str) -> doc::TextItemBase {
             .get("formatting")
             .and_then(|value| map_formatting(value, obj.unmapped)),
         hyperlink: obj.string("hyperlink"),
+        spans: array(obj.get("spans"))
+            .iter()
+            .filter_map(|value| map_span(value, obj.unmapped))
+            .collect(),
+        admonition_kind: obj.string("admonition_kind"),
         ..doc::TextItemBase::default()
     }
 }
@@ -434,6 +439,20 @@ fn map_table_cell(value: &Value, unmapped: &mut Unmapped) -> Option<doc::TableCe
         row_section: obj.boolean("row_section"),
         fillable: obj.boolean("fillable"),
         r#ref: None,
+        spans: array(obj.get("spans"))
+            .iter()
+            .filter_map(|value| map_span(value, obj.unmapped))
+            .collect(),
+        align: obj
+            .string("align")
+            .as_deref()
+            .and_then(alignment)
+            .map(|align| align as i32),
+        valign: obj
+            .string("valign")
+            .as_deref()
+            .and_then(vertical_alignment)
+            .map(|valign| valign as i32),
         ..doc::TableCell::default()
     };
     obj.finish();
@@ -597,6 +616,94 @@ fn map_formatting(value: &Value, unmapped: &mut Unmapped) -> Option<doc::Formatt
     Some(formatting)
 }
 
+/// One character run of an item's text, as the schema states it.
+///
+/// The runs are what a document says about the inside of its own strings, so
+/// re-ingesting them is the difference between a round trip and a
+/// paraphrase: a document that went out with a bold run and a resolved
+/// cross reference comes back with both.
+fn map_span(value: &Value, unmapped: &mut Unmapped) -> Option<doc::InlineSpan> {
+    let mut obj = Obj::new(value.as_object()?, "$..spans[]", unmapped);
+    let span = doc::InlineSpan {
+        range: obj.get("range").and_then(map_int_span),
+        formatting: obj
+            .get("formatting")
+            .and_then(|value| map_formatting(value, obj.unmapped)),
+        hyperlink: obj.string("hyperlink"),
+        target: obj.get("target").and_then(map_fine_ref),
+        font_family: obj.string("font_family"),
+        font_size_pt: obj.get("font_size_pt").and_then(Value::as_f64),
+        color: obj.string("color"),
+        language: obj.string("language"),
+        field_code: obj.string("field_code"),
+        reference_kind: obj
+            .string("reference_kind")
+            .as_deref()
+            .and_then(reference_kind)
+            .map(|kind| kind as i32),
+        reference: obj.string("reference"),
+        link_title: obj.string("link_title"),
+        raw: obj.string("raw"),
+        style_name: obj.string("style_name"),
+        highlight_color: obj.string("highlight_color"),
+    };
+    obj.finish();
+    Some(span)
+}
+
+/// An `IntSpan`, written either as the object the schema declares or as the
+/// two-element array the upstream dialect writes a `charspan` as.
+fn map_int_span(value: &Value) -> Option<doc::IntSpan> {
+    if let Some(pair) = value.as_array() {
+        return Some(doc::IntSpan {
+            start: i32::try_from(pair.first()?.as_i64()?).ok()?,
+            end: i32::try_from(pair.get(1)?.as_i64()?).ok()?,
+        });
+    }
+    let map = value.as_object()?;
+    Some(doc::IntSpan {
+        start: i32::try_from(map.get("start")?.as_i64()?).ok()?,
+        end: i32::try_from(map.get("end")?.as_i64()?).ok()?,
+    })
+}
+
+/// A `FineRef`: a ref spelled either way, plus the range it narrows to.
+fn map_fine_ref(value: &Value) -> Option<doc::FineRef> {
+    let map = value.as_object()?;
+    let target = map
+        .get("$ref")
+        .or_else(|| map.get("ref"))
+        .and_then(Value::as_str)?;
+    Some(doc::FineRef {
+        r#ref: target.to_owned(),
+        range: map.get("range").and_then(map_int_span),
+    })
+}
+
+/// The `ReferenceKind` vocabulary, snake case.
+fn reference_kind(text: &str) -> Option<doc::ReferenceKind> {
+    let wanted = format!("REFERENCE_KIND_{}", text.to_ascii_uppercase());
+    (1..=8)
+        .filter_map(|value| doc::ReferenceKind::try_from(value).ok())
+        .find(|kind| kind.as_str_name() == wanted)
+}
+
+/// The horizontal `Alignment` vocabulary, snake case.
+fn alignment(text: &str) -> Option<doc::Alignment> {
+    let wanted = format!("ALIGNMENT_{}", text.to_ascii_uppercase());
+    (1..=4)
+        .filter_map(|value| doc::Alignment::try_from(value).ok())
+        .find(|align| align.as_str_name() == wanted)
+}
+
+/// The `VerticalAlignment` vocabulary, snake case.
+fn vertical_alignment(text: &str) -> Option<doc::VerticalAlignment> {
+    let wanted = format!("VERTICAL_ALIGNMENT_{}", text.to_ascii_uppercase());
+    (1..=3)
+        .filter_map(|value| doc::VerticalAlignment::try_from(value).ok())
+        .find(|valign| valign.as_str_name() == wanted)
+}
+
 /// A `$ref` object — or a bare string — as a `RefItem`.
 fn map_ref(value: &Value) -> Option<doc::RefItem> {
     let target = match value {
@@ -735,6 +842,8 @@ impl Project<'_, '_> {
                         label: pb::BlockLabel::Title,
                         text: base.text.clone(),
                         hyperlink: base.hyperlink.clone(),
+                        spans: wire_spans(&base.spans),
+                        admonition: wire_admonition(base.admonition_kind.as_ref()),
                         ..Block::default()
                     },
                     base.children.clone(),
@@ -750,6 +859,8 @@ impl Project<'_, '_> {
                         text: base.text.clone(),
                         level: Some(u32::try_from(header.level.max(1)).unwrap_or(1)),
                         hyperlink: base.hyperlink.clone(),
+                        spans: wire_spans(&base.spans),
+                        admonition: wire_admonition(base.admonition_kind.as_ref()),
                         ..Block::default()
                     },
                     base.children.clone(),
@@ -767,6 +878,8 @@ impl Project<'_, '_> {
                         marker: list_item.marker.clone(),
                         list_depth: Some(list_depth.max(1)),
                         hyperlink: base.hyperlink.clone(),
+                        spans: wire_spans(&base.spans),
+                        admonition: wire_admonition(base.admonition_kind.as_ref()),
                         ..Block::default()
                     },
                     base.children.clone(),
@@ -793,6 +906,7 @@ impl Project<'_, '_> {
                     Block {
                         label: pb::BlockLabel::Formula,
                         text: base.text.clone(),
+                        spans: wire_spans(&base.spans),
                         ..Block::default()
                     },
                     base.children.clone(),
@@ -809,6 +923,8 @@ impl Project<'_, '_> {
                         role,
                         text: base.text.clone(),
                         hyperlink: base.hyperlink.clone(),
+                        spans: wire_spans(&base.spans),
+                        admonition: wire_admonition(base.admonition_kind.as_ref()),
                         ..Block::default()
                     },
                     base.children.clone(),
@@ -853,7 +969,9 @@ impl Project<'_, '_> {
                         column_span: u32::try_from(cell.col_span.max(1)).unwrap_or(1),
                         row_span: u32::try_from(cell.row_span.max(1)).unwrap_or(1),
                         is_header: cell.column_header,
-                        ..pb::TableCell::default()
+                        spans: wire_spans(&cell.spans),
+                        align: wire_alignment(cell.align) as i32,
+                        valign: wire_valignment(cell.valign) as i32,
                     })
                     .collect();
                 let is_header = row.cells.iter().all(|cell| cell.column_header);
@@ -861,6 +979,127 @@ impl Project<'_, '_> {
             }
         }
         self.emitter.table_end()
+    }
+}
+
+/// The Document plane's runs as the typed wire's, so a client that only
+/// speaks the events sees the same runs the `document` event carries.
+///
+/// The mapping is the inverse of the one [`crate::document_fold`] applies,
+/// arm for arm. Two things do not survive the trip back, because the wire
+/// has no field for them and inventing one to hold a value no fold produces
+/// would be worse than saying so: an overline, and a highlight stated as a
+/// colour rather than as a `mark`.
+fn wire_spans(spans: &[doc::InlineSpan]) -> Vec<pb::InlineSpan> {
+    spans
+        .iter()
+        .map(|span| pb::InlineSpan {
+            range: span.range.map(|range| pb::IntRange {
+                start: u32::try_from(range.start.max(0)).unwrap_or_default(),
+                end: u32::try_from(range.end.max(0)).unwrap_or_default(),
+            }),
+            styles: wire_styles(span.formatting.as_ref()),
+            hyperlink: span.hyperlink.clone(),
+            link_title: span.link_title.clone(),
+            // An anchor is a document-level fact on this plane: it lives in
+            // `Document.anchors`, not on the run that declared it.
+            anchor_id: None,
+            reference: span.reference.clone(),
+            reference_kind: wire_reference_kind(span.reference_kind) as i32,
+            raw: span.raw.clone(),
+            font_family: span.font_family.clone(),
+            font_size_pt: span.font_size_pt,
+            color: span.color.clone(),
+            language: span.language.clone(),
+            field_code: span.field_code.clone(),
+            style_name: span.style_name.clone(),
+        })
+        .collect()
+}
+
+/// The rendering signals a `Formatting` states, as the wire's own styles.
+fn wire_styles(formatting: Option<&doc::Formatting>) -> Vec<i32> {
+    let Some(formatting) = formatting else {
+        return Vec::new();
+    };
+    let mut styles = Vec::new();
+    for (set, style) in [
+        (formatting.bold, pb::SpanStyle::Bold),
+        (formatting.italic, pb::SpanStyle::Italic),
+        (formatting.underline, pb::SpanStyle::Underline),
+        (formatting.strikethrough, pb::SpanStyle::Strikethrough),
+        (formatting.monospace, pb::SpanStyle::Code),
+        (formatting.small_caps, pb::SpanStyle::SmallCaps),
+        (formatting.math, pb::SpanStyle::Math),
+        (formatting.mark, pb::SpanStyle::Mark),
+        (formatting.small, pb::SpanStyle::Small),
+        (formatting.insertion, pb::SpanStyle::Insertion),
+        (formatting.abbreviation, pb::SpanStyle::Abbreviation),
+        (formatting.quote, pb::SpanStyle::Quote),
+    ] {
+        if set {
+            styles.push(style as i32);
+        }
+    }
+    match doc::Script::try_from(formatting.script).unwrap_or_default() {
+        doc::Script::Super => styles.push(pb::SpanStyle::Superscript as i32),
+        doc::Script::Sub => styles.push(pb::SpanStyle::Subscript as i32),
+        doc::Script::Unspecified | doc::Script::Baseline => {}
+    }
+    styles
+}
+
+/// The wire's name for what a reference points at.
+///
+/// The wire is the finer vocabulary in one direction and the coarser in the
+/// other: it separates a citation from a bibliography entry, and it has no
+/// arm of its own for a section, a figure, a table or a claim. All four are
+/// references into the document, so all four are cross references here.
+fn wire_reference_kind(kind: Option<i32>) -> pb::ReferenceKind {
+    let Some(kind) = kind.and_then(|kind| doc::ReferenceKind::try_from(kind).ok()) else {
+        return pb::ReferenceKind::Unspecified;
+    };
+    match kind {
+        doc::ReferenceKind::Unspecified => pb::ReferenceKind::Unspecified,
+        doc::ReferenceKind::Citation => pb::ReferenceKind::Citation,
+        doc::ReferenceKind::Footnote => pb::ReferenceKind::Footnote,
+        doc::ReferenceKind::Equation => pb::ReferenceKind::EquationRef,
+        doc::ReferenceKind::Claim
+        | doc::ReferenceKind::Section
+        | doc::ReferenceKind::CrossRef
+        | doc::ReferenceKind::Figure
+        | doc::ReferenceKind::Table => pb::ReferenceKind::CrossRef,
+    }
+}
+
+/// The callout kind an item declares, as the wire's own enum. A name outside
+/// the vocabulary is not a callout the wire can state.
+fn wire_admonition(kind: Option<&String>) -> Option<pb::AdmonitionKind> {
+    let wanted = format!("ADMONITION_KIND_{}", kind?.to_ascii_uppercase());
+    (1..=5)
+        .filter_map(|value| pb::AdmonitionKind::try_from(value).ok())
+        .find(|kind| kind.as_str_name() == wanted)
+}
+
+/// The wire's one alignment vocabulary, which merges both axes; the folds
+/// keep each value in the field that owns its axis.
+const fn wire_alignment(align: Option<i32>) -> pb::Alignment {
+    match align {
+        Some(1) => pb::Alignment::Left,
+        Some(2) => pb::Alignment::Center,
+        Some(3) => pb::Alignment::Right,
+        Some(4) => pb::Alignment::Justify,
+        _ => pb::Alignment::Unspecified,
+    }
+}
+
+/// The vertical half of the same vocabulary.
+const fn wire_valignment(valign: Option<i32>) -> pb::Alignment {
+    match valign {
+        Some(1) => pb::Alignment::Top,
+        Some(2) => pb::Alignment::Middle,
+        Some(3) => pb::Alignment::Bottom,
+        _ => pb::Alignment::Unspecified,
     }
 }
 

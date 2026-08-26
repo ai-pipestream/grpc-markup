@@ -259,9 +259,15 @@ The vendored `document.proto` mirrors the DoclingDocument v2
 schema, so ingestion is a mapping, not an interpretation: `schema_name`,
 `version`, `name`, `origin`, `body`, `furniture`, `groups`, `texts`
 (variant chosen by the item's `label`), `tables` (cells with span
-offsets, both `grid` and `table_cells`), `pictures` (with `ImageRef`),
-`pages`, plus `prov` (page, bbox, charspan), `formatting`, `hyperlink` and
-the whole `self_ref` / `parent` / `children` wiring. Identity is strict —
+offsets, their own `align` / `valign`, both `grid` and `table_cells`),
+`pictures` (with `ImageRef`), `pages`, plus `prov` (page, bbox, charspan),
+`formatting`, `hyperlink`, the `spans` an item and a cell declare, the
+`admonition_kind` an item is marked with, and the whole `self_ref` /
+`parent` / `children` wiring. A span is read whole: its range (the
+schema's object, or the two-element array the upstream dialect writes a
+charspan as), its formatting, link and link title, its resolved `target`
+with the range it narrows to, its reference key and kind, its typography,
+language, field code, named style and highlight. Identity is strict —
 not JSON, or `schema_name` not naming a DoclingDocument, is
 `INVALID_ARGUMENT` — while unknown labels and layers degrade to defaults
 with a warning.
@@ -273,9 +279,16 @@ Every key the mapping does not consume produces one aggregated
 The typed events for this format are a projection: the body is walked in
 reading order and its items re-emitted as `TextBlock` / table / `ImageBlock`
 events (list depth from the group nesting, table captions resolved onto
-`TableStart`). The `document` event is the point of the format: the
-ingested document carried over item for item, with this collector's
-`CollectorSource` appended to each item's sources.
+`TableStart`, an item's runs and callout kind carried back onto the wire's
+own `spans` and `admonition`). The `document` event is the point of the
+format: the ingested document carried over item for item, with this
+collector's `CollectorSource` appended to each item's sources.
+
+Two facts do not survive the trip back to the *typed wire*, because it has
+no field for them and minting one to hold a value no fold produces would be
+worse than saying so: an `overline`, and a highlight stated as a colour
+rather than as a `mark`. Both survive on the `document` event, which is
+where a round trip is measured.
 
 ## 5. The Document projection, and what it drops
 

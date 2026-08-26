@@ -6,9 +6,10 @@
 mod common;
 
 use common::{
-    BOXNOTE, DOCLING, blocks_labelled, client, images, info, meta_scalar, options, parse, parse_ok,
-    spanned, status, styles, table_rows, text_blocks, texts, warning,
+    BOXNOTE, DOCLING, blocks_labelled, client, document, images, info, meta_scalar, options, parse,
+    parse_ok, spanned, status, styles, table_rows, text_blocks, texts, warning,
 };
+use grpc_markup::document::v1 as doc;
 use grpc_markup::proto::v1 as pb;
 
 // -------------------------------------------------------------------- boxnote
@@ -187,6 +188,151 @@ async fn docling_json_projects_typed_events_in_reading_order() {
     assert_eq!(counts.text_blocks, 5);
     assert_eq!(counts.tables, 1);
     assert_eq!(counts.images, 1);
+}
+
+/// A serialized document whose text items and table cells carry the runs
+/// and the callout kind the schema declares, over multi-byte text: a range
+/// that is right in bytes and wrong in code points fails here.
+const DOCLING_SPANS: &str = r##"{
+  "schema_name": "DoclingDocument",
+  "version": "1.3.0",
+  "name": "Runs",
+  "furniture": {"self_ref": "#/furniture", "children": [], "content_layer": "furniture",
+                "name": "_root_", "label": "unspecified"},
+  "body": {"self_ref": "#/body",
+           "children": [{"$ref": "#/texts/0"}, {"$ref": "#/tables/0"}],
+           "content_layer": "body", "name": "_root_", "label": "unspecified"},
+  "groups": [],
+  "texts": [
+    {"self_ref": "#/texts/0", "parent": {"$ref": "#/body"}, "children": [],
+     "content_layer": "body", "label": "text", "prov": [],
+     "orig": "héllo wörld λόγος see §2",
+     "text": "héllo wörld λόγος see §2",
+     "admonition_kind": "warning",
+     "spans": [
+       {"range": {"start": 12, "end": 17}, "formatting": {"bold": true, "monospace": true}},
+       {"range": {"start": 18, "end": 24}, "hyperlink": "https://example.com/a",
+        "link_title": "Appendix", "language": "fr", "style_name": "Emphasis",
+        "reference": "sec-two", "reference_kind": "section",
+        "target": {"$ref": "#/texts/0", "range": {"start": 0, "end": 5}}}
+     ]}
+  ],
+  "tables": [
+    {"self_ref": "#/tables/0", "parent": {"$ref": "#/body"}, "children": [],
+     "content_layer": "body", "label": "table", "prov": [],
+     "captions": [], "references": [], "footnotes": [],
+     "data": {"num_rows": 1, "num_cols": 1, "table_cells": [],
+       "grid": [[{"row_span": 1, "col_span": 1, "start_row_offset_idx": 0,
+                  "end_row_offset_idx": 1, "start_col_offset_idx": 0, "end_col_offset_idx": 1,
+                  "text": "naïve λ", "column_header": false, "row_header": false,
+                  "row_section": false, "align": "center", "valign": "bottom",
+                  "spans": [{"range": {"start": 0, "end": 5},
+                             "formatting": {"italic": true}}]}]]}}
+  ],
+  "pages": {}
+}"##;
+
+#[tokio::test]
+async fn the_runs_a_document_declares_survive_the_round_trip() {
+    let client = client().await;
+    let with_document = pb::ParseOptions {
+        format: pb::MarkupFormat::DoclingJson as i32,
+        emit_document: true,
+        ..pb::ParseOptions::default()
+    };
+    let events = parse_ok(&client, DOCLING_SPANS, with_document).await;
+    let document = document(&events).expect("the caller asked for a Document");
+
+    let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+        panic!("the item is a text item");
+    };
+    let base = item.base.as_ref().unwrap();
+    assert_eq!(
+        base.admonition_kind.as_deref(),
+        Some("warning"),
+        "the callout kind is ingested, not defaulted away"
+    );
+    assert_eq!(base.spans.len(), 2, "both runs come back");
+
+    let bold = &base.spans[0];
+    assert_eq!(bold.range, Some(doc::IntSpan { start: 12, end: 17 }));
+    let covered: String = base.text.chars().skip(12).take(5).collect();
+    assert_eq!(covered, "λόγος", "the range indexes code points");
+    let formatting = bold.formatting.as_ref().expect("the run states a style");
+    assert!(formatting.bold && formatting.monospace);
+
+    let linked = &base.spans[1];
+    assert_eq!(linked.hyperlink.as_deref(), Some("https://example.com/a"));
+    assert_eq!(linked.link_title.as_deref(), Some("Appendix"));
+    assert_eq!(linked.language.as_deref(), Some("fr"));
+    assert_eq!(linked.style_name.as_deref(), Some("Emphasis"));
+    assert_eq!(linked.reference.as_deref(), Some("sec-two"));
+    assert_eq!(
+        linked.reference_kind,
+        Some(doc::ReferenceKind::Section as i32)
+    );
+    let target = linked.target.as_ref().expect("the resolved pointer");
+    assert_eq!(target.r#ref, "#/texts/0");
+    assert_eq!(target.range, Some(doc::IntSpan { start: 0, end: 5 }));
+
+    let cell = &document.tables[0].data.as_ref().unwrap().grid[0].cells[0];
+    assert_eq!(cell.spans.len(), 1, "a cell's runs come back too");
+    assert!(cell.spans[0].formatting.as_ref().unwrap().italic);
+    assert_eq!(cell.align, Some(doc::Alignment::Center as i32));
+    assert_eq!(cell.valign, Some(doc::VerticalAlignment::Bottom as i32));
+}
+
+#[tokio::test]
+async fn the_ingested_runs_reach_the_typed_wire_too() {
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        DOCLING_SPANS,
+        options(pb::MarkupFormat::DoclingJson),
+    )
+    .await;
+    let block = text_blocks(&events)[0];
+    assert_eq!(block.admonition, pb::AdmonitionKind::Warning as i32);
+    assert_eq!(block.spans.len(), 2);
+    assert_eq!(spanned(&block.text, &block.spans[0]), "λόγος");
+    assert_eq!(
+        styles(&block.spans[0]),
+        [pb::SpanStyle::Bold, pb::SpanStyle::Code]
+    );
+    assert_eq!(spanned(&block.text, &block.spans[1]), "see §2");
+    assert_eq!(
+        block.spans[1].reference_kind,
+        pb::ReferenceKind::CrossRef as i32,
+        "the wire has no arm of its own for a section reference"
+    );
+    assert_eq!(block.spans[1].style_name.as_deref(), Some("Emphasis"));
+
+    let cell = &table_rows(&events)[0].cells[0];
+    assert_eq!(spanned(&cell.text, &cell.spans[0]), "naïve");
+    assert_eq!(styles(&cell.spans[0]), [pb::SpanStyle::Italic]);
+    assert_eq!(cell.align, pb::Alignment::Center as i32);
+    assert_eq!(cell.valign, pb::Alignment::Bottom as i32);
+}
+
+#[tokio::test]
+async fn the_runs_and_the_callout_are_no_longer_unmapped_keys() {
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        DOCLING_SPANS,
+        options(pb::MarkupFormat::DoclingJson),
+    )
+    .await;
+    let unmapped: Vec<&str> = status(&events)
+        .warnings
+        .iter()
+        .filter(|w| w.code == pb::WarningCode::UnmappedConstruct as i32)
+        .map(|w| w.message.as_str())
+        .collect();
+    assert!(
+        unmapped.is_empty(),
+        "every key this fixture writes is now consumed: {unmapped:?}"
+    );
 }
 
 #[tokio::test]
