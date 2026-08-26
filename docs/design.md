@@ -415,38 +415,28 @@ Dropped or demoted per format, deliberately:
   keys: annotations, key-value items, form items) is exactly what the
   per-key-path warnings name.
 
-## 5a. What still has no typed home
+## 5a. What the Document plane still does not carry
 
-Everything the typed wire carries has a first-class slot on the Document
-plane except the five below. Each is stated here with the shape that would
-give it one, so the next schema sync can take them rather than rediscover
-them; none is forced into a slot that means something else.
+Every residual this repo's last report listed now has a typed slot and is
+in it, so what remains is two deliberate calls rather than five gaps.
 
-- **`source_line`.** A 1-based line of the source file, which Markdown and
-  AsciiDoc both track. `ProvenanceItem` locates content in a page and a box,
-  a media timeline, a byte range, a sheet cell or a polygon, and a line
-  number is none of those; a byte range is not derivable from a line without
-  re-reading the file. It stays a custom field. **Proposed shape:**
-  `ProvenanceItem.line_range`, a `LineSpan { uint32 start; uint32 end; }`
-  with 1-based half-open lines, beside `byte_range`.
-- **Raw embedded HTML.** An HTML block or inline HTML inside Markdown is
-  flattened to its text with `WARNING_CODE_EMBEDDED_HTML_FLATTENED`; the
-  markup itself is gone from both planes. **Proposed shape:**
-  `TextItemBase.raw`, the block-level twin of the `InlineSpan.raw` the
-  schema already has for "the rendered text is a projection of this".
-- **A declared image dimension that is not a bare number.** `ImageRef` has
-  `Size`, two doubles with no unit beside them and no raw twin, so `20%`,
-  `5cm` and `0.8\textwidth` stay custom fields. **Proposed shape:** the
-  pattern `TableColumnSchema` already uses, an `ImageRef.size_raw`
-  carrying the two spellings verbatim, or an `ImageRef.unit` beside `size`.
-- **`MarkupInfo.evidence`.** How the format was decided is a fact about the
-  parse and not about the document, which is why it is dropped rather than
-  homeless. **Proposed shape, only if the fleet wants it:**
-  `DocumentOrigin.mimetype_evidence`, beside the mimetype it explains.
-- **WebVTT `<ruby>` / `<rt>`.** A ruby annotation is a second reading over a
-  run, and neither plane models one; both still flatten to their text.
-  **Proposed shape:** an `InlineSpan.annotation` string, the reading the
-  run carries.
+- **`ParseStatus` and its warnings** describe the stream and not the
+  document, and stay off this plane by construction. That includes
+  `evidence`, whose *conclusion* does land: the sniff's rung becomes
+  `DocumentOrigin.mimetype_evidence` (`requested`, `signature`,
+  `heuristic`), so a consumer reading `text/markdown` off a document can
+  tell a stated fact from a classified guess without the stream's trailer.
+- **A block's `role`** is an open refinement (`html`, `admonition`, a
+  footnote label) with no closed vocabulary to type it against, and stays a
+  custom field.
+
+Two things still do not survive a round trip back to the *typed wire*,
+which is a gap in this wire rather than in the Document plane, and stating
+it is better than minting fields no fold in this build produces: the wire
+has no overline style and no highlight colour. Both survive on the
+`document` event, which is where a round trip is measured. If a fold ever
+produces either, the wire gets a `SPAN_STYLE_OVERLINE` and an
+`InlineSpan.highlight_color` in the same change.
 
 ## 6. Sniffing
 

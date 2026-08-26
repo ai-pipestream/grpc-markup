@@ -336,6 +336,7 @@ impl DocumentFold {
             binary_hash: 0,
             filename: String::new(),
             uri: None,
+            mimetype_evidence: evidence_name(info.evidence).map(str::to_owned),
             ..doc::DocumentOrigin::default()
         });
         self.document.source_meta = source_meta(info.title.as_deref(), &info.metadata);
@@ -1107,6 +1108,22 @@ fn image_mimetype(src: &str) -> &'static str {
         "bmp" => "image/bmp",
         "avif" => "image/avif",
         _ => "application/octet-stream",
+    }
+}
+
+/// What the mimetype claim rests on, in the sniff's own vocabulary.
+///
+/// The mimetype here is derived from the format, so what the format
+/// resolution rested on is exactly what the mimetype rests on: the request
+/// said so, an unambiguous signature matched, or the bytes were classified
+/// by structure. A consumer reading `text/markdown` off a document can tell
+/// a stated fact from a guess.
+fn evidence_name(evidence: i32) -> Option<&'static str> {
+    match pb::FormatEvidence::try_from(evidence).ok()? {
+        pb::FormatEvidence::Unspecified => None,
+        pb::FormatEvidence::Requested => Some("requested"),
+        pb::FormatEvidence::Signature => Some("signature"),
+        pb::FormatEvidence::Heuristic => Some("heuristic"),
     }
 }
 

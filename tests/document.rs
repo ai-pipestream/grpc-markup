@@ -1083,3 +1083,66 @@ async fn the_raw_markup_behind_a_projected_block_reaches_the_document() {
         "the block-level twin of the run-level raw the schema already had"
     );
 }
+
+#[tokio::test]
+async fn the_origin_says_what_its_mimetype_claim_rests_on() {
+    let client = client().await;
+
+    let stated = parse_ok(
+        &client,
+        "# Titre\n",
+        with_document(pb::MarkupFormat::Markdown),
+    )
+    .await;
+    let origin = document(&stated)
+        .expect("the fold was requested")
+        .origin
+        .as_ref()
+        .expect("an origin");
+    assert_eq!(origin.mimetype, "text/markdown");
+    assert_eq!(
+        origin.mimetype_evidence.as_deref(),
+        Some("requested"),
+        "the request stated the format, so the mimetype is a stated fact"
+    );
+
+    let sniffed = parse_ok(
+        &client,
+        "WEBVTT\n\n00:00.000 --> 00:01.000\nbonjour\n",
+        pb::ParseOptions {
+            emit_document: true,
+            ..pb::ParseOptions::default()
+        },
+    )
+    .await;
+    let origin = document(&sniffed)
+        .expect("the fold was requested")
+        .origin
+        .as_ref()
+        .expect("an origin");
+    assert_eq!(origin.mimetype, "text/vtt");
+    assert_eq!(
+        origin.mimetype_evidence.as_deref(),
+        Some("signature"),
+        "an unambiguous header matched"
+    );
+
+    let guessed = parse_ok(
+        &client,
+        "# Titre\n\nDu texte.\n",
+        pb::ParseOptions {
+            emit_document: true,
+            ..pb::ParseOptions::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        document(&guessed)
+            .expect("the fold was requested")
+            .origin
+            .as_ref()
+            .and_then(|origin| origin.mimetype_evidence.as_deref()),
+        Some("heuristic"),
+        "structure was classified, and a consumer can tell that from a claim"
+    );
+}
