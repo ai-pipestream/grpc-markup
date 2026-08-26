@@ -374,9 +374,10 @@ Dropped or demoted per format, deliberately:
 
 - **All formats:** `ParseStatus` (describes the stream, not the document);
   warnings; `evidence`. A block's `role` and `source_line` survive only as
-  custom fields. Every other field the typed wire carries now has a
-  first-class slot on this plane, so nothing is faked into a custom field
-  and nothing is dropped at the boundary.
+  custom fields. Everything else the typed wire carries has a first-class
+  slot on this plane; the five exceptions, and the shapes that would give
+  them one, are listed in section 5a rather than faked into a slot that
+  means something else.
 - **HTML:** anything derived from a rendered page (provenance
   boxes, visibility, forms) never existed here; nested structure inside a
   table cell survives only as the cell's flattened text; `hr` and unmapped
@@ -400,6 +401,39 @@ Dropped or demoted per format, deliberately:
   through with stamps appended. What the *mapping* dropped (unconsumed
   keys: annotations, key-value items, form items) is exactly what the
   per-key-path warnings name.
+
+## 5a. What still has no typed home
+
+Everything the typed wire carries has a first-class slot on the Document
+plane except the five below. Each is stated here with the shape that would
+give it one, so the next schema sync can take them rather than rediscover
+them; none is forced into a slot that means something else.
+
+- **`source_line`.** A 1-based line of the source file, which Markdown and
+  AsciiDoc both track. `ProvenanceItem` locates content in a page and a box,
+  a media timeline, a byte range, a sheet cell or a polygon, and a line
+  number is none of those; a byte range is not derivable from a line without
+  re-reading the file. It stays a custom field. **Proposed shape:**
+  `ProvenanceItem.line_range`, a `LineSpan { uint32 start; uint32 end; }`
+  with 1-based half-open lines, beside `byte_range`.
+- **Raw embedded HTML.** An HTML block or inline HTML inside Markdown is
+  flattened to its text with `WARNING_CODE_EMBEDDED_HTML_FLATTENED`; the
+  markup itself is gone from both planes. **Proposed shape:**
+  `TextItemBase.raw`, the block-level twin of the `InlineSpan.raw` the
+  schema already has for "the rendered text is a projection of this".
+- **A declared image dimension that is not a bare number.** `ImageRef` has
+  `Size`, two doubles with no unit beside them and no raw twin, so `20%`,
+  `5cm` and `0.8\textwidth` stay custom fields. **Proposed shape:** the
+  pattern `TableColumnSchema` already uses, an `ImageRef.size_raw`
+  carrying the two spellings verbatim, or an `ImageRef.unit` beside `size`.
+- **`MarkupInfo.evidence`.** How the format was decided is a fact about the
+  parse and not about the document, which is why it is dropped rather than
+  homeless. **Proposed shape, only if the fleet wants it:**
+  `DocumentOrigin.mimetype_evidence`, beside the mimetype it explains.
+- **WebVTT `<ruby>` / `<rt>`.** A ruby annotation is a second reading over a
+  run, and neither plane models one; both still flatten to their text.
+  **Proposed shape:** an `InlineSpan.annotation` string, the reading the
+  run carries.
 
 ## 6. Sniffing
 
