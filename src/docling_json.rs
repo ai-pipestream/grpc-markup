@@ -581,6 +581,7 @@ fn map_image_ref(value: &Value, unmapped: &mut Unmapped) -> Option<doc::ImageRef
             .get("size")
             .and_then(|value| map_size(value, obj.unmapped)),
         uri: obj.text("uri"),
+        size_raw: obj.string("size_raw"),
     };
     obj.finish();
     Some(image)
@@ -646,6 +647,7 @@ fn map_span(value: &Value, unmapped: &mut Unmapped) -> Option<doc::InlineSpan> {
         raw: obj.string("raw"),
         style_name: obj.string("style_name"),
         highlight_color: obj.string("highlight_color"),
+        annotation: obj.string("annotation"),
     };
     obj.finish();
     Some(span)

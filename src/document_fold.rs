@@ -905,6 +905,7 @@ impl DocumentFold {
                 dpi: 0,
                 size,
                 uri: image.src.clone(),
+                size_raw: None,
             }),
             source: vec![self.collector_source()],
             ..doc::PictureItem::default()
@@ -1884,6 +1885,7 @@ fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
         // No highlight colours on this wire: no format in this build states
         // one as a colour rather than as a `mark`.
         highlight_color: None,
+        annotation: None,
     }
 }
 
