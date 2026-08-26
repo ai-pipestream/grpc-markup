@@ -838,11 +838,11 @@ impl DocumentFold {
     /// own string, verbatim. No bytes and no dpi: this collector is handed
     /// markup, and claiming pixels it never saw would be lying.
     ///
-    /// The size is the one exception, and only when the source stated both
-    /// dimensions as bare numbers: `Size` is two plain doubles with no unit
-    /// beside them, so `20%` or `5cm` cannot go in it without inventing a
-    /// unit the source never named. Those spellings, and a lone dimension,
-    /// stay verbatim in the picture's custom fields.
+    /// The size is the one exception. Both dimensions as bare numbers make
+    /// a `Size`: two plain doubles with no unit beside them. Anything else
+    /// makes a `size_raw` and leaves `size` unset, because `20%` or `5cm`
+    /// cannot go in a unitless double without inventing a unit the source
+    /// never named.
     fn on_image(&mut self, image: &pb::ImageBlock) {
         self.lists.clear();
         let parent = self.current_parent();
@@ -854,17 +854,7 @@ impl DocumentFold {
         if !image.title.is_empty() {
             fields.insert(format!("{}.title", self.prefix), string(&image.title));
         }
-        let size = match (bare(image.width.as_deref()), bare(image.height.as_deref())) {
-            (Some(width), Some(height)) => Some(doc::Size { width, height }),
-            _ => {
-                for (name, declared) in [("width", &image.width), ("height", &image.height)] {
-                    if let Some(declared) = declared.as_ref().filter(|value| !value.is_empty()) {
-                        fields.insert(format!("{}.{name}", self.prefix), string(declared));
-                    }
-                }
-                None
-            }
-        };
+        let (size, size_raw) = declared_size(image);
         if let Some(anchor) = image.anchor_id.as_ref().filter(|id| !id.is_empty()) {
             // A picture is addressed as a whole; there is no range into it.
             self.anchors.entry(anchor.clone()).or_insert(doc::FineRef {
@@ -887,7 +877,7 @@ impl DocumentFold {
                 dpi: 0,
                 size,
                 uri: image.src.clone(),
-                size_raw: None,
+                size_raw,
             }),
             source: vec![self.collector_source()],
             ..doc::PictureItem::default()
@@ -1231,6 +1221,43 @@ const fn flag(value: bool) -> Value {
     Value {
         kind: Some(Kind::BoolValue(value)),
     }
+}
+
+/// The size a source asks an image to be, in whichever of the schema's two
+/// shapes it actually stated.
+///
+/// Both dimensions as bare numbers are a `Size`. Anything else is a
+/// `size_raw`, and `size` stays unset: a percentage, a length in a typeset
+/// unit and a fraction of the text width are all things a document can ask
+/// for, and none of them is a number that belongs in a unitless double.
+///
+/// The raw form names its dimensions, `width=..,height=..`, which is
+/// verbatim what a LaTeX option list wrote and a faithful transcription of
+/// what two HTML attributes said. Naming them is what keeps a lone
+/// dimension unambiguous: `width=50%` is not a height.
+fn declared_size(image: &pb::ImageBlock) -> (Option<doc::Size>, Option<String>) {
+    let declared = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let (width, height) = (declared(&image.width), declared(&image.height));
+    if let (Some(w), Some(h)) = (bare(width.as_deref()), bare(height.as_deref())) {
+        return (
+            Some(doc::Size {
+                width: w,
+                height: h,
+            }),
+            None,
+        );
+    }
+    let spelled: Vec<String> = [("width", &width), ("height", &height)]
+        .into_iter()
+        .filter_map(|(name, value)| value.as_ref().map(|value| format!("{name}={value}")))
+        .collect();
+    (None, (!spelled.is_empty()).then(|| spelled.join(",")))
 }
 
 /// The line a block starts on, as the provenance it is.

@@ -947,24 +947,48 @@ async fn declared_image_dimensions_reach_the_picture_only_when_they_are_numbers(
         })
     );
 
+    assert!(
+        sized.size_raw.is_none(),
+        "a bare pair is a size, not a spelling"
+    );
+
     let spelled = folded.pictures[1].image.as_ref().expect("an image ref");
     assert!(
         spelled.size.is_none(),
         "Size has no unit beside its doubles, so a percentage cannot go in it"
     );
-    let fields = &folded.pictures[1]
+    assert_eq!(
+        spelled.size_raw.as_deref(),
+        Some("width=50%,height=5cm"),
+        "the raw form names its dimensions, so a lone one stays unambiguous"
+    );
+    let leftovers: Vec<&String> = folded.pictures[1]
         .meta
         .as_ref()
-        .expect("the spellings are kept")
-        .custom_fields;
-    assert_eq!(
-        fields["html.width"].kind,
-        Some(prost_types::value::Kind::StringValue("50%".to_owned()))
+        .into_iter()
+        .flat_map(|meta| meta.custom_fields.keys())
+        .filter(|key| key.ends_with(".width") || key.ends_with(".height"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the spellings used to be custom fields and no longer are: {leftovers:?}"
     );
+}
+
+#[tokio::test]
+async fn a_lone_declared_dimension_names_which_one_it_is() {
+    let client = client().await;
+    let latex = "\\documentclass{article}\n\\begin{document}\n\
+        \\includegraphics[width=0.8\\textwidth]{figures/schéma.png}\n\\end{document}\n";
+    let events = parse_ok(&client, latex, with_document(pb::MarkupFormat::Latex)).await;
+    let folded = document(&events).expect("the fold was requested");
+    let image = folded.pictures[0].image.as_ref().expect("an image ref");
     assert_eq!(
-        fields["html.height"].kind,
-        Some(prost_types::value::Kind::StringValue("5cm".to_owned()))
+        image.size_raw.as_deref(),
+        Some("width=0.8\\textwidth"),
+        "verbatim what the option list wrote, macro and all"
     );
+    assert!(image.size.is_none());
 }
 
 #[tokio::test]

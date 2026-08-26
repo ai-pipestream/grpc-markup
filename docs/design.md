@@ -356,11 +356,14 @@ Carried across from the typed wire, into slots the schema already had:
   declared alignment lands on the cell. The wire merges both alignment axes
   into one enum and the folds keep them in the right field, so the
   projection splits them and refuses a vertical value in a horizontal slot.
-- An image's declared `width` and `height` become `ImageRef.size`, but only
-  when the source stated both as bare numbers: `Size` is two plain doubles
-  with no unit beside them, so `20%`, `5cm` and `0.8\textwidth` cannot go in
-  it without inventing a unit the source never named. Those spellings, and a
-  lone dimension, stay verbatim in the picture's custom fields.
+- An image's declared `width` and `height` become `ImageRef.size` when the
+  source stated both as bare numbers, and `ImageRef.size_raw` otherwise,
+  with `size` unset: `Size` is two plain doubles with no unit beside them,
+  so `20%`, `5cm` and `0.8\textwidth` cannot go in it without inventing a
+  unit the source never named. The raw form names its dimensions
+  (`width=50%,height=5cm`, `width=0.8\textwidth`), which is verbatim what a
+  LaTeX option list wrote and a faithful transcription of what two HTML
+  attributes said, and is what keeps a lone dimension unambiguous.
 - A block's `source_line` becomes a `ProvenanceItem` carrying a
   `LineSpan`, on text items, pictures and tables alike. The wire states
   where a block begins and not where it ends, so the range is the one line
