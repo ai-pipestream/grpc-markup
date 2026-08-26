@@ -42,8 +42,9 @@ rendering signal (`SpanStyle`), a link (`hyperlink` plus `link_title`), an
 anchor the run declares (`anchor_id`), a key it points at (`reference` plus
 `reference_kind`), the source notation flattening removed (`raw`), a run's
 own typography (`font_family`, `font_size_pt`, `color`), its own language
-tag (`language`), and the named character style the source put on it
-(`style_name`).
+tag (`language`), the named character style the source put on it
+(`style_name`), and the interlinear reading printed over it
+(`annotation`).
 
 Three rules make the ranges usable:
 
@@ -232,7 +233,7 @@ it:
 | `.class` qualifiers on any cue tag (`<c.loud.narrow>`, `<b.loud>`) | `InlineSpan.style_name`, the class list verbatim, dots and all |
 | `<lang fr>` | `InlineSpan.language` over its run |
 | `<v Name>` | `Cue.speaker` (first annotation wins); its classes still leave a style name |
-| `<ruby>` / `<rt>` | flattened, as before: this plane has no annotation shape to put them in |
+| `<ruby>` / `<rt>` | the base text stays in the cue's text and the `<rt>` reading rides as the run's `annotation`; the reading never enters the text it is printed over |
 | `<00:00:06.000>` karaoke timestamps | `Cue.timings`, one `CueTiming` per run, tiling the whole text; the leading run starts at the cue's own start and the last ends at the cue's own end. A cue with no timestamp tag carries no segments, because its timing is already the cue's |
 
 Cue text is not prose and is not collapsed: the spacing and line breaks the
@@ -407,7 +408,7 @@ Dropped or demoted per format, deliberately:
 - **VTT:** cue order is document order, the cue's own timings live in the
   `TrackSource` and its karaoke segments in `prov` as `TimeSpan`s with the
   `charspan` they cover; skipped NOTE/STYLE/REGION content never reaches the
-  document, and `<ruby>` / `<rt>` survive only as their flattened text.
+  document.
 - **BoxNote:** nothing beyond what every format drops.
 - **Docling JSON:** nothing is re-folded — the ingested document passes
   through with stamps appended. What the *mapping* dropped (unconsumed

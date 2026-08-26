@@ -254,3 +254,39 @@ async fn crlf_line_terminators_parse_the_same() {
     assert_eq!(cues.len(), 1);
     assert_eq!(cues[0].text, "windows line");
 }
+
+#[tokio::test]
+async fn a_ruby_reading_reaches_both_planes_as_the_annotation_it_is() {
+    let client = client().await;
+    let ruby = "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n\
+                <ruby>東京<rt>とうきょう</rt></ruby> へ ようこそ\n";
+    let with_document = pb::ParseOptions {
+        format: pb::MarkupFormat::Vtt as i32,
+        emit_document: true,
+        ..pb::ParseOptions::default()
+    };
+    let events = parse_ok(&client, ruby, with_document).await;
+
+    let cue = cues(&events)[0];
+    assert_eq!(
+        cue.text, "東京 へ ようこそ",
+        "the reading never enters the text it is printed over"
+    );
+    assert_eq!(spanned(&cue.text, &cue.spans[0]), "東京");
+    assert_eq!(cue.spans[0].annotation.as_deref(), Some("とうきょう"));
+
+    let document = document(&events).expect("the caller asked for a Document");
+    let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+        panic!("cues fold as TextItem");
+    };
+    let base = item.base.as_ref().unwrap();
+    assert_eq!(
+        base.spans[0].annotation.as_deref(),
+        Some("とうきょう"),
+        "the run-level annotation the schema grew for exactly this"
+    );
+    assert!(
+        base.spans[0].formatting.is_none(),
+        "a ruby is a reading, not a rendering signal"
+    );
+}

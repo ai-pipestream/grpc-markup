@@ -1039,6 +1039,7 @@ fn wire_spans(spans: &[doc::InlineSpan]) -> Vec<pb::InlineSpan> {
             language: span.language.clone(),
             field_code: span.field_code.clone(),
             style_name: span.style_name.clone(),
+            annotation: span.annotation.clone(),
         })
         .collect()
 }

@@ -208,6 +208,11 @@ message InlineSpan {
   // one, dots and all. A name, never a resolved rendering: this service has
   // no stylesheet and does not want one.
   optional string style_name = 14;
+
+  // The interlinear annotation printed over the run: the reading inside a
+  // WebVTT `<ruby>`'s `<rt>`. The base text stays in the enclosing text and
+  // the reading rides here, so neither is interleaved into the other.
+  optional string annotation = 15;
 }
 
 // AdmonitionKind names the callout a block is marked as.

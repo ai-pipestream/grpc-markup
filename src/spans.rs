@@ -53,6 +53,8 @@ pub struct Mark {
     pub language: Option<String>,
     /// The named character style the source puts on the run, as written.
     pub style_name: Option<String>,
+    /// The interlinear annotation printed over the run.
+    pub annotation: Option<String>,
 }
 
 impl Default for Mark {
@@ -70,6 +72,7 @@ impl Default for Mark {
             color: None,
             language: None,
             style_name: None,
+            annotation: None,
         }
     }
 }
@@ -130,6 +133,7 @@ impl Mark {
             && self.color.is_none()
             && self.language.is_none()
             && self.style_name.is_none()
+            && self.annotation.is_none()
     }
 }
 
@@ -224,13 +228,24 @@ impl Inline {
     /// Open a run. Every open run is closed by [`Inline::close`], innermost
     /// first, exactly as the source's own start and end events pair.
     pub fn open(&mut self, mark: Mark) {
-        if mark.is_silent() {
-            // Nothing to say about the run; still stacked so `close` stays
-            // paired with `open` from the caller's side.
-            self.open.push((mark, Some(u32::MAX)));
-            return;
-        }
+        // A mark that says nothing yet is still stacked with its real
+        // start, because a run can learn what it says after its text has
+        // landed: a ruby element states its reading only once the base text
+        // is behind it. Whether the run is worth recording is decided at
+        // `close`, when the mark is final.
         self.open.push((mark, None));
+    }
+
+    /// Give the innermost open run its interlinear annotation.
+    ///
+    /// A ruby element writes its reading after the base text it sits over,
+    /// so the run cannot carry it at the moment it opens.
+    pub fn annotate(&mut self, annotation: &str) {
+        if let Some((mark, _)) = self.open.last_mut()
+            && !annotation.is_empty()
+        {
+            mark.annotation = Some(annotation.to_owned());
+        }
     }
 
     /// Close the innermost open run, recording it when it covered text.
@@ -238,6 +253,9 @@ impl Inline {
         let Some((mark, start)) = self.open.pop() else {
             return;
         };
+        if mark.is_silent() {
+            return;
+        }
         let Some(start) = start.filter(|start| *start < self.chars) else {
             return;
         };
@@ -258,6 +276,7 @@ impl Inline {
             color: mark.color,
             language: mark.language,
             style_name: mark.style_name,
+            annotation: mark.annotation,
             // A field code is something a word processor declares; no markup
             // format in this build does.
             field_code: None,

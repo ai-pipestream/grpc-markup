@@ -17,6 +17,8 @@
 //! - Payload markup is flattened out of the text and described beside it:
 //!   `<b>`, `<i>` and `<u>` leave a style run, the class list of any cue tag
 //!   leaves a named character style, `<lang xx>` leaves the tag on its run,
+//!   a `<ruby>`'s `<rt>` reading leaves the base text alone and rides as
+//!   the run's annotation,
 //!   the first `<v Name>` annotation becomes `Cue.speaker`, and a karaoke
 //!   `<00:00:01.000>` timestamp splits the text into `CueTiming` segments.
 //!   Lines join with `\n` and the spacing the author timed against is kept
@@ -195,6 +197,9 @@ fn flatten_payload(cue_id: Option<String>, lines: &[&str], start_ms: u64, end_ms
     let mut open: Vec<String> = Vec::new();
     // Where each karaoke segment starts: (its time, its offset in `text`).
     let mut karaoke: Vec<(u64, u32)> = Vec::new();
+    // The reading being collected inside an `<rt>`, which goes on the
+    // enclosing ruby run rather than into the text.
+    let mut reading: Option<String> = None;
 
     for (position, line) in lines.iter().enumerate() {
         if position > 0 {
@@ -202,7 +207,7 @@ fn flatten_payload(cue_id: Option<String>, lines: &[&str], start_ms: u64, end_ms
         }
         let mut rest = *line;
         while let Some(at) = rest.find('<') {
-            push_decoded(&mut inline, &rest[..at]);
+            push_text(&mut inline, &mut reading, &rest[..at]);
             let after = &rest[at + 1..];
             let Some(close) = after.find('>') else {
                 rest = "";
@@ -213,12 +218,29 @@ fn flatten_payload(cue_id: Option<String>, lines: &[&str], start_ms: u64, end_ms
             if let Some(ms) = timestamp_ms(tag.trim()) {
                 karaoke.push((ms, inline.len()));
             } else if let Some(name) = tag.strip_prefix('/') {
-                close_span(&mut inline, &mut open, name.trim());
+                let name = name.trim();
+                if name == "rt" {
+                    // The reading is finished; it belongs to the ruby run
+                    // that is still open around the base text.
+                    let collected = reading.take().unwrap_or_default();
+                    inline.annotate(collected.trim());
+                    open.pop();
+                    continue;
+                }
+                close_span(&mut inline, &mut open, name);
+            } else if tag_name(tag) == "rt" {
+                reading = Some(String::new());
+                open.push("rt".to_owned());
             } else {
                 open_span(&mut inline, &mut open, tag, &mut speaker);
             }
         }
-        push_decoded(&mut inline, rest);
+        push_text(&mut inline, &mut reading, rest);
+    }
+    // An `<rt>` the payload never closed still stated a reading.
+    if let Some(collected) = reading.take() {
+        inline.annotate(collected.trim());
+        open.pop();
     }
     while open.pop().is_some() {
         inline.close();
@@ -235,6 +257,26 @@ fn flatten_payload(cue_id: Option<String>, lines: &[&str], start_ms: u64, end_ms
         text,
         spans,
     }
+}
+
+/// Route one text run: into the reading being collected when an `<rt>` is
+/// open, into the cue text otherwise.
+///
+/// A ruby reading is printed over the base text, not inside it, so letting
+/// it into the string would interleave two readings of the same words.
+fn push_text(inline: &mut Inline, reading: &mut Option<String>, text: &str) {
+    match reading.as_mut() {
+        Some(collected) => collected.push_str(&decoded(text)),
+        None => push_decoded(inline, text),
+    }
+}
+
+/// The tag name of one start tag: everything before its classes or its
+/// annotation.
+fn tag_name(tag: &str) -> String {
+    tag.chars()
+        .take_while(|c| *c != '.' && !c.is_whitespace())
+        .collect()
 }
 
 /// Open the run one cue span start tag describes, and name the speaker when
@@ -257,8 +299,8 @@ fn open_span(inline: &mut Inline, open: &mut Vec<String>, tag: &str, speaker: &m
         "b" => Mark::style(pb::SpanStyle::Bold),
         "i" => Mark::style(pb::SpanStyle::Italic),
         "u" => Mark::style(pb::SpanStyle::Underline),
-        // `ruby` and `rt` mark an annotation this plane cannot express, and
-        // `v` is already answered by `Cue.speaker`; both still flatten.
+        // A `ruby` opens a run whose reading arrives later, from the `<rt>`
+        // inside it; `v` is already answered by `Cue.speaker`.
         _ => Mark::default(),
     };
     if !classes.is_empty() {
@@ -318,6 +360,15 @@ fn segments(karaoke: &[(u64, u32)], length: u32, start_ms: u64, end_ms: u64) -> 
             })
         })
         .collect()
+}
+
+/// One text run with its entities decoded, for the reading inside an `<rt>`,
+/// which is collected as a string rather than appended to the cue text.
+fn decoded(text: &str) -> String {
+    let mut inline = Inline::default();
+    push_decoded(&mut inline, text);
+    let (decoded, _) = inline.take();
+    decoded
 }
 
 /// Append one text run, decoding the character entities the cue-text grammar
@@ -444,6 +495,41 @@ mod tests {
         assert!(payload.spans[0].styles.is_empty(), "a class is not a style");
         assert_eq!(run(&payload, 1), "bonjour");
         assert_eq!(payload.spans[1].language.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn a_ruby_reading_rides_over_the_base_text_instead_of_inside_it() {
+        let payload = one("<ruby>東京<rt>とうきょう</rt></ruby> です");
+        assert_eq!(
+            payload.text, "東京 です",
+            "the reading is printed over the base text, not interleaved into it"
+        );
+        assert_eq!(payload.spans.len(), 1);
+        assert_eq!(run(&payload, 0), "東京");
+        assert_eq!(payload.spans[0].annotation.as_deref(), Some("とうきょう"));
+        let range = payload.spans[0].range.expect("a range");
+        assert_eq!(
+            (range.start, range.end),
+            (0, 2),
+            "the run covers the base text, counted in code points"
+        );
+    }
+
+    #[test]
+    fn a_ruby_with_no_reading_leaves_no_run_at_all() {
+        let payload = one("<ruby>東京</ruby> です");
+        assert_eq!(payload.text, "東京 です");
+        assert!(
+            payload.spans.is_empty(),
+            "a run that says nothing is still not a span"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_rt_still_states_its_reading() {
+        let payload = one("<ruby>東京<rt>とうきょう");
+        assert_eq!(payload.text, "東京");
+        assert_eq!(payload.spans[0].annotation.as_deref(), Some("とうきょう"));
     }
 
     #[test]
