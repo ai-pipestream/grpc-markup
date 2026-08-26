@@ -49,6 +49,10 @@ pub struct Mark {
     pub font_size_pt: Option<f64>,
     /// The run's own text color, as `#rrggbb`.
     pub color: Option<String>,
+    /// The run's own BCP 47 language tag, when it differs from the block's.
+    pub language: Option<String>,
+    /// The named character style the source puts on the run, as written.
+    pub style_name: Option<String>,
 }
 
 impl Default for Mark {
@@ -64,6 +68,8 @@ impl Default for Mark {
             font_family: None,
             font_size_pt: None,
             color: None,
+            language: None,
+            style_name: None,
         }
     }
 }
@@ -122,6 +128,8 @@ impl Mark {
             && self.font_family.is_none()
             && self.font_size_pt.is_none()
             && self.color.is_none()
+            && self.language.is_none()
+            && self.style_name.is_none()
     }
 }
 
@@ -169,6 +177,29 @@ impl Inline {
                 self.buf.push(c);
                 self.chars += 1;
             }
+        }
+    }
+
+    /// Append inline text exactly as written, whitespace included.
+    ///
+    /// For the formats whose text unit is not prose: a WebVTT cue keeps the
+    /// spacing and the line breaks the author timed the audio against, so
+    /// collapsing them would change what the consumer is handed. The offset
+    /// bookkeeping is the same, which is the point of it being here rather
+    /// than a second flattener in the fold.
+    pub fn push_verbatim(&mut self, text: &str) {
+        if self.open_links == 0 && !text.trim().is_empty() {
+            self.outside = true;
+        }
+        if self.pending_space && !text.is_empty() {
+            self.buf.push(' ');
+            self.chars += 1;
+            self.pending_space = false;
+        }
+        for c in text.chars() {
+            self.start_open();
+            self.buf.push(c);
+            self.chars += 1;
         }
     }
 
@@ -225,9 +256,10 @@ impl Inline {
             font_family: mark.font_family,
             font_size_pt: mark.font_size_pt,
             color: mark.color,
-            // A per-run language tag and a field code are things a word
-            // processor declares; no markup format in this build does.
-            language: None,
+            language: mark.language,
+            style_name: mark.style_name,
+            // A field code is something a word processor declares; no markup
+            // format in this build does.
             field_code: None,
         });
     }

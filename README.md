@@ -99,7 +99,7 @@ event kind.
 | `text_block` | One unit of text: title, section header, paragraph, list item, code, formula, caption, quote, footnote. `role` is an open refinement (`task-item`, `html`, a footnote label); `spans` are the runs inside the text, `anchor_id` the anchor the block declares, `admonition` the callout kind |
 | `table_start` / `table_row` / `table_end` | A table, streamed a row at a time, header rows and cells flagged, column and row spans carried, the source's declared column geometry on `table_start`, and each cell's own alignment and inline runs |
 | `image` | One image reference — `src`, `alt`, `title` as written. Never dereferenced |
-| `cue` | One WebVTT cue: identifier, timings in milliseconds, speaker, flattened text |
+| `cue` | One WebVTT cue: identifier, timings in milliseconds, speaker, flattened text, the `spans` its styling, class and language tags left, and the `timings` its karaoke timestamps cut it into |
 | `document` | The whole parse folded into one `Document`. Only when `emit_document` was set, exactly once, immediately before `status` |
 | `status` | `ParseStatus`: format, counts, aggregated warnings, bytes consumed, elapsed |
 
@@ -146,7 +146,7 @@ test suite pins as string literals.
 | Format | Sniffed by | Mapped |
 |---|---|---|
 | Markdown | Heuristic only (ATX headings, fences, links, front matter) | headings (first H1 = title) with `{#id}` anchors, paragraphs, nested lists with markers as written, task lists, definition lists, fenced/indented code with language, blockquotes, GFM alerts as admonitions, pipe tables with their column alignments, images, footnote bodies as anchors and references as runs, display math, sub/superscript, emphasis and links as runs, YAML front matter to metadata; raw HTML flattened to text with a warning |
-| WebVTT | `WEBVTT` signature | header title and `Key: value` metadata, cues with millisecond timings, voice spans to `speaker`, styling and karaoke tags stripped, NOTE/STYLE/REGION skipped, malformed cues skipped with a warning |
+| WebVTT | `WEBVTT` signature | header title and `Key: value` metadata, cues with millisecond timings, voice spans to `speaker`, `<b>`/`<i>`/`<u>` and class and `<lang>` tags as runs over the cue text, karaoke timestamps as timed segments, NOTE/STYLE/REGION skipped, malformed cues skipped with a warning |
 | BoxNote | JSON with a ProseMirror `doc` tree (or legacy `atext`, refused) | headings, paragraphs with every mark as a run (bold, italic, underline, strikethrough, code, highlight, colour, family, size), nested/check lists, code, quotes, spanned tables, images, safe-scheme links |
 | Docling JSON | JSON whose `schema_name` names a DoclingDocument | field-by-field re-ingestion of the core arrays; typed events are a projection of the body in reading order; unconsumed keys warn per key path |
 | HTML | `<!DOCTYPE html` or `<html` signature | whole documents and body-only fragments (html5ever); head title and `meta.*` metadata keyed by `name` or `property`, h1-h6 ladder (first h1 = title), paragraphs, blockquotes, ul/ol/dl nesting, spanned tables with captions and `colgroup` geometry and per-cell alignment, `pre` code with `language-*` classes, figures and images, the inline element set as runs, every `href` as a link run with `#fragment` links typed as cross references, `id` as an anchor; script/style/head never become text; tree-builder repairs warn as malformed structure |
@@ -198,7 +198,7 @@ never edited here.
 | headings | `Document.outline`, one entry per title and section header, each pointing at its item |
 | `table_*` | One `TableItem`: both `grid` and flat `table_cells`, offsets honoring spans, each cell's own inline runs and declared alignment, the source's column geometry as nameless `TableColumnSchema` entries (a bare width is a page unit, `20%` and `5cm` keep their spelling), a leading caption created as a `CAPTION` item and referenced |
 | `image` | A `PictureItem` whose `ImageRef.uri` is the `src` verbatim — no bytes, no size, no dpi |
-| `cue` | A `TextItem` whose provenance is a `TrackSource` (timings in seconds, identifier, voice) alongside the collector stamp |
+| `cue` | A `TextItem` whose provenance is a `TrackSource` (timings in seconds, identifier, voice) alongside the collector stamp, its runs on `spans`, and one `ProvenanceItem` per karaoke segment carrying a `TimeSpan` and the `charspan` it covers |
 | `status` | Nothing; it describes the stream, not the document |
 
 For `DOCLING_JSON` the `document` event is not a re-fold: the ingested
@@ -213,8 +213,9 @@ and the content after it hangs off that header. Refs are dense and local
 is what lets the coordinator merge the fragment additively;
 `document_fold::integrity_errors` is that contract as a check, and every
 fold test asserts it is empty. Markup has no pages and no boxes, so no item
-carries `prov` — except cues, whose track timing is real provenance, and
-ingested Docling JSON payloads, whose provenance passes through untouched.
+carries a `prov` box — except cues, whose track timing is real provenance
+and whose karaoke segments are real timed ranges, and ingested Docling JSON
+payloads, whose provenance passes through untouched.
 
 ## Security and bounds
 

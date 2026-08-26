@@ -14,23 +14,28 @@
 //! - A cue block is an optional identifier line, a timings line
 //!   (`mm:ss.ttt --> mm:ss.ttt`, hours optional), and payload lines. Timings
 //!   become milliseconds on the `Cue`.
-//! - Payload markup is flattened the way a renderer's text track reads:
-//!   voice (`<v Name>`), styling (`<b>`, `<i>`, `<u>`, `<c>`, `<ruby>`,
-//!   `<lang>`) and karaoke timestamp tags are all stripped, the first voice
-//!   annotation becomes `Cue.speaker`, and lines join with `\n`.
+//! - Payload markup is flattened out of the text and described beside it:
+//!   `<b>`, `<i>` and `<u>` leave a style run, the class list of any cue tag
+//!   leaves a named character style, `<lang xx>` leaves the tag on its run,
+//!   the first `<v Name>` annotation becomes `Cue.speaker`, and a karaoke
+//!   `<00:00:01.000>` timestamp splits the text into `CueTiming` segments.
+//!   Lines join with `\n` and the spacing the author timed against is kept
+//!   verbatim, so a range indexes the string the consumer was handed.
 //! - A malformed cue follows WebVTT's own error recovery: the cue is
 //!   skipped, the parse continues, and the trailer aggregates one
 //!   `WARNING_CODE_MALFORMED_STRUCTURE` per distinct reason.
 //!
-//! Each cue is one text unit, its timings carried as track provenance —
-//! the inline formatting model is deliberately flattened away, as
-//! everywhere else on this wire.
+//! Each cue is one text unit whose own timings ride as track provenance and
+//! whose karaoke segments ride as their own timed ranges: a cue that says
+//! when each of its words is sung has stated real coordinates, and the
+//! Document plane has a slot for them.
 
 use std::collections::HashMap;
 
-use crate::parse::{Emitter, ParseError, scalar};
+use crate::parse::{Cue, Emitter, ParseError, scalar};
 use crate::proto::v1 as pb;
 use crate::sniff;
+use crate::spans::{Inline, Mark};
 
 /// Map one WebVTT file.
 ///
@@ -126,13 +131,7 @@ fn cue_block(block: &[&str], emitter: &mut Emitter<'_>) -> Result<(), ParseError
         return Ok(());
     }
 
-    let mut speaker = None;
-    let text = payload
-        .iter()
-        .map(|line| flatten_cue_text(line, &mut speaker))
-        .collect::<Vec<_>>()
-        .join("\n");
-    emitter.cue(cue_id, start_ms, end_ms, speaker.unwrap_or_default(), text)
+    emitter.cue(flatten_payload(cue_id, payload, start_ms, end_ms))
 }
 
 /// True when a line opens a keyword block: the keyword alone, or the
@@ -179,51 +178,186 @@ fn timestamp_ms(text: &str) -> Option<u64> {
     Some(((hours * 60 + minutes) * 60 + seconds) * 1000 + millis)
 }
 
-/// One payload line with cue markup flattened away.
+/// Flatten a cue's payload lines into the cue the emitter sends, keeping
+/// what the tags said.
 ///
-/// Tags — voice, styling, classes, ruby, language, karaoke timestamps — are
-/// spans between `<` and `>` and are dropped; the first voice annotation is
-/// captured as the speaker; the basic character entities decode.
-fn flatten_cue_text(line: &str, speaker: &mut Option<String>) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut rest = line;
-    while let Some(open) = rest.find('<') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        let Some(close) = after.find('>') else {
-            // An unterminated tag runs to the end of the line; the spec's
-            // tokenizer consumes it without emitting text.
-            rest = "";
-            break;
-        };
-        let tag = &after[..close];
-        if speaker.is_none()
-            && let Some(voice) = tag.strip_prefix('v')
-        {
-            // Between the `v` and its annotation sit optional `.class`
-            // qualifiers; the annotation is everything after the first
-            // whitespace.
-            let annotation = voice
-                .trim_start_matches(|c: char| c == '.' || !c.is_whitespace())
-                .trim();
-            if !annotation.is_empty() {
-                *speaker = Some(annotation.to_owned());
+/// The tokenizer is the spec's shape: text runs, cue span start tags with
+/// optional classes and an optional annotation, end tags, and timestamp
+/// tags. A start tag opens a run, its end tag closes it, an end tag with no
+/// open partner is ignored, and a tag still open at the end of the payload
+/// is closed there. An unterminated tag runs to the end of its line and
+/// emits no text, which is what the spec's tokenizer does with it.
+fn flatten_payload(cue_id: Option<String>, lines: &[&str], start_ms: u64, end_ms: u64) -> Cue {
+    let mut inline = Inline::default();
+    let mut speaker = None;
+    // Open cue spans by tag name, innermost last, so an end tag can find
+    // its partner rather than closing whatever happens to be on top.
+    let mut open: Vec<String> = Vec::new();
+    // Where each karaoke segment starts: (its time, its offset in `text`).
+    let mut karaoke: Vec<(u64, u32)> = Vec::new();
+
+    for (position, line) in lines.iter().enumerate() {
+        if position > 0 {
+            inline.push_verbatim("\n");
+        }
+        let mut rest = *line;
+        while let Some(at) = rest.find('<') {
+            push_decoded(&mut inline, &rest[..at]);
+            let after = &rest[at + 1..];
+            let Some(close) = after.find('>') else {
+                rest = "";
+                break;
+            };
+            let tag = &after[..close];
+            rest = &after[close + 1..];
+            if let Some(ms) = timestamp_ms(tag.trim()) {
+                karaoke.push((ms, inline.len()));
+            } else if let Some(name) = tag.strip_prefix('/') {
+                close_span(&mut inline, &mut open, name.trim());
+            } else {
+                open_span(&mut inline, &mut open, tag, &mut speaker);
             }
         }
-        rest = &after[close + 1..];
+        push_decoded(&mut inline, rest);
     }
-    out.push_str(rest);
-    decode_entities(&out)
+    while open.pop().is_some() {
+        inline.close();
+    }
+
+    let (text, spans) = inline.take();
+    let length = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
+    Cue {
+        cue_id,
+        start_ms,
+        end_ms,
+        speaker,
+        timings: segments(&karaoke, length, start_ms, end_ms),
+        text,
+        spans,
+    }
 }
 
-/// The character entities the WebVTT cue-text grammar admits.
-fn decode_entities(text: &str) -> String {
-    text.replace("&nbsp;", "\u{a0}")
-        .replace("&lrm;", "\u{200e}")
-        .replace("&rlm;", "\u{200f}")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
+/// Open the run one cue span start tag describes, and name the speaker when
+/// it is the first voice tag of the cue.
+///
+/// Classes ride on every tag the grammar admits them on, not only on `<c>`,
+/// so `<b.loud>` keeps its class the same way `<c.loud>` does.
+fn open_span(inline: &mut Inline, open: &mut Vec<String>, tag: &str, speaker: &mut Option<String>) {
+    let name: String = tag
+        .chars()
+        .take_while(|c| *c != '.' && !c.is_whitespace())
+        .collect();
+    let qualifiers = &tag[name.len()..];
+    let (classes, annotation) = match qualifiers.find(char::is_whitespace) {
+        Some(at) => (&qualifiers[..at], qualifiers[at..].trim()),
+        None => (qualifiers, ""),
+    };
+    let classes = classes.trim_start_matches('.');
+    let mut mark = match name.as_str() {
+        "b" => Mark::style(pb::SpanStyle::Bold),
+        "i" => Mark::style(pb::SpanStyle::Italic),
+        "u" => Mark::style(pb::SpanStyle::Underline),
+        // `ruby` and `rt` mark an annotation this plane cannot express, and
+        // `v` is already answered by `Cue.speaker`; both still flatten.
+        _ => Mark::default(),
+    };
+    if !classes.is_empty() {
+        mark.style_name = Some(classes.to_owned());
+    }
+    if name == "lang" && !annotation.is_empty() {
+        mark.language = Some(annotation.to_owned());
+    }
+    if name == "v" && speaker.is_none() && !annotation.is_empty() {
+        *speaker = Some(annotation.to_owned());
+    }
+    open.push(name);
+    inline.open(mark);
+}
+
+/// Close the innermost run whose tag name matches, and every run inside it.
+/// An end tag naming nothing open is ignored, which is how a renderer's
+/// tokenizer treats it.
+fn close_span(inline: &mut Inline, open: &mut Vec<String>, name: &str) {
+    if !open.iter().any(|tag| tag == name) {
+        return;
+    }
+    while let Some(tag) = open.pop() {
+        inline.close();
+        if tag == name {
+            return;
+        }
+    }
+}
+
+/// The karaoke segments a cue's timestamp tags cut its text into.
+///
+/// A cue with no timestamp tag gets none: its timing is the cue's own, and
+/// repeating that as a segment would add no fact. A cue with one gets a
+/// segment for every run, the text before the first tag included, so the
+/// segments tile the whole string. A tag with nothing after it before the
+/// next tag leaves no segment.
+fn segments(karaoke: &[(u64, u32)], length: u32, start_ms: u64, end_ms: u64) -> Vec<pb::CueTiming> {
+    if karaoke.is_empty() {
+        return Vec::new();
+    }
+    let mut cuts: Vec<(u64, u32)> = Vec::with_capacity(karaoke.len() + 1);
+    if karaoke[0].1 > 0 {
+        cuts.push((start_ms, 0));
+    }
+    cuts.extend_from_slice(karaoke);
+    (0..cuts.len())
+        .filter_map(|at| {
+            let (from, start) = cuts[at];
+            let (to, end) = cuts
+                .get(at + 1)
+                .map_or((end_ms, length), |(next, offset)| (*next, *offset));
+            (start < end).then_some(pb::CueTiming {
+                range: Some(pb::IntRange { start, end }),
+                start_ms: from,
+                end_ms: to.max(from),
+            })
+        })
+        .collect()
+}
+
+/// Append one text run, decoding the character entities the cue-text grammar
+/// admits as it goes.
+///
+/// Decoding during the walk rather than over the finished string is what
+/// keeps the offsets honest: `&amp;` is five code points in the source and
+/// one in the text a consumer indexes.
+fn push_decoded(inline: &mut Inline, text: &str) {
+    /// The entities the WebVTT cue-text grammar admits, longest match first
+    /// where one name prefixes another.
+    const ENTITIES: &[(&str, &str)] = &[
+        ("&nbsp;", "\u{a0}"),
+        ("&lrm;", "\u{200e}"),
+        ("&rlm;", "\u{200f}"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&amp;", "&"),
+    ];
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        inline.push_verbatim(&rest[..at]);
+        let tail = &rest[at..];
+        match ENTITIES
+            .iter()
+            .find(|(name, _)| tail.starts_with(name))
+            .copied()
+        {
+            Some((name, value)) => {
+                inline.push_verbatim(value);
+                rest = &tail[name.len()..];
+            }
+            // Not an entity this grammar knows: the ampersand is text.
+            None => {
+                inline.push_verbatim("&");
+                rest = &tail[1..];
+            }
+        }
+    }
+    inline.push_verbatim(rest);
 }
 
 #[cfg(test)]
@@ -251,44 +385,163 @@ mod tests {
         }
     }
 
+    /// One payload line, timed over a whole second.
+    fn one(line: &str) -> Cue {
+        flatten_payload(None, &[line], 0, 1_000)
+    }
+
+    /// The code points a run covers, sliced out of the text it indexes.
+    fn run(payload: &Cue, at: usize) -> String {
+        let range = payload.spans[at].range.expect("every run has a range");
+        payload
+            .text
+            .chars()
+            .skip(range.start as usize)
+            .take((range.end - range.start) as usize)
+            .collect()
+    }
+
     #[test]
     fn voice_and_styling_tags_flatten_and_the_first_speaker_wins() {
-        let mut speaker = None;
-        let text = flatten_cue_text(
-            "<v Ada Lovelace><b>Hello</b> <i>there</i></v>",
-            &mut speaker,
-        );
-        assert_eq!(text, "Hello there");
-        assert_eq!(speaker.as_deref(), Some("Ada Lovelace"));
+        let payload = one("<v Ada Lovelace><b>Hello</b> <i>there</i></v>");
+        assert_eq!(payload.text, "Hello there");
+        assert_eq!(payload.speaker.as_deref(), Some("Ada Lovelace"));
 
-        let mut second = Some("Kept".to_owned());
-        flatten_cue_text("<v Other>hi", &mut second);
-        assert_eq!(second.as_deref(), Some("Kept"));
+        let second = flatten_payload(None, &["<v First>a", "<v Other>b"], 0, 1_000);
+        assert_eq!(
+            second.speaker.as_deref(),
+            Some("First"),
+            "the first annotation is the cue's voice"
+        );
+    }
+
+    #[test]
+    fn styling_tags_leave_the_run_they_cover() {
+        let payload = one("plain <b>bold</b> and <i>italic</i> and <u>under</u>");
+        assert_eq!(payload.text, "plain bold and italic and under");
+        assert_eq!(payload.spans.len(), 3);
+        assert_eq!(run(&payload, 0), "bold");
+        assert_eq!(payload.spans[0].styles, vec![pb::SpanStyle::Bold as i32]);
+        assert_eq!(run(&payload, 1), "italic");
+        assert_eq!(payload.spans[1].styles, vec![pb::SpanStyle::Italic as i32]);
+        assert_eq!(run(&payload, 2), "under");
+        assert_eq!(
+            payload.spans[2].styles,
+            vec![pb::SpanStyle::Underline as i32]
+        );
+    }
+
+    #[test]
+    fn a_class_becomes_a_named_style_and_a_lang_tag_becomes_a_language() {
+        let payload = one("<c.loud.narrow>SHOUT</c> then <lang fr>bonjour</lang>");
+        assert_eq!(payload.text, "SHOUT then bonjour");
+        assert_eq!(run(&payload, 0), "SHOUT");
+        assert_eq!(
+            payload.spans[0].style_name.as_deref(),
+            Some("loud.narrow"),
+            "the class list rides verbatim, dots and all"
+        );
+        assert!(payload.spans[0].styles.is_empty(), "a class is not a style");
+        assert_eq!(run(&payload, 1), "bonjour");
+        assert_eq!(payload.spans[1].language.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn a_class_on_a_styling_tag_rides_beside_its_style() {
+        let payload = one("<b.loud>hey</b>");
+        assert_eq!(payload.spans[0].styles, vec![pb::SpanStyle::Bold as i32]);
+        assert_eq!(payload.spans[0].style_name.as_deref(), Some("loud"));
     }
 
     #[test]
     fn a_voice_span_with_classes_still_names_the_speaker() {
-        let mut speaker = None;
-        let text = flatten_cue_text("<v.loud.fast Grace Hopper>Mark!", &mut speaker);
-        assert_eq!(text, "Mark!");
-        assert_eq!(speaker.as_deref(), Some("Grace Hopper"));
-    }
-
-    #[test]
-    fn karaoke_timestamps_are_removed_from_the_text() {
-        let mut speaker = None;
-        let text = flatten_cue_text("Never<00:00:01.000> gonna<00:00:02.000> give", &mut speaker);
-        assert_eq!(text, "Never gonna give");
-        assert!(speaker.is_none(), "a timestamp tag is not a voice");
-    }
-
-    #[test]
-    fn entities_decode_in_cue_text() {
-        let mut speaker = None;
+        let payload = one("<v.loud.fast Grace Hopper>Mark!");
+        assert_eq!(payload.text, "Mark!");
+        assert_eq!(payload.speaker.as_deref(), Some("Grace Hopper"));
         assert_eq!(
-            flatten_cue_text("a &amp; b &lt;c&gt;", &mut speaker),
-            "a & b <c>"
+            payload.spans[0].style_name.as_deref(),
+            Some("loud.fast"),
+            "a voice tag's classes are still a named style"
         );
+    }
+
+    #[test]
+    fn karaoke_timestamps_cut_the_text_into_timed_segments() {
+        let payload = flatten_payload(
+            None,
+            &["Never<00:00:01.000> gonna<00:00:02.000> give"],
+            500,
+            3_000,
+        );
+        assert_eq!(payload.text, "Never gonna give");
+        assert!(payload.speaker.is_none(), "a timestamp tag is not a voice");
+        let ranges: Vec<(u32, u32, u64, u64)> = payload
+            .timings
+            .iter()
+            .map(|timing| {
+                let range = timing.range.expect("every segment has a range");
+                (range.start, range.end, timing.start_ms, timing.end_ms)
+            })
+            .collect();
+        assert_eq!(
+            ranges,
+            [
+                (0, 5, 500, 1_000),
+                (5, 11, 1_000, 2_000),
+                (11, 16, 2_000, 3_000),
+            ],
+            "the segments tile the text, the leading run from the cue's own start"
+        );
+    }
+
+    #[test]
+    fn a_cue_without_timestamp_tags_states_no_segments() {
+        assert!(
+            one("plain text").timings.is_empty(),
+            "the cue's own timing is not repeated as a segment"
+        );
+    }
+
+    #[test]
+    fn entities_decode_in_cue_text_and_the_offsets_count_the_decoded_text() {
+        let payload = one("a &amp; b <b>&lt;c&gt;</b>");
+        assert_eq!(payload.text, "a & b <c>");
+        assert_eq!(
+            run(&payload, 0),
+            "<c>",
+            "five entity code points became one"
+        );
+    }
+
+    #[test]
+    fn offsets_over_a_multi_byte_cue_count_code_points() {
+        let payload = one("héllo wörld <b>λόγος</b>");
+        assert_eq!(payload.text, "héllo wörld λόγος");
+        let range = payload.spans[0].range.expect("a range");
+        assert_eq!((range.start, range.end), (12, 17));
+        assert!(
+            payload.text.len() > 17,
+            "the byte length is not the code point one"
+        );
+        assert_eq!(run(&payload, 0), "λόγος");
+    }
+
+    #[test]
+    fn spacing_and_line_breaks_survive_and_the_ranges_count_them() {
+        let payload = flatten_payload(None, &["one  two", "<b>three</b>"], 0, 1_000);
+        assert_eq!(
+            payload.text, "one  two\nthree",
+            "cue text is not collapsed prose"
+        );
+        assert_eq!(run(&payload, 0), "three");
+    }
+
+    #[test]
+    fn an_end_tag_with_no_partner_is_ignored_and_an_open_tag_closes_at_the_end() {
+        let payload = one("</i>a <b>b");
+        assert_eq!(payload.text, "a b");
+        assert_eq!(payload.spans.len(), 1);
+        assert_eq!(run(&payload, 0), "b");
     }
 
     #[test]

@@ -25,8 +25,10 @@
 //!   renumber the whole fragment mechanically. [`integrity_errors`] is that
 //!   contract as a check, and every fold test asserts it is empty.
 //! - **Provenance honesty.** Markup has no pages and no boxes, so no item
-//!   carries `prov` — except a cue, whose [`TrackSource`](doc::TrackSource)
-//!   timing is real provenance and rides in `source`. Format-native facts
+//!   carries a `prov` box — except a cue, whose
+//!   [`TrackSource`](doc::TrackSource) timing is real provenance and rides
+//!   in `source`, and whose karaoke segments are real timed ranges and ride
+//!   in `prov` as [`TimeSpan`](doc::TimeSpan)s. Format-native facts
 //!   with no typed slot — a block's `role`, its source line, an image's alt
 //!   text — go in per-item `meta.custom_fields` under the fold's own prefix
 //!   (`markdown.`, `vtt.`, …), where they are data rather than a fabricated
@@ -395,7 +397,15 @@ impl DocumentFold {
                 range: None,
             });
         }
-        for (position, span) in block.spans.iter().enumerate() {
+        self.register_spans(index, self_ref, &block.spans);
+    }
+
+    /// Record what the runs of the text item just appended at `index`
+    /// declare and point at. Split out from
+    /// [`register_refs`](Self::register_refs) because a cue has runs and no
+    /// block-level anchor.
+    fn register_spans(&mut self, index: usize, self_ref: &str, spans: &[pb::InlineSpan]) {
+        for (position, span) in spans.iter().enumerate() {
             let range = span.range.map(|range| doc::IntSpan {
                 start: int(range.start),
                 end: int(range.end),
@@ -686,8 +696,14 @@ impl DocumentFold {
     // ------------------------------------------------------------------ cues
 
     /// One WebVTT cue as a `TextItem` whose provenance is a `TrackSource`
-    /// carrying the cue timings — real coordinates, in seconds — alongside
-    /// this collector's own stamp.
+    /// carrying the cue timings, real coordinates in seconds, alongside this
+    /// collector's own stamp.
+    ///
+    /// A cue that times its own words gets one `ProvenanceItem` per karaoke
+    /// segment: a `TimeSpan` over the media and the `charspan` it covers in
+    /// the item's text. That is the one place in this fold where an item
+    /// carries `prov`, and it is not an invented coordinate: the source
+    /// wrote the timestamps.
     fn on_cue(&mut self, cue: &pb::Cue) {
         self.lists.clear();
         if cue.text.trim().is_empty() {
@@ -705,14 +721,17 @@ impl DocumentFold {
                 voice: (!cue.speaker.is_empty()).then(|| cue.speaker.clone()),
             })),
         };
+        let index = self.document.texts.len();
         let base = doc::TextItemBase {
             self_ref: self_ref.clone(),
             parent: Some(reference(&parent)),
             content_layer: doc::ContentLayer::Body as i32,
             label: doc::DocItemLabel::Text as i32,
+            prov: cue.timings.iter().map(karaoke_prov).collect(),
             orig: cue.text.clone(),
             text: cue.text.clone(),
             source: vec![track, self.collector_source()],
+            spans: doc_spans(&cue.spans),
             ..doc::TextItemBase::default()
         };
         self.document.texts.push(doc::BaseTextItem {
@@ -720,6 +739,7 @@ impl DocumentFold {
                 base: Some(base),
             })),
         });
+        self.register_spans(index, &self_ref, &cue.spans);
         self.link_child(&parent, &self_ref);
     }
 
@@ -922,6 +942,39 @@ pub fn code_language_label(language: &str) -> Option<doc::CodeLanguageLabel> {
     (1..=61)
         .filter_map(|value| doc::CodeLanguageLabel::try_from(value).ok())
         .find(|label| label.as_str_name() == wanted)
+}
+
+/// One karaoke segment as the provenance it is: where the run sits in the
+/// media timeline, and which code points of the item's text it covers.
+///
+/// No page and no box: a caption track has neither, and the two fields this
+/// fills are the ones the source actually stated.
+fn karaoke_prov(timing: &pb::CueTiming) -> doc::ProvenanceItem {
+    doc::ProvenanceItem {
+        page_no: 0,
+        bbox: None,
+        charspan: timing.range.map(|range| doc::IntSpan {
+            start: int(range.start),
+            end: int(range.end),
+        }),
+        time: Some(doc::TimeSpan {
+            start_ms: ms_as_f64(timing.start_ms),
+            end_ms: ms_as_f64(timing.end_ms),
+            // One track: this collector is handed one caption file, and
+            // numbering it would be inventing a mux it never saw.
+            track: None,
+            speaker: None,
+        }),
+        ..doc::ProvenanceItem::default()
+    }
+}
+
+/// Milliseconds as the schema's floating milliseconds.
+fn ms_as_f64(ms: u64) -> f64 {
+    // Cue timings are far below 2^53 ms, so the conversion is exact.
+    #[allow(clippy::cast_precision_loss)]
+    let ms = ms as f64;
+    ms
 }
 
 /// Milliseconds as the schema's floating seconds.
@@ -1594,8 +1647,9 @@ fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
         reference: span.reference.clone(),
         link_title: span.link_title.clone(),
         raw: span.raw.clone(),
-        // No named character styles or highlights on this wire.
-        style_name: None,
+        style_name: span.style_name.clone(),
+        // No highlight colours on this wire: no format in this build states
+        // one as a colour rather than as a `mark`.
         highlight_color: None,
     }
 }
@@ -1978,6 +2032,8 @@ mod tests {
                 speaker: "Ada".to_owned(),
                 text: "Hello".to_owned(),
                 source: None,
+                spans: Vec::new(),
+                timings: Vec::new(),
             }),
         ]);
         let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {

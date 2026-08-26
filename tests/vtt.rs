@@ -4,7 +4,11 @@
 
 mod common;
 
-use common::{client, cues, info, meta_scalar, options, parse, parse_ok, status, warning};
+use common::{
+    client, cues, document, info, meta_scalar, options, parse, parse_ok, spanned, status, styles,
+    warning,
+};
+use grpc_markup::document::v1 as doc;
 use grpc_markup::proto::v1 as pb;
 
 /// A caption file exercising the header title and metadata, comment and
@@ -105,6 +109,140 @@ async fn a_file_without_the_header_is_invalid_argument() {
         assert_eq!(error.code(), tonic::Code::InvalidArgument, "{bad:?}");
         assert!(error.message().contains("WEBVTT"), "{}", error.message());
     }
+}
+
+/// A caption file whose cue payloads carry the whole cue-span vocabulary
+/// over multi-byte text, so a range that is right in bytes and wrong in code
+/// points fails rather than passing quietly.
+const VTT_SPANS: &str = "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nhéllo wörld <b>λόγος</b> <c.loud.narrow>SHOUT</c> <lang fr>bonjour</lang>\n\n00:00:05.000 --> 00:00:08.000\nnäver<00:00:06.000> gönna<00:00:07.000> give\n";
+
+#[tokio::test]
+async fn cue_spans_name_the_runs_the_tags_covered() {
+    let client = client().await;
+    let events = parse_ok(&client, VTT_SPANS, options(pb::MarkupFormat::Vtt)).await;
+    let cues = cues(&events);
+    let cue = cues[0];
+    assert_eq!(cue.text, "héllo wörld λόγος SHOUT bonjour");
+    assert_eq!(cue.spans.len(), 3);
+
+    assert_eq!(spanned(&cue.text, &cue.spans[0]), "λόγος");
+    assert_eq!(styles(&cue.spans[0]), [pb::SpanStyle::Bold]);
+    assert_eq!(
+        cue.spans[0].range.unwrap().start,
+        12,
+        "the offsets count code points, not the bytes the accents cost"
+    );
+
+    assert_eq!(spanned(&cue.text, &cue.spans[1]), "SHOUT");
+    assert_eq!(cue.spans[1].style_name.as_deref(), Some("loud.narrow"));
+
+    assert_eq!(spanned(&cue.text, &cue.spans[2]), "bonjour");
+    assert_eq!(cue.spans[2].language.as_deref(), Some("fr"));
+}
+
+#[tokio::test]
+async fn karaoke_timestamps_become_timed_segments_over_the_cue_text() {
+    let client = client().await;
+    let events = parse_ok(&client, VTT_SPANS, options(pb::MarkupFormat::Vtt)).await;
+    let cue = cues(&events)[1];
+    assert_eq!(cue.text, "näver gönna give");
+    let covered: Vec<(String, u64, u64)> = cue
+        .timings
+        .iter()
+        .map(|timing| {
+            let text: String = cue
+                .text
+                .chars()
+                .skip(timing.range.unwrap().start as usize)
+                .take((timing.range.unwrap().end - timing.range.unwrap().start) as usize)
+                .collect();
+            (text, timing.start_ms, timing.end_ms)
+        })
+        .collect();
+    assert_eq!(
+        covered,
+        [
+            ("näver".to_owned(), 5_000, 6_000),
+            (" gönna".to_owned(), 6_000, 7_000),
+            (" give".to_owned(), 7_000, 8_000),
+        ],
+        "the segments tile the whole text, starting at the cue's own start"
+    );
+    assert!(
+        cues(&events)[0].timings.is_empty(),
+        "a cue with no timestamp tag repeats nothing"
+    );
+}
+
+#[tokio::test]
+async fn clearing_the_span_option_keeps_the_timings_and_drops_the_runs() {
+    let client = client().await;
+    let flat = pb::ParseOptions {
+        format: pb::MarkupFormat::Vtt as i32,
+        emit_inline_spans: Some(false),
+        ..pb::ParseOptions::default()
+    };
+    let events = parse_ok(&client, VTT_SPANS, flat).await;
+    let cues = cues(&events);
+    assert!(
+        cues[0].spans.is_empty(),
+        "the runs are what the option gates"
+    );
+    assert_eq!(
+        cues[1].timings.len(),
+        3,
+        "a karaoke segment is a coordinate the source stated, not a rendering signal"
+    );
+}
+
+#[tokio::test]
+async fn a_karaoke_cue_folds_its_segments_as_timed_provenance() {
+    let client = client().await;
+    let with_document = pb::ParseOptions {
+        format: pb::MarkupFormat::Vtt as i32,
+        emit_document: true,
+        ..pb::ParseOptions::default()
+    };
+    let events = parse_ok(&client, VTT_SPANS, with_document).await;
+    let document = document(&events).expect("the caller asked for a Document");
+
+    let Some(doc::base_text_item::Item::Text(styled)) = document.texts[0].item.as_ref() else {
+        panic!("cues fold as TextItem");
+    };
+    let base = styled.base.as_ref().unwrap();
+    assert!(
+        base.prov.is_empty(),
+        "a cue that times nothing states no box"
+    );
+    assert_eq!(
+        base.spans.len(),
+        3,
+        "the cue's runs reach the Document plane"
+    );
+    assert_eq!(base.spans[1].style_name.as_deref(), Some("loud.narrow"));
+    assert_eq!(base.spans[2].language.as_deref(), Some("fr"));
+    let formatting = base.spans[0].formatting.as_ref().expect("bold is a style");
+    assert!(formatting.bold);
+
+    let Some(doc::base_text_item::Item::Text(karaoke)) = document.texts[1].item.as_ref() else {
+        panic!("cues fold as TextItem");
+    };
+    let base = karaoke.base.as_ref().unwrap();
+    assert_eq!(
+        base.prov.len(),
+        3,
+        "one provenance item per karaoke segment"
+    );
+    let first = &base.prov[0];
+    let time = first.time.as_ref().expect("a timed range");
+    assert!((time.start_ms - 5_000.0).abs() < f64::EPSILON);
+    assert!((time.end_ms - 6_000.0).abs() < f64::EPSILON);
+    let charspan = first.charspan.expect("the code points it covers");
+    assert_eq!((charspan.start, charspan.end), (0, 5));
+    assert!(
+        first.bbox.is_none() && first.page_no == 0,
+        "a caption track has no page and no box, and none is invented"
+    );
 }
 
 #[tokio::test]

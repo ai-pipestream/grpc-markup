@@ -218,6 +218,28 @@ pub struct Block {
     pub admonition: Option<pb::AdmonitionKind>,
 }
 
+/// A cue the WebVTT fold hands to [`Emitter::cue`]: every field of a
+/// [`pb::Cue`] the fold decides, with the stream index and the provenance
+/// left to the emitter.
+#[derive(Debug, Clone, Default)]
+pub struct Cue {
+    /// The cue identifier line, when the cue has one.
+    pub cue_id: Option<String>,
+    /// Cue start, in milliseconds from the start of the media.
+    pub start_ms: u64,
+    /// Cue end, in milliseconds from the start of the media.
+    pub end_ms: u64,
+    /// The speaker a `<v>` annotation named, when the cue names one.
+    pub speaker: Option<String>,
+    /// The payload with its tags removed, lines joined with `\n`.
+    pub text: String,
+    /// Style, class and language runs inside `text`, in start order.
+    pub spans: Vec<pb::InlineSpan>,
+    /// Karaoke segments of `text`, empty when the cue times nothing inside
+    /// itself.
+    pub timings: Vec<pb::CueTiming>,
+}
+
 /// The one way onto the wire.
 ///
 /// Owns the response-stream contract so the folds cannot break it: `info`
@@ -468,27 +490,27 @@ impl<'a> Emitter<'a> {
 
     /// Send one WebVTT cue.
     ///
+    /// `timings` are not gated by `emit_inline_spans`: a karaoke segment is
+    /// a coordinate the source stated, not a rendering signal, and a
+    /// consumer that asked for flat text still asked for the timings.
+    ///
     /// # Errors
     ///
     /// [`ParseError::ConsumerGone`] when the client stopped reading.
-    pub fn cue(
-        &mut self,
-        cue_id: Option<String>,
-        start_ms: u64,
-        end_ms: u64,
-        speaker: String,
-        text: String,
-    ) -> Result<(), ParseError> {
+    pub fn cue(&mut self, cue: Cue) -> Result<(), ParseError> {
         let index = self.next_index();
         self.counts.cues += 1;
+        let spans = self.kept_spans(cue.spans);
         self.send(pb::parse_markup_response::Event::Cue(pb::Cue {
             index,
-            cue_id,
-            start_ms,
-            end_ms,
-            speaker,
-            text,
+            cue_id: cue.cue_id,
+            start_ms: cue.start_ms,
+            end_ms: cue.end_ms,
+            speaker: cue.speaker.unwrap_or_default(),
+            text: cue.text,
             source: Some(self.source.clone()),
+            spans,
+            timings: cue.timings,
         }))
     }
 

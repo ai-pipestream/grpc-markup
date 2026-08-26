@@ -36,12 +36,14 @@
 
 ## 2a. Inline runs
 
-`TextBlock.spans` and `TableCell.spans` carry one `InlineSpan` per run of
-the flattened text that says something the flat string cannot: a rendering
-signal (`SpanStyle`), a link (`hyperlink` plus `link_title`), an anchor the
-run declares (`anchor_id`), a key it points at (`reference` plus
-`reference_kind`), the source notation flattening removed (`raw`), and a
-run's own typography (`font_family`, `font_size_pt`, `color`).
+`TextBlock.spans`, `TableCell.spans` and `Cue.spans` carry one `InlineSpan`
+per run of the flattened text that says something the flat string cannot: a
+rendering signal (`SpanStyle`), a link (`hyperlink` plus `link_title`), an
+anchor the run declares (`anchor_id`), a key it points at (`reference` plus
+`reference_kind`), the source notation flattening removed (`raw`), a run's
+own typography (`font_family`, `font_size_pt`, `color`), its own language
+tag (`language`), and the named character style the source put on it
+(`style_name`).
 
 Three rules make the ranges usable:
 
@@ -212,11 +214,27 @@ The `WEBVTT` header is mandatory
 `Key: value` lines land on `MarkupInfo`, `NOTE` / `STYLE` / `REGION` blocks
 are skipped, and each cue becomes one `Cue` event: identifier, timings in
 milliseconds (strict `mm:ss.ttt` grammar, optional hours), first `<v>`
-annotation as `speaker`, payload with voice / styling / class / karaoke
-timestamp tags stripped and lines joined with `\n`. A malformed cue — no
-timings line, unparseable timestamps, end before start — is skipped with
-one aggregated `WARNING_CODE_MALFORMED_STRUCTURE`, which is WebVTT's own
-error recovery.
+annotation as `speaker`, payload with its tags removed from the text and
+lines joined with `\n`. A malformed cue — no timings line, unparseable
+timestamps, end before start — is skipped with one aggregated
+`WARNING_CODE_MALFORMED_STRUCTURE`, which is WebVTT's own error recovery.
+
+What the tags said survives beside the text rather than being deleted with
+it:
+
+| Cue markup | Wire |
+|---|---|
+| `<b>`, `<i>`, `<u>` | a span style over the run the tag covers |
+| `.class` qualifiers on any cue tag (`<c.loud.narrow>`, `<b.loud>`) | `InlineSpan.style_name`, the class list verbatim, dots and all |
+| `<lang fr>` | `InlineSpan.language` over its run |
+| `<v Name>` | `Cue.speaker` (first annotation wins); its classes still leave a style name |
+| `<ruby>` / `<rt>` | flattened, as before: this plane has no annotation shape to put them in |
+| `<00:00:06.000>` karaoke timestamps | `Cue.timings`, one `CueTiming` per run, tiling the whole text; the leading run starts at the cue's own start and the last ends at the cue's own end. A cue with no timestamp tag carries no segments, because its timing is already the cue's |
+
+Cue text is not prose and is not collapsed: the spacing and line breaks the
+author timed the audio against are kept verbatim, and the character
+entities the grammar admits are decoded *during* the walk, so a `&amp;` is
+five code points in the source and one in the string a range indexes.
 
 ### 4.6 BoxNote (ProseMirror `doc` tree)
 
@@ -330,9 +348,10 @@ Dropped or demoted per format, deliberately:
   survives only as `code_language_raw`; image `alt` / `title` become custom
   fields, not caption items; thematic breaks and the raw text of HTML tags
   are gone entirely (warned on the trailer).
-- **VTT:** cue order is document order but timings live only in the
-  `TrackSource`; skipped NOTE/STYLE/REGION content never reaches the
-  document.
+- **VTT:** cue order is document order, the cue's own timings live in the
+  `TrackSource` and its karaoke segments in `prov` as `TimeSpan`s with the
+  `charspan` they cover; skipped NOTE/STYLE/REGION content never reaches the
+  document, and `<ruby>` / `<rt>` survive only as their flattened text.
 - **BoxNote:** checkbox state is a custom-field `role`, not a
   `CHECKBOX_SELECTED` item.
 - **Docling JSON:** nothing is re-folded — the ingested document passes

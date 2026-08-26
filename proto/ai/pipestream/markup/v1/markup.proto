@@ -202,6 +202,12 @@ message InlineSpan {
   // date, a resolved cross-reference), so generated text stays
   // distinguishable from authored text.
   optional string field_code = 13;
+
+  // The named character style the source puts on the run, as written: the
+  // class list of a WebVTT `<c.loud.narrow>` or of any cue tag that carries
+  // one, dots and all. A name, never a resolved rendering: this service has
+  // no stylesheet and does not want one.
+  optional string style_name = 14;
 }
 
 // AdmonitionKind names the callout a block is marked as.
@@ -585,6 +591,25 @@ message ImageBlock {
   CollectorSource source = 6;
 }
 
+// CueTiming is one karaoke segment of a cue: the run of the cue's text a
+// `<00:00:01.000>` timestamp tag gives its own start time.
+//
+// A cue that carries no timestamp tag carries no `CueTiming` either; its
+// timing is the cue's own `start_ms` / `end_ms` and repeating that once more
+// would say nothing. A cue that carries one gets a segment for every run,
+// the leading run included, so the segments tile the whole text.
+message CueTiming {
+  // The run this segment covers, in code points into `Cue.text`.
+  IntRange range = 1;
+
+  // When the segment starts, in milliseconds from the start of the media.
+  uint64 start_ms = 2;
+
+  // When the segment ends: the next segment's start, or the cue's own end
+  // for the last one.
+  uint64 end_ms = 3;
+}
+
 // Cue is one WebVTT cue: a timed span of caption or subtitle text.
 message Cue {
   // Stream index, in the same series as `TextBlock.index`.
@@ -602,12 +627,24 @@ message Cue {
   // The speaker named by a `<v>` voice span, empty when the cue has none.
   string speaker = 5;
 
-  // The cue payload with voice and styling tags flattened away, timestamps
-  // of karaoke spans removed, and lines joined with `\n`.
+  // The cue payload with its tags flattened away, character entities
+  // decoded, and lines joined with `\n`. What the flattening removed is
+  // described by `spans` and `timings`, whose ranges index this string.
   string text = 6;
 
   // Provenance, always set.
   CollectorSource source = 7;
+
+  // Formatting, class and language runs inside `text`, in start order: a
+  // `<b>`, `<i>` or `<u>` leaves a style, a `<c.name>` leaves the class list
+  // in `style_name`, and a `<lang xx>` leaves the tag in `language`. Empty
+  // when the payload is unmarked, and empty for every cue when the request
+  // cleared `ParseOptions.emit_inline_spans`.
+  repeated InlineSpan spans = 8;
+
+  // Karaoke segments of `text`, in start order, tiling the whole string.
+  // Empty when the cue carries no timestamp tag.
+  repeated CueTiming timings = 9;
 }
 
 // WarningCode names a condition that did not stop the parse.
