@@ -1570,6 +1570,8 @@ fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
         insertion: has(pb::SpanStyle::Insertion),
         abbreviation: has(pb::SpanStyle::Abbreviation),
         quote: has(pb::SpanStyle::Quote),
+        // No overline style on this wire.
+        overline: false,
     };
     doc::InlineSpan {
         range: span.range.map(|range| doc::IntSpan {
@@ -1592,6 +1594,9 @@ fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
         reference: span.reference.clone(),
         link_title: span.link_title.clone(),
         raw: span.raw.clone(),
+        // No named character styles or highlights on this wire.
+        style_name: None,
+        highlight_color: None,
     }
 }
 

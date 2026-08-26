@@ -591,6 +591,7 @@ fn map_formatting(value: &Value, unmapped: &mut Unmapped) -> Option<doc::Formatt
         insertion: obj.boolean("insertion"),
         abbreviation: obj.boolean("abbreviation"),
         quote: obj.boolean("quote"),
+        overline: obj.boolean("overline"),
     };
     obj.finish();
     Some(formatting)
