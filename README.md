@@ -199,6 +199,7 @@ never edited here.
 | `table_*` | One `TableItem`: both `grid` and flat `table_cells`, offsets honoring spans, each cell's own inline runs and declared alignment, the source's column geometry as nameless `TableColumnSchema` entries (a bare width is a page unit, `20%` and `5cm` keep their spelling), a leading caption created as a `CAPTION` item and referenced |
 | `image` | A `PictureItem` whose `ImageRef.uri` is the `src` verbatim — no bytes, no size, no dpi |
 | `cue` | A `TextItem` whose provenance is a `TrackSource` (timings in seconds, identifier, voice) alongside the collector stamp, its runs on `spans`, and one `ProvenanceItem` per karaoke segment carrying a `TimeSpan` and the `charspan` it covers |
+| `source_line` (any event) | A `ProvenanceItem` carrying a `LineSpan`, half-open and 1-based; no page and no box ride with it |
 | `status` | Nothing; it describes the stream, not the document |
 
 For `DOCLING_JSON` the `document` event is not a re-fold: the ingested

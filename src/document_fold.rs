@@ -437,6 +437,7 @@ impl DocumentFold {
                 ..doc::FloatingMeta::default()
             }),
             label: doc::DocItemLabel::Code as i32,
+            prov: base.prov,
             orig: base.orig,
             text: base.text,
             hyperlink: base.hyperlink,
@@ -465,8 +466,10 @@ impl DocumentFold {
                 ..doc::BaseMeta::default()
             }),
             label: label as i32,
-            // No prov: markup has no pages and no boxes, and an invented
-            // one would outlive the honesty of this comment.
+            // No page and no box: markup has neither. The line the block
+            // starts on is a real coordinate in a real space, and that is
+            // the one this plane records.
+            prov: line_prov(block.source_line),
             orig: block.text.clone(),
             text: block.text.clone(),
             hyperlink: block.hyperlink.clone(),
@@ -530,12 +533,6 @@ impl DocumentFold {
         }
         if !block.role.is_empty() {
             fields.insert(format!("{}.role", self.prefix), string(&block.role));
-        }
-        if let Some(line) = block.source_line {
-            fields.insert(
-                format!("{}.source_line", self.prefix),
-                number(f64::from(line)),
-            );
         }
         fields
     }
@@ -667,13 +664,6 @@ impl DocumentFold {
         if let Some(previous) = self.table.take() {
             self.append_table(previous);
         }
-        let mut fields = HashMap::new();
-        if let Some(line) = start.source_line {
-            fields.insert(
-                format!("{}.source_line", self.prefix),
-                number(f64::from(line)),
-            );
-        }
         let mut captions = Vec::new();
         if let Some(caption) = start.caption.as_ref().filter(|c| !c.is_empty()) {
             // The caption is an item in its own right — the Document plane
@@ -707,11 +697,8 @@ impl DocumentFold {
             item: doc::TableItem {
                 parent: Some(reference(&parent)),
                 content_layer: doc::ContentLayer::Body as i32,
-                meta: (!fields.is_empty()).then(|| doc::FloatingMeta {
-                    custom_fields: fields,
-                    ..doc::FloatingMeta::default()
-                }),
                 label: doc::DocItemLabel::Table as i32,
+                prov: line_prov(start.source_line),
                 captions,
                 source: vec![self.collector_source()],
                 ..doc::TableItem::default()
@@ -867,12 +854,6 @@ impl DocumentFold {
         if !image.title.is_empty() {
             fields.insert(format!("{}.title", self.prefix), string(&image.title));
         }
-        if let Some(line) = image.source_line {
-            fields.insert(
-                format!("{}.source_line", self.prefix),
-                number(f64::from(line)),
-            );
-        }
         let size = match (bare(image.width.as_deref()), bare(image.height.as_deref())) {
             (Some(width), Some(height)) => Some(doc::Size { width, height }),
             _ => {
@@ -900,6 +881,7 @@ impl DocumentFold {
                 ..doc::PictureMeta::default()
             }),
             label: doc::DocItemLabel::Picture as i32,
+            prov: line_prov(image.source_line),
             image: Some(doc::ImageRef {
                 mimetype: image_mimetype(&image.src).to_owned(),
                 dpi: 0,
@@ -1244,18 +1226,33 @@ fn string(text: &str) -> Value {
     }
 }
 
-/// A `google.protobuf.Value` holding a number.
-const fn number(value: f64) -> Value {
-    Value {
-        kind: Some(Kind::NumberValue(value)),
-    }
-}
-
 /// A `google.protobuf.Value` holding a boolean.
 const fn flag(value: bool) -> Value {
     Value {
         kind: Some(Kind::BoolValue(value)),
     }
+}
+
+/// The line a block starts on, as the provenance it is.
+///
+/// The wire states where a block begins and not where it ends, so the range
+/// is the one line the fold actually knows about: half-open `[line, line+1)`
+/// is "line N", and a fold that ever learns a block's last line widens the
+/// end without changing the shape. No page, no box: a markup source has
+/// neither, and this is the space it does have.
+fn line_prov(line: Option<u32>) -> Vec<doc::ProvenanceItem> {
+    line.map(|line| doc::ProvenanceItem {
+        page_no: 0,
+        bbox: None,
+        charspan: None,
+        line_range: Some(doc::LineSpan {
+            start: line,
+            end: line.saturating_add(1),
+        }),
+        ..doc::ProvenanceItem::default()
+    })
+    .into_iter()
+    .collect()
 }
 
 /// A declared dimension as a plain number, or nothing when the source

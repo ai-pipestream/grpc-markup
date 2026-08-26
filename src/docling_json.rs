@@ -361,6 +361,11 @@ fn text_base(obj: &mut Obj<'_, '_>, label_text: &str) -> doc::TextItemBase {
             .filter_map(|value| map_span(value, obj.unmapped))
             .collect(),
         admonition_kind: obj.string("admonition_kind"),
+        raw: obj.string("raw"),
+        // Element identity belongs to markup sources that keep it. This
+        // fold states none of its own, and ingests what it is handed.
+        source_element_name: obj.string("source_element_name"),
+        source_namespace: obj.string("source_namespace"),
         ..doc::TextItemBase::default()
     }
 }
@@ -535,6 +540,7 @@ fn map_prov(value: &Value, unmapped: &mut Unmapped) -> Option<doc::ProvenanceIte
             .get("bbox")
             .and_then(|value| map_bbox(value, obj.unmapped)),
         charspan: span,
+        line_range: obj.get("line_range").and_then(map_line_span),
         ..doc::ProvenanceItem::default()
     };
     obj.finish();
@@ -651,6 +657,16 @@ fn map_span(value: &Value, unmapped: &mut Unmapped) -> Option<doc::InlineSpan> {
     };
     obj.finish();
     Some(span)
+}
+
+/// A `LineSpan`, written as the object the schema declares or as the same
+/// two-element array shorthand the spans admit.
+fn map_line_span(value: &Value) -> Option<doc::LineSpan> {
+    let span = map_int_span(value)?;
+    Some(doc::LineSpan {
+        start: u32::try_from(span.start.max(0)).ok()?,
+        end: u32::try_from(span.end.max(0)).ok()?,
+    })
 }
 
 /// An `IntSpan`, written either as the object the schema declares or as the

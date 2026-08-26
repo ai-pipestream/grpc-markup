@@ -966,3 +966,77 @@ async fn declared_image_dimensions_reach_the_picture_only_when_they_are_numbers(
         Some(prost_types::value::Kind::StringValue("5cm".to_owned()))
     );
 }
+
+#[tokio::test]
+async fn a_source_line_is_provenance_now_and_not_a_custom_field() {
+    let client = client().await;
+    let markdown = "# Titre\n\n![schéma](figures/schéma.png)\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+    let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+
+    let Some(doc::base_text_item::Item::Title(title)) = folded.texts[0].item.as_ref() else {
+        panic!("the first item is the title");
+    };
+    let base = title.base.as_ref().unwrap();
+    assert_eq!(
+        base.prov[0].line_range,
+        Some(doc::LineSpan { start: 1, end: 2 }),
+        "half-open and 1-based: the line the block starts on"
+    );
+    assert!(
+        base.prov[0].bbox.is_none() && base.prov[0].page_no == 0,
+        "markup has no page and no box, and none is invented"
+    );
+    assert!(
+        base.meta.is_none(),
+        "the line used to be a custom field and there is nothing else to keep"
+    );
+
+    assert_eq!(
+        folded.pictures[0].prov[0].line_range,
+        Some(doc::LineSpan { start: 3, end: 4 }),
+        "a picture is addressed the same way"
+    );
+    assert_eq!(
+        folded.tables[0].prov[0].line_range,
+        Some(doc::LineSpan { start: 5, end: 6 }),
+        "and so is a table"
+    );
+
+    // Nothing anywhere still spells the line into a custom field.
+    let leftovers: Vec<&String> = folded
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::Title(i) => i.base.as_ref(),
+            doc::base_text_item::Item::Text(i) => i.base.as_ref(),
+            _ => None,
+        })
+        .filter_map(|base| base.meta.as_ref())
+        .flat_map(|meta| meta.custom_fields.keys())
+        .filter(|key| key.ends_with(".source_line"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[tokio::test]
+async fn a_code_block_keeps_its_line_even_though_it_inlines_its_base() {
+    let client = client().await;
+    let markdown = "para\n\n```rust\nfn main() {}\n```\n";
+    let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
+    let folded = document(&events).expect("the fold was requested");
+    let code = folded
+        .texts
+        .iter()
+        .find_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::Code(code) => Some(code),
+            _ => None,
+        })
+        .expect("the fenced block");
+    assert_eq!(
+        code.prov[0].line_range,
+        Some(doc::LineSpan { start: 3, end: 4 }),
+        "CodeItem inlines its base fields, so prov has to be carried by hand"
+    );
+}

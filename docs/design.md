@@ -361,6 +361,12 @@ Carried across from the typed wire, into slots the schema already had:
   with no unit beside them, so `20%`, `5cm` and `0.8\textwidth` cannot go in
   it without inventing a unit the source never named. Those spellings, and a
   lone dimension, stay verbatim in the picture's custom fields.
+- A block's `source_line` becomes a `ProvenanceItem` carrying a
+  `LineSpan`, on text items, pictures and tables alike. The wire states
+  where a block begins and not where it ends, so the range is the one line
+  the fold knows about: half-open `[line, line+1)` is "line N", and a fold
+  that ever learns a block's last line widens the end without changing the
+  shape. No page and no box ride with it; a markup source has neither.
 - `MarkupInfo.metadata` becomes `Document.source_meta`: title, authors,
   dates, language, generator and keywords in their own slots, other scalars
   in `extra` under their own names. A declared date lands in the shape the
@@ -372,12 +378,10 @@ Carried across from the typed wire, into slots the schema already had:
 
 Dropped or demoted per format, deliberately:
 
-- **All formats:** `ParseStatus` (describes the stream, not the document);
-  warnings; `evidence`. A block's `role` and `source_line` survive only as
-  custom fields. Everything else the typed wire carries has a first-class
-  slot on this plane; the five exceptions, and the shapes that would give
-  them one, are listed in section 5a rather than faked into a slot that
-  means something else.
+- **All formats:** `ParseStatus` (describes the stream, not the document)
+  and its warnings. A block's `role` survives only as a custom field.
+  Everything else the typed wire carries has a first-class slot on this
+  plane.
 - **HTML:** anything derived from a rendered page (provenance
   boxes, visibility, forms) never existed here; nested structure inside a
   table cell survives only as the cell's flattened text; `hr` and unmapped
