@@ -90,7 +90,7 @@ tree branches on format.
 
 | Source construct | Wire |
 |---|---|
-| YAML front matter between leading `---` fences | `MarkupInfo.metadata` as the tree the source declared: scalars verbatim, sequences as `MetaList`, nested mappings as `MetaMap`, keys the mapping's own; `title:` also to `MarkupInfo.title` when it is a non-empty scalar. Unparseable front matter: one `WARNING_CODE_METADATA`, raw text not emitted as content |
+| Front matter between leading `---` (YAML) or `+++` (TOML) fences | `MarkupInfo.metadata` as the tree the source declared: scalars verbatim, sequences as `MetaList`, nested mappings as `MetaMap`, keys the mapping's own; `title` also to `MarkupInfo.title` when it is a non-empty scalar. The fence picks the dialect, and both land on the same tree. Unparseable front matter: one `WARNING_CODE_METADATA` naming the dialect, raw text not emitted as content |
 | First H1 | `BLOCK_LABEL_TITLE` |
 | Every other heading | `BLOCK_LABEL_SECTION_HEADER` with the Markdown level |
 | Paragraph | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; `hyperlink` when the whole paragraph is one link, and one `InlineSpan` per formatted, linked or referring run |
@@ -409,7 +409,8 @@ Precedence, fixed:
    build; if a registry entry were ever removed, the signature would still
    match and the refusal would name what was sniffed.
 3. **Heuristics, Markdown, AsciiDoc and reStructuredText only:** ATX
-   headings, fences, inline links or front matter say Markdown; a `= `
+   headings, fences, inline links or a front-matter fence of either dialect
+   say Markdown; a `= `
    document title, `== ` sections, `:name: value` attribute entries or
    `----` fences say AsciiDoc; an explicit-markup block (`.. note::`,
    `.. _target:`, `.. [ref]`) or a section adornment says

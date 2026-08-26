@@ -107,33 +107,31 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
 
 // ------------------------------------------------------------- front matter
 
-/// Parse a leading YAML front matter block, when there is one.
+/// Parse a leading front matter block, when there is one.
 ///
 /// Returns the metadata map, the title it declared, and the byte offset the
-/// Markdown body starts at. A block that is fenced but not YAML warns and is
-/// skipped; text without a closed leading fence is all body.
+/// Markdown body starts at. The fence decides the dialect: `---` is YAML
+/// and `+++` is TOML, which is what the generators that write front matter
+/// mean by each. A block that is fenced but does not parse as its own
+/// dialect warns and is skipped; text without a closed leading fence is all
+/// body.
 fn front_matter(
     text: &str,
     emitter: &mut Emitter<'_>,
 ) -> (HashMap<String, pb::MetaValue>, Option<String>, usize) {
-    let Some((raw, body_start)) = front_matter_span(text) else {
+    let Some((raw, body_start, dialect)) = front_matter_span(text) else {
         return (HashMap::new(), None, 0);
     };
-    let parsed = YamlLoader::load_from_str(raw);
-    let mapping = match parsed.as_deref() {
-        Ok([Yaml::Hash(hash)]) => hash,
-        Ok(_) | Err(_) => {
-            emitter.warn(
-                pb::WarningCode::Metadata,
-                "front matter is not a YAML mapping and was skipped",
-            );
-            return (HashMap::new(), None, body_start);
-        }
+    let Some(metadata) = (match dialect {
+        Dialect::Yaml => yaml_mapping(raw),
+        Dialect::Toml => crate::toml::parse(raw),
+    }) else {
+        emitter.warn(
+            pb::WarningCode::Metadata,
+            &format!("front matter is not a {dialect} mapping and was skipped"),
+        );
+        return (HashMap::new(), None, body_start);
     };
-    let metadata: HashMap<String, pb::MetaValue> = mapping
-        .iter()
-        .map(|(key, value)| (yaml_key(key), meta_value(value)))
-        .collect();
     let title = metadata.get("title").and_then(|value| match &value.kind {
         Some(pb::meta_value::Kind::Value(text)) if !text.is_empty() => Some(text.clone()),
         _ => None,
@@ -141,18 +139,67 @@ fn front_matter(
     (metadata, title, body_start)
 }
 
-/// The raw text between leading `---` fences, and where the body resumes.
-fn front_matter_span(text: &str) -> Option<(&str, usize)> {
-    let after_open = text
-        .strip_prefix("---\n")
-        .map(|rest| (rest, 4))
-        .or_else(|| text.strip_prefix("---\r\n").map(|rest| (rest, 5)))?;
-    let (rest, open_len) = after_open;
+/// Which dialect a front-matter fence declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dialect {
+    /// The `---` fence.
+    Yaml,
+    /// The `+++` fence.
+    Toml,
+}
+
+impl Dialect {
+    /// The fence that opens and closes this dialect's block.
+    const fn fence(self) -> &'static str {
+        match self {
+            Self::Yaml => "---",
+            Self::Toml => "+++",
+        }
+    }
+}
+
+impl std::fmt::Display for Dialect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Yaml => "YAML",
+            Self::Toml => "TOML",
+        })
+    }
+}
+
+/// A YAML front-matter block as the metadata tree, or nothing when it is
+/// not a mapping.
+fn yaml_mapping(raw: &str) -> Option<HashMap<String, pb::MetaValue>> {
+    match YamlLoader::load_from_str(raw).as_deref() {
+        Ok([Yaml::Hash(hash)]) => Some(
+            hash.iter()
+                .map(|(key, value)| (yaml_key(key), meta_value(value)))
+                .collect(),
+        ),
+        Ok(_) | Err(_) => None,
+    }
+}
+
+/// The raw text between leading fences, where the body resumes, and which
+/// dialect the fence declared.
+fn front_matter_span(text: &str) -> Option<(&str, usize, Dialect)> {
+    let dialect = [Dialect::Yaml, Dialect::Toml]
+        .into_iter()
+        .find(|dialect| text.starts_with(dialect.fence()))?;
+    let fence = dialect.fence();
+    let (rest, open_len) = text
+        .strip_prefix(&format!("{fence}\n"))
+        .map(|rest| (rest, fence.len() + 1))
+        .or_else(|| {
+            text.strip_prefix(&format!("{fence}\r\n"))
+                .map(|rest| (rest, fence.len() + 2))
+        })?;
     let mut offset = 0usize;
     for line in rest.split_inclusive('\n') {
         let bare = line.trim_end_matches(['\n', '\r']);
-        if bare == "---" || bare == "..." {
-            return Some((&rest[..offset], open_len + offset + line.len()));
+        // YAML's own end-of-document marker closes a YAML block too.
+        if bare == fence || (dialect == Dialect::Yaml && bare == "...") {
+            return Some((&rest[..offset], open_len + offset + line.len(), dialect));
         }
         offset += line.len();
     }

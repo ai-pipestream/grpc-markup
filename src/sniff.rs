@@ -271,7 +271,12 @@ pub fn json_signature(text: &str) -> Option<Format> {
 /// their bytes are Markdown states the format.
 #[must_use]
 pub fn looks_like_markdown(text: &str) -> bool {
-    if text.starts_with("---\n") || text.starts_with("---\r\n") {
+    // Both front-matter fences, because both open a Markdown document: the
+    // dialect inside them is the fold's problem, not the sniff's.
+    if ["---\n", "---\r\n", "+++\n", "+++\r\n"]
+        .iter()
+        .any(|fence| text.starts_with(fence))
+    {
         return true;
     }
     text.lines().any(|line| {

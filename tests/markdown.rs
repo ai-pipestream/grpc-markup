@@ -6,7 +6,8 @@ mod common;
 
 use common::{
     blocks_labelled, client, images, indexes, info, meta_list, meta_map, meta_scalar, options,
-    parse_ok, spanned, status, styles, table_rows, table_starts, text_blocks, texts, warning,
+    parse_ok, sniff_options, spanned, status, styles, table_rows, table_starts, text_blocks, texts,
+    warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -725,5 +726,73 @@ async fn a_nested_quotation_states_how_deep_each_paragraph_sat() {
     assert!(
         outside[0].quote_depth.is_none(),
         "a depth of zero is not a quotation nested zero deep"
+    );
+}
+
+/// A TOML preamble covering what front matter is made of: scalars kept
+/// verbatim, a list, a table, and multi-byte text.
+const TOML_FRONT: &str = "+++\n\
+title = \"Café littéraire\"\n\
+version = 1.10\n\
+tags = [\"café\", \"thé\"]\n\
+\n\
+[author]\n\
+name = \"Ada Lovelace\"\n\
++++\n\
+\n\
+# Corps\n\
+\n\
+Du texte.\n";
+
+#[tokio::test]
+async fn toml_front_matter_lands_on_the_same_tree_yaml_does() {
+    let client = client().await;
+    let events = parse_ok(&client, TOML_FRONT, options(pb::MarkupFormat::Markdown)).await;
+    let info = info(&events);
+    assert_eq!(info.title.as_deref(), Some("Café littéraire"));
+    assert_eq!(
+        meta_scalar(&info.metadata["version"]),
+        "1.10",
+        "a scalar is verbatim text, exactly as on the YAML side"
+    );
+    let tags = meta_list(&info.metadata["tags"]);
+    assert_eq!(
+        tags.iter().map(meta_scalar).collect::<Vec<_>>(),
+        ["café", "thé"]
+    );
+    assert_eq!(
+        meta_scalar(&meta_map(&info.metadata["author"])["name"]),
+        "Ada Lovelace"
+    );
+    assert!(
+        status(&events).warnings.is_empty(),
+        "{:?}",
+        status(&events).warnings
+    );
+    assert_eq!(
+        texts(&text_blocks(&events)),
+        ["Corps", "Du texte."],
+        "the preamble is metadata, never body"
+    );
+}
+
+#[tokio::test]
+async fn a_toml_preamble_sniffs_as_markdown_and_a_broken_one_warns() {
+    let client = client().await;
+    let sniffed = parse_ok(&client, TOML_FRONT, sniff_options()).await;
+    assert_eq!(info(&sniffed).format, pb::MarkupFormat::Markdown as i32);
+
+    let broken = "+++\ntitle = \"unterminated\n+++\n\nCorps.\n";
+    let events = parse_ok(&client, broken, options(pb::MarkupFormat::Markdown)).await;
+    let warning = warning(&events, pb::WarningCode::Metadata).expect("the preamble is reported");
+    assert!(warning.message.contains("TOML"), "{}", warning.message);
+    assert!(
+        info(&events).metadata.is_empty(),
+        "a preamble that does not parse states nothing"
+    );
+    assert_eq!(
+        texts(&text_blocks(&events)),
+        ["Corps."],
+        "and it is still not emitted as prose"
     );
 }
