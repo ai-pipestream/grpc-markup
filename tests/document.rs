@@ -828,3 +828,101 @@ async fn a_table_cell_reference_resolves_the_same_way_a_paragraph_one_does() {
         "a document refers forward as often as backward"
     );
 }
+
+#[tokio::test]
+async fn a_quotation_is_a_group_per_level_of_nesting() {
+    let client = client().await;
+    let markdown = "> Première.\n>\n> > Deuxième, plus profonde.\n>\n> > - imbriquée\n\nDehors.\n";
+    let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+
+    let quotes: Vec<&doc::GroupItem> = folded
+        .groups
+        .iter()
+        .filter(|group| group.label_raw.as_deref() == Some("quote"))
+        .collect();
+    assert_eq!(quotes.len(), 2, "one group per level of nesting");
+    assert_eq!(
+        quotes[0].parent.as_ref().unwrap().r#ref,
+        "#/body",
+        "the outer quotation hangs off the body"
+    );
+    assert_eq!(
+        quotes[1].parent.as_ref().unwrap().r#ref,
+        quotes[0].self_ref,
+        "the inner quotation hangs off the outer one"
+    );
+    assert_eq!(
+        quotes[0].label,
+        doc::GroupLabel::Unspecified as i32,
+        "the vocabulary has no quotation member, so none is borrowed"
+    );
+
+    // A list inside the deeper quotation is a list group inside that group.
+    let list = folded
+        .groups
+        .iter()
+        .find(|group| group.label == doc::GroupLabel::List as i32)
+        .expect("the nested list is its own group");
+    assert_eq!(list.parent.as_ref().unwrap().r#ref, quotes[1].self_ref);
+
+    // And the paragraph after the quotation is back on the body.
+    let outside = folded
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::Text(text) => text.base.as_ref(),
+            _ => None,
+        })
+        .find(|base| base.text == "Dehors.")
+        .expect("the paragraph outside the quotation");
+    assert_eq!(outside.parent.as_ref().unwrap().r#ref, "#/body");
+}
+
+#[tokio::test]
+async fn a_task_list_item_folds_as_the_checkbox_it_is() {
+    let client = client().await;
+    let markdown = "- [x] déjà fait\n- [ ] à faire\n- ordinaire\n";
+    let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+
+    let items: Vec<(&str, i32, bool)> = folded
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::ListItem(list_item) => {
+                let base = list_item.base.as_ref()?;
+                Some((base.text.as_str(), base.label, list_item.enumerated))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            (
+                "déjà fait",
+                doc::DocItemLabel::CheckboxSelected as i32,
+                false
+            ),
+            (
+                "à faire",
+                doc::DocItemLabel::CheckboxUnselected as i32,
+                false
+            ),
+            ("ordinaire", doc::DocItemLabel::ListItem as i32, false),
+        ],
+        "the checkbox is the label; the item stays a list item variant"
+    );
+    assert_eq!(
+        folded
+            .groups
+            .iter()
+            .filter(|group| group.label == doc::GroupLabel::List as i32)
+            .count(),
+        1,
+        "a checkbox does not break the contiguous list"
+    );
+}

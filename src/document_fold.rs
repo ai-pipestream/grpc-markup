@@ -61,6 +61,11 @@ const BODY_REF: &str = "#/body";
 /// page chrome to put there.
 const FURNITURE_REF: &str = "#/furniture";
 
+/// `name` and `label_raw` of a quotation group. The group vocabulary this
+/// schema mirrors has no quotation member, and `label_raw` is the fallback
+/// it provides for exactly that.
+const QUOTE_GROUP: &str = "quote";
+
 /// A fold of one parse's events into one Document.
 ///
 /// Feed it every event of one `ParseMarkup` response stream in order, then
@@ -80,6 +85,11 @@ pub struct DocumentFold {
     /// ref). Any non-list-item content closes the whole stack, which is
     /// what makes a group "one contiguous list".
     lists: Vec<(u32, bool, String)>,
+    /// The open quotation groups, outermost first, one self ref per level
+    /// of nesting. A block states the depth it sat at and the stack follows
+    /// it, so a quote inside a quote is a group inside a group rather than
+    /// two blocks that both say "quoted".
+    quotes: Vec<String>,
     /// Anchor name to the ref of the item that declares it, first
     /// declaration winning. Both `Document.anchors` and every cross
     /// reference resolve through this.
@@ -159,6 +169,7 @@ impl DocumentFold {
             table: None,
             headings: Vec::new(),
             lists: Vec::new(),
+            quotes: Vec::new(),
             anchors: BTreeMap::new(),
             pending_refs: Vec::new(),
         }
@@ -203,6 +214,7 @@ impl DocumentFold {
             .collect();
         self.headings.clear();
         self.lists.clear();
+        self.quotes.clear();
         self.anchors.clear();
         self.pending_refs.clear();
         std::mem::replace(&mut self.document, skeleton())
@@ -330,6 +342,7 @@ impl DocumentFold {
 
     fn on_text_block(&mut self, block: &pb::TextBlock) {
         let label = pb::BlockLabel::try_from(block.label).unwrap_or_default();
+        self.follow_quotes(block.quote_depth.unwrap_or(0));
         if label == pb::BlockLabel::ListItem {
             self.push_list_item(block);
             return;
@@ -513,6 +526,49 @@ impl DocumentFold {
         fields
     }
 
+    // ----------------------------------------------------------------- quotes
+
+    /// Bring the quotation stack to the depth the block states.
+    ///
+    /// The wire says how deep a paragraph sat, which is what the folds knew
+    /// all along and used only to pick a label; the stack turns that number
+    /// back into the structure it describes. Leaving or entering a
+    /// quotation ends any contiguous list, because a list inside a
+    /// quotation is not the same list as one outside it.
+    fn follow_quotes(&mut self, depth: u32) {
+        let depth = depth as usize;
+        if self.quotes.len() != depth {
+            self.lists.clear();
+        }
+        self.quotes.truncate(depth);
+        while self.quotes.len() < depth {
+            let parent = self.current_parent();
+            let self_ref = format!("#/groups/{}", self.document.groups.len());
+            let mut fields = HashMap::new();
+            self.attribute(&mut fields);
+            self.document.groups.push(doc::GroupItem {
+                self_ref: self_ref.clone(),
+                parent: Some(reference(&parent)),
+                children: Vec::new(),
+                content_layer: doc::ContentLayer::Body as i32,
+                meta: Some(doc::BaseMeta {
+                    custom_fields: fields,
+                    ..doc::BaseMeta::default()
+                }),
+                name: Some(QUOTE_GROUP.to_owned()),
+                // The group vocabulary has no quotation member, so the
+                // group states its kind in the schema's own raw-label
+                // fallback rather than borrowing a member that means
+                // something else.
+                label: doc::GroupLabel::Unspecified as i32,
+                label_raw: Some(QUOTE_GROUP.to_owned()),
+                ..doc::GroupItem::default()
+            });
+            self.link_child(&parent, &self_ref);
+            self.quotes.push(self_ref);
+        }
+    }
+
     // ------------------------------------------------------------------ lists
 
     /// One list item, grouped under `GROUP_LABEL_LIST` /
@@ -535,7 +591,15 @@ impl DocumentFold {
             .map(|(_, _, group_ref)| group_ref.clone())
             .expect("a group was just ensured");
         let self_ref = format!("#/texts/{}", self.document.texts.len());
-        let base = self.text_base(&self_ref, &parent, block, doc::DocItemLabel::ListItem);
+        // A ticked box is what the item *is* as far as the label vocabulary
+        // goes; it stays a `ListItem` variant, so its enumeration and its
+        // marker survive beside the checkbox.
+        let label = match pb::TaskState::try_from(block.task_state).unwrap_or_default() {
+            pb::TaskState::Unspecified => doc::DocItemLabel::ListItem,
+            pb::TaskState::Checked => doc::DocItemLabel::CheckboxSelected,
+            pb::TaskState::Unchecked => doc::DocItemLabel::CheckboxUnselected,
+        };
+        let base = self.text_base(&self_ref, &parent, block, label);
         let index = self.document.texts.len();
         self.document.texts.push(doc::BaseTextItem {
             item: Some(doc::base_text_item::Item::ListItem(doc::ListItem {
@@ -857,12 +921,14 @@ impl DocumentFold {
 
     // ------------------------------------------------------------- primitives
 
-    /// The ref new content parents to: the innermost open section header,
-    /// or the body when no header has opened yet.
+    /// The ref new content parents to: the innermost open quotation group,
+    /// then the innermost open section header, then the body.
     fn current_parent(&self) -> String {
-        self.headings
-            .last()
-            .map_or_else(|| BODY_REF.to_owned(), |(_, self_ref)| self_ref.clone())
+        self.quotes.last().cloned().unwrap_or_else(|| {
+            self.headings
+                .last()
+                .map_or_else(|| BODY_REF.to_owned(), |(_, self_ref)| self_ref.clone())
+        })
     }
 
     /// Close every open header a level-`level` header ends: a header of the

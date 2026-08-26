@@ -51,7 +51,7 @@ async fn a_boxnote_maps_headings_lists_and_paragraphs() {
     assert!(items[0].marker.is_none(), "BoxNote numbering is implicit");
     assert_eq!(items[2].list_depth, Some(2));
     assert!(items[2].enumerated);
-    assert_eq!(items[3].role, "task-item-checked");
+    assert_eq!(items[3].task_state, pb::TaskState::Checked as i32);
 }
 
 #[tokio::test]

@@ -383,6 +383,18 @@ impl Walk<'_, '_> {
         Ok(())
     }
 
+    /// Send one block, stamping how deep inside `<blockquote>` it sat.
+    ///
+    /// Every block this fold sends goes through here: a quotation contains
+    /// whatever the author put in it, and the depth is what lets the
+    /// Document fold rebuild the nesting.
+    fn emit(&mut self, mut block: Block) -> Result<(), ParseError> {
+        if self.quote_depth > 0 {
+            block.quote_depth = Some(self.quote_depth);
+        }
+        self.emitter.text_block(block)
+    }
+
     /// Flush the inline buffer as one paragraph (or quote) block.
     fn flush(&mut self) -> Result<(), ParseError> {
         let Some(mut buffer) = self.buffer.take() else {
@@ -398,7 +410,7 @@ impl Walk<'_, '_> {
         };
         let hyperlink = buffer.hyperlink();
         let (text, spans) = buffer.take();
-        self.emitter.text_block(Block {
+        self.emit(Block {
             label,
             text,
             hyperlink,
@@ -419,7 +431,7 @@ impl Walk<'_, '_> {
         } else {
             (pb::BlockLabel::SectionHeader, Some(level))
         };
-        self.emitter.text_block(Block {
+        self.emit(Block {
             label,
             text,
             level,
@@ -440,7 +452,7 @@ impl Walk<'_, '_> {
         } else {
             pb::BlockLabel::Paragraph
         };
-        self.emitter.text_block(Block {
+        self.emit(Block {
             label,
             role: role.to_owned(),
             text,
@@ -489,7 +501,7 @@ impl Walk<'_, '_> {
         }
         let language = language_class(element)
             .or_else(|| child_element(element, "code").and_then(|code| language_class(&code)));
-        self.emitter.text_block(Block {
+        self.emit(Block {
             label: pb::BlockLabel::Code,
             text,
             language,
@@ -604,7 +616,7 @@ impl Walk<'_, '_> {
         let (text, spans) = buffer.take();
         if *emitted {
             // A second run of text in the same item: a further paragraph.
-            return self.emitter.text_block(Block {
+            return self.emit(Block {
                 label: pb::BlockLabel::Paragraph,
                 text,
                 hyperlink,
@@ -613,7 +625,7 @@ impl Walk<'_, '_> {
             });
         }
         *emitted = true;
-        self.emitter.text_block(Block {
+        self.emit(Block {
             label: pb::BlockLabel::ListItem,
             text,
             enumerated: ordered,
@@ -639,7 +651,7 @@ impl Walk<'_, '_> {
             if text.is_empty() {
                 continue;
             }
-            self.emitter.text_block(Block {
+            self.emit(Block {
                 label: pb::BlockLabel::ListItem,
                 role: role.to_owned(),
                 text,
@@ -742,7 +754,7 @@ impl Walk<'_, '_> {
                 "figcaption" => {
                     let (text, spans, hyperlink) = self.flatten(&child)?;
                     if !text.is_empty() {
-                        self.emitter.text_block(Block {
+                        self.emit(Block {
                             label: pb::BlockLabel::Caption,
                             text,
                             hyperlink,

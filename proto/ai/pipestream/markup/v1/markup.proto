@@ -369,6 +369,25 @@ message MetaMap {
   map<string, MetaValue> entries = 1;
 }
 
+// TaskState is whether a list item carries a checkbox, and whether it is
+// ticked.
+//
+// The state is a fact about the item and not a refinement of its label,
+// which is why it is its own field rather than a `role` spelling: a task
+// item is still a list item, and a consumer that wants the checkbox should
+// not have to match on a string.
+enum TaskState {
+  // The item carries no checkbox.
+  TASK_STATE_UNSPECIFIED = 0;
+
+  // An unticked checkbox: Markdown `- [ ]`, a BoxNote check-list entry the
+  // author has not ticked.
+  TASK_STATE_UNCHECKED = 1;
+
+  // A ticked checkbox: Markdown `- [x]`, a ticked BoxNote check-list entry.
+  TASK_STATE_CHECKED = 2;
+}
+
 // BlockLabel is the structural role of one text block.
 enum BlockLabel {
   // Never sent. Present because proto3 requires a zero value.
@@ -475,6 +494,21 @@ message TextBlock {
   // The callout kind the source marks the block as. Never set for a block
   // the source did not mark.
   AdmonitionKind admonition = 15;
+
+  // For `BLOCK_LABEL_LIST_ITEM`: the checkbox the source put on the item.
+  // `TASK_STATE_UNSPECIFIED` for an item with none, which is every item of
+  // an ordinary list.
+  TaskState task_state = 16;
+
+  // How deep inside a block quotation this block sat, starting at 1 for a
+  // top-level quote. Absent for a block outside every quotation: a depth of
+  // zero is not a quotation nested zero deep.
+  //
+  // Set on any block, not only on `BLOCK_LABEL_QUOTE`, because a quotation
+  // contains whatever the author put in it: a list item inside a quote
+  // carries the depth too. `BLOCK_LABEL_QUOTE` still says "this block is a
+  // quoted paragraph"; this field says how deep it was.
+  optional uint32 quote_depth = 17;
 }
 
 // TableStart opens a streamed table. Rows follow, then `TableEnd`.

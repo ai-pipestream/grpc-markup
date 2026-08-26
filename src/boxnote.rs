@@ -107,6 +107,18 @@ struct Walk<'w, 'e> {
 }
 
 impl Walk<'_, '_> {
+    /// Send one block, stamping how deep inside a `blockquote` it sat.
+    ///
+    /// Every block this fold sends goes through here: a quotation contains
+    /// whatever the author put in it, and the depth is what lets the
+    /// Document fold rebuild the nesting.
+    fn emit(&mut self, mut block: Block) -> Result<(), ParseError> {
+        if self.quote_depth > 0 {
+            block.quote_depth = Some(self.quote_depth);
+        }
+        self.emitter.text_block(block)
+    }
+
     /// Map a run of sibling block nodes. `list_depth` is how many lists are
     /// open above them, 0 outside any list.
     fn blocks(&mut self, nodes: &[Value], list_depth: u32) -> Result<(), ParseError> {
@@ -171,7 +183,7 @@ impl Walk<'_, '_> {
         } else {
             (pb::BlockLabel::SectionHeader, Some(level))
         };
-        self.emitter.text_block(Block {
+        self.emit(Block {
             label,
             text,
             level,
@@ -191,7 +203,7 @@ impl Walk<'_, '_> {
         } else {
             pb::BlockLabel::Paragraph
         };
-        self.emitter.text_block(Block {
+        self.emit(Block {
             label,
             text,
             hyperlink,
@@ -250,13 +262,15 @@ impl Walk<'_, '_> {
             }
         }
         if !text.is_empty() {
-            self.emitter.text_block(Block {
+            self.emit(Block {
                 label: pb::BlockLabel::ListItem,
-                role: match checked {
-                    Some(true) => "task-item-checked".to_owned(),
-                    Some(false) => "task-item".to_owned(),
-                    None => String::new(),
-                },
+                task_state: checked.map(|ticked| {
+                    if ticked {
+                        pb::TaskState::Checked
+                    } else {
+                        pb::TaskState::Unchecked
+                    }
+                }),
                 text,
                 enumerated,
                 // BoxNote leaves numbering implicit, so there is no marker
@@ -285,7 +299,7 @@ impl Walk<'_, '_> {
             .and_then(Value::as_str)
             .filter(|language| !language.is_empty())
             .map(str::to_owned);
-        self.emitter.text_block(Block {
+        self.emit(Block {
             label: pb::BlockLabel::Code,
             text,
             language,

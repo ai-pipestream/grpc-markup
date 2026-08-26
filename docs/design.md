@@ -100,9 +100,9 @@ tree branches on format.
 | Heading attribute `{#id}` | `TextBlock.anchor_id` |
 | Definition list | list items with the `definition-term` / `definition-description` roles, the description one depth under its term |
 | GFM alert (`> [!WARNING]`) | `BLOCK_LABEL_QUOTE` with `role: "admonition"` and the `admonition` kind |
-| List item | `BLOCK_LABEL_LIST_ITEM` with `enumerated`, the marker as written (read back from the source bytes), `list_depth`; task-list checkbox in `role` (`task-item` / `task-item-checked`) |
+| List item | `BLOCK_LABEL_LIST_ITEM` with `enumerated`, the marker as written (read back from the source bytes), `list_depth`; a task-list checkbox as the typed `task_state` |
 | Fenced / indented code | `BLOCK_LABEL_CODE`, text verbatim, info-string first word as `language` |
-| Blockquote | `BLOCK_LABEL_QUOTE`, one block per paragraph, nesting flattened |
+| Blockquote | `BLOCK_LABEL_QUOTE`, one block per paragraph, with `quote_depth` saying how deep it sat; every block inside the quotation carries the depth, list items included |
 | Pipe table | `TableStart` (delimiter-row alignments as `columns`) / `TableRow` (header row and cells flagged, cell runs carried) / `TableEnd` |
 | Image | `ImageBlock` with `src`, `alt`, `title` as written |
 | Footnote definition | `BLOCK_LABEL_FOOTNOTE`, `role` and `anchor_id` = the label; a reference is a superscript span over the label carrying the key |
@@ -129,7 +129,7 @@ scope by construction.
 | `abbr title`, `time datetime`, `data value` | the machine-readable value in the span's `raw` |
 | `id` on any element | `TextBlock.anchor_id` on a block, `InlineSpan.anchor_id` on a run |
 | `address`, `summary` | paragraphs with the element name as `role` |
-| `blockquote` | `BLOCK_LABEL_QUOTE` per paragraph, nesting flattened |
+| `blockquote` | `BLOCK_LABEL_QUOTE` per paragraph, every block inside carrying its `quote_depth` |
 | `ul` / `ol` / `li` | `BLOCK_LABEL_LIST_ITEM` with nesting depth; `enumerated` for `ol`; a marker is written only when the source numbered the list (`ol start`) |
 | `dl` / `dt` / `dd` | list items with the proto's `definition-term` / `definition-description` roles, descriptions one level under their term |
 | `table` (+`thead`/`tbody`/`tfoot`, `caption`, `colspan`/`rowspan`, `colgroup`/`col`) | streamed table with the caption on `TableStart`, the `col` geometry as `columns` (a `span` repeated across the columns it covers), header cells and rows flagged, spans advancing the column index over an occupancy grid, each cell's own `align`/`valign` and its inline runs |
@@ -193,7 +193,7 @@ here, and the mapping covers the constructs below.
 | `verbatim`/`lstlisting`/`minted` | `BLOCK_LABEL_CODE`, verbatim, `[language=x]` as the declared language; `tikzpicture` as code declared `tikz` (no renderer here) |
 | equation family, `$$..$$`, `\[..\]` | `BLOCK_LABEL_FORMULA` with `\label{...}` lifted into `anchor_id`; `$..$` stays inline as a math run |
 | `\includegraphics` | `ImageBlock`, path verbatim; `\caption` a `CAPTION` block; `\footnote`/`\marginpar` `FOOTNOTE` blocks |
-| `quote`/`quotation`/`verse` | `BLOCK_LABEL_QUOTE` paragraphs |
+| `quote`/`quotation`/`verse` | `BLOCK_LABEL_QUOTE` paragraphs, nesting carried as `quote_depth` |
 | `abstract`, theorems, `proof`, `thebibliography` | an `Abstract` header with `role: "abstract"`, a `Theorem.`-style lead paragraph with the environment as `role`, a `References` header plus one list item per `\bibitem`, its key the item's `anchor_id` |
 | unknown environments | descended into, one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per environment name |
 | `\input`/`\include` | never read (diskless); one aggregated warning names the refusal |
@@ -302,7 +302,13 @@ merge contract as a check; every fold test asserts it is empty.
 Structure: a heading-as-parent ladder (a section header of level N parents
 under the nearest open header of a lower level), plus one
 `GROUP_LABEL_LIST` / `GROUP_LABEL_ORDERED_LIST` group per contiguous list
-with nested lists as nested groups.
+with nested lists as nested groups, plus one group per level of block
+quotation. A quotation group is the schema's own raw-label fallback
+(`label_raw: "quote"`, `name: "quote"`) because the group vocabulary has no
+quotation member and borrowing one that means something else would be
+worse. A block states the depth it sat at and the stack follows it, so a
+quote inside a quote is a group inside a group and a list inside a
+quotation is a list group under the quotation's group.
 
 Carried across from the typed wire, into slots the schema already had:
 
@@ -314,6 +320,11 @@ Carried across from the typed wire, into slots the schema already had:
   and the raw payload behind projected text (an abbreviation's expansion,
   inline math in its source syntax) ride on the span.
 - A block's `admonition` becomes `TextItemBase.admonition_kind`, lower-cased.
+- A list item's `task_state` becomes its label:
+  `DOC_ITEM_LABEL_CHECKBOX_SELECTED` or `..._UNSELECTED`. It stays a
+  `ListItem` variant, so its enumeration and its marker survive beside the
+  checkbox, and it stays inside its list group: a checkbox does not break a
+  contiguous list.
 - Every `anchor_id` becomes a `NamedAnchor` in `Document.anchors`, and every
   span `reference` keeps its key verbatim *and* gains a `FineRef` into the
   item that declares that anchor. A key nothing declares keeps the key and
@@ -364,8 +375,9 @@ Dropped or demoted per format, deliberately:
 - **LaTeX:** everything TeX (macro definitions, spacing, counters, page
   furniture) dissolves; tikz survives only as its source; description-term
   structure survives only as a `term: ` prefix.
-- **Markdown:** the distinction between quote and plain text is demoted to
-  a custom field (`DocItemLabel` has no quote); an unknown code language
+- **Markdown:** `DocItemLabel` has no quote member, so a quoted paragraph
+  is a `TEXT` item under a quotation group with the quotation fact also on
+  the item's custom fields, which is what an item read on its own can say; an unknown code language
   survives only as `code_language_raw`; image `alt` / `title` become custom
   fields, not caption items; thematic breaks and the raw text of HTML tags
   are gone entirely (warned on the trailer).
@@ -373,8 +385,7 @@ Dropped or demoted per format, deliberately:
   `TrackSource` and its karaoke segments in `prov` as `TimeSpan`s with the
   `charspan` they cover; skipped NOTE/STYLE/REGION content never reaches the
   document, and `<ruby>` / `<rt>` survive only as their flattened text.
-- **BoxNote:** checkbox state is a custom-field `role`, not a
-  `CHECKBOX_SELECTED` item.
+- **BoxNote:** nothing beyond what every format drops.
 - **Docling JSON:** nothing is re-folded — the ingested document passes
   through with stamps appended. What the *mapping* dropped (unconsumed
   keys: annotations, key-value items, form items) is exactly what the

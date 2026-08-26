@@ -973,8 +973,9 @@ fn clean_math(text: &str) -> (String, Option<String>) {
 /// What the surrounding structure makes of a flushed text run.
 #[derive(Clone, Default)]
 struct Ctx {
-    /// Open `quote` / `quotation` / `verse` environments.
-    quote: bool,
+    /// How many `quote` / `quotation` / `verse` environments are open. A
+    /// quotation inside a quotation is depth 2; zero is not a quotation.
+    quote: u32,
     /// Inside a list item: every flushed run is a list item at this depth.
     list: Option<(bool, u32)>,
 }
@@ -1242,7 +1243,7 @@ impl Walk<'_, '_> {
             }
             "quote" | "quotation" | "verse" => {
                 let quoted = Ctx {
-                    quote: true,
+                    quote: ctx.quote + 1,
                     list: ctx.list,
                 };
                 self.nodes(body, &quoted)
@@ -1515,11 +1516,12 @@ impl Walk<'_, '_> {
                 hyperlink,
                 spans,
                 anchor_id: anchor,
+                quote_depth: (ctx.quote > 0).then_some(ctx.quote),
                 ..Block::default()
             }
         } else {
             Block {
-                label: if ctx.quote {
+                label: if ctx.quote > 0 {
                     pb::BlockLabel::Quote
                 } else {
                     pb::BlockLabel::Paragraph
@@ -1528,6 +1530,7 @@ impl Walk<'_, '_> {
                 hyperlink,
                 spans,
                 anchor_id: anchor,
+                quote_depth: (ctx.quote > 0).then_some(ctx.quote),
                 ..Block::default()
             }
         };

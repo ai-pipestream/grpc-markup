@@ -20,7 +20,8 @@
 //!   and every formatted, linked or referring run inside it leaves an
 //!   `InlineSpan` over the text it covers.
 //! - List items carry `enumerated`, the marker as written in the source, and
-//!   the nesting depth. A task-list item records its checkbox in `role`.
+//!   the nesting depth. A task-list item records its checkbox in
+//!   `task_state`.
 //! - Fenced and indented code keeps its text verbatim; the info string's
 //!   first word is the `language`.
 //! - Blockquote paragraphs are `BLOCK_LABEL_QUOTE`, one block per paragraph,
@@ -252,7 +253,7 @@ enum Capture {
         marker: Option<String>,
         depth: u32,
         enumerated: bool,
-        role: String,
+        task: Option<pb::TaskState>,
         emitted: bool,
     },
     /// One term or description of a definition list.
@@ -307,6 +308,19 @@ struct Walk<'w, 'e> {
 }
 
 impl Walk<'_, '_> {
+    /// Send one block, stamping how deep inside a blockquote it sat.
+    ///
+    /// Every block this fold sends goes through here, because a quotation
+    /// contains whatever the author put in it: a paragraph, a list, a code
+    /// block. The depth is what lets the Document fold rebuild the nesting
+    /// the flattening removed.
+    fn emit(&mut self, mut block: Block) -> Result<(), ParseError> {
+        if self.quote_depth > 0 {
+            block.quote_depth = Some(self.quote_depth);
+        }
+        self.emitter.text_block(block)
+    }
+
     fn event(&mut self, event: Event<'_>, offset: usize) -> Result<(), ParseError> {
         let line = self.lines.line_of(self.base + offset);
         match event {
@@ -321,7 +335,7 @@ impl Walk<'_, '_> {
                 self.marked(&math, mark);
             }
             Event::DisplayMath(math) => {
-                self.emitter.text_block(Block {
+                self.emit(Block {
                     label: pb::BlockLabel::Formula,
                     text: math.into_string(),
                     source_line: Some(line),
@@ -359,17 +373,17 @@ impl Walk<'_, '_> {
                 .emitter
                 .warn(pb::WarningCode::UnmappedConstruct, "thematic break"),
             Event::TaskListMarker(checked) => {
-                if let Some(Capture::Item { role, .. }) = self
+                if let Some(Capture::Item { task, .. }) = self
                     .captures
                     .iter_mut()
                     .rev()
                     .find(|capture| matches!(capture, Capture::Item { .. }))
                 {
-                    *role = if checked {
-                        "task-item-checked".to_owned()
+                    *task = Some(if checked {
+                        pb::TaskState::Checked
                     } else {
-                        "task-item".to_owned()
-                    };
+                        pb::TaskState::Unchecked
+                    });
                 }
             }
         }
@@ -426,7 +440,7 @@ impl Walk<'_, '_> {
                     marker: self.marker_at(offset),
                     depth: depth.max(1),
                     enumerated: self.lists.last().copied().unwrap_or(false),
-                    role: String::new(),
+                    task: None,
                     emitted: false,
                 });
             }
@@ -532,7 +546,7 @@ impl Walk<'_, '_> {
                 } else {
                     (pb::BlockLabel::SectionHeader, Some(level))
                 };
-                self.emitter.text_block(Block {
+                self.emit(Block {
                     label,
                     text,
                     level,
@@ -554,7 +568,7 @@ impl Walk<'_, '_> {
                 };
                 let text = buf.strip_suffix('\n').unwrap_or(&buf).to_owned();
                 if !text.is_empty() {
-                    self.emitter.text_block(Block {
+                    self.emit(Block {
                         label: pb::BlockLabel::Code,
                         text,
                         language,
@@ -575,7 +589,7 @@ impl Walk<'_, '_> {
                 inline.push(&strip_tags(&buf));
                 let (text, _) = inline.take();
                 if !text.is_empty() {
-                    self.emitter.text_block(Block {
+                    self.emit(Block {
                         label: pb::BlockLabel::Paragraph,
                         role: "html".to_owned(),
                         text,
@@ -666,7 +680,7 @@ impl Walk<'_, '_> {
                 if text.is_empty() {
                     return Ok(());
                 }
-                self.emitter.text_block(Block {
+                self.emit(Block {
                     label: pb::BlockLabel::ListItem,
                     role: role.to_owned(),
                     text,
@@ -716,7 +730,7 @@ impl Walk<'_, '_> {
         let key = self.footnotes.last().cloned();
         let hyperlink = inline.hyperlink();
         let (text, spans) = inline.take();
-        self.emitter.text_block(Block {
+        self.emit(Block {
             label,
             // A GFM alert is an admonition first; the role is the same one
             // the AsciiDoc fold writes, so both formats land together.
@@ -744,7 +758,7 @@ impl Walk<'_, '_> {
             marker,
             depth,
             enumerated,
-            role,
+            task,
             emitted,
         }) = self.captures.last_mut()
         else {
@@ -758,7 +772,6 @@ impl Walk<'_, '_> {
         let (text, spans) = inline.take();
         let block = Block {
             label: pb::BlockLabel::ListItem,
-            role: std::mem::take(role),
             text,
             enumerated: *enumerated,
             marker: marker.clone(),
@@ -766,9 +779,10 @@ impl Walk<'_, '_> {
             hyperlink,
             source_line: Some(*line),
             spans,
+            task_state: task.take(),
             ..Block::default()
         };
-        self.emitter.text_block(block)
+        self.emit(block)
     }
 
     /// Close the table row being collected, header or body.

@@ -216,6 +216,10 @@ pub struct Block {
     pub anchor_id: Option<String>,
     /// The callout kind the source marks the block as.
     pub admonition: Option<pb::AdmonitionKind>,
+    /// For list items: the checkbox the source put on the item.
+    pub task_state: Option<pb::TaskState>,
+    /// For quotes: nesting depth of the quotation, starting at 1.
+    pub quote_depth: Option<u32>,
 }
 
 /// A cue the WebVTT fold hands to [`Emitter::cue`]: every field of a
@@ -364,6 +368,8 @@ impl<'a> Emitter<'a> {
             spans,
             anchor_id: block.anchor_id,
             admonition: block.admonition.unwrap_or(pb::AdmonitionKind::Unspecified) as i32,
+            task_state: block.task_state.unwrap_or(pb::TaskState::Unspecified) as i32,
+            quote_depth: block.quote_depth,
         }))
     }
 

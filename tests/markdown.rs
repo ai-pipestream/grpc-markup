@@ -278,8 +278,8 @@ async fn task_list_items_record_their_checkbox_in_role() {
     .await;
     let items = blocks_labelled(&events, pb::BlockLabel::ListItem);
     assert_eq!(texts(&items), ["shipped", "pending"]);
-    assert_eq!(items[0].role, "task-item-checked");
-    assert_eq!(items[1].role, "task-item");
+    assert_eq!(items[0].task_state, pb::TaskState::Checked as i32);
+    assert_eq!(items[1].task_state, pb::TaskState::Unchecked as i32);
 }
 
 #[tokio::test]
@@ -708,5 +708,22 @@ async fn table_alignment_and_cell_runs_reach_the_wire() {
         body.cells[1].spans[0].hyperlink.as_deref(),
         Some("https://b.example"),
         "a link inside a cell is no longer flattened away"
+    );
+}
+
+#[tokio::test]
+async fn a_nested_quotation_states_how_deep_each_paragraph_sat() {
+    let client = client().await;
+    let markdown = "> Première.\n>\n> > Deuxième, plus profonde.\n\nDehors.\n";
+    let events = parse_ok(&client, markdown, options(pb::MarkupFormat::Markdown)).await;
+    let quotes = blocks_labelled(&events, pb::BlockLabel::Quote);
+    assert_eq!(texts(&quotes), ["Première.", "Deuxième, plus profonde."]);
+    assert_eq!(quotes[0].quote_depth, Some(1));
+    assert_eq!(quotes[1].quote_depth, Some(2), "a quote inside a quote");
+    let outside = blocks_labelled(&events, pb::BlockLabel::Paragraph);
+    assert_eq!(texts(&outside), ["Dehors."]);
+    assert!(
+        outside[0].quote_depth.is_none(),
+        "a depth of zero is not a quotation nested zero deep"
     );
 }
