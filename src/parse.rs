@@ -220,6 +220,9 @@ pub struct Block {
     pub task_state: Option<pb::TaskState>,
     /// For quotes: nesting depth of the quotation, starting at 1.
     pub quote_depth: Option<u32>,
+    /// The source form behind `text`, when the text is a projection of
+    /// markup this build does not parse.
+    pub raw: Option<String>,
 }
 
 /// An image reference a fold hands to [`Emitter::image`]: every field of a
@@ -406,6 +409,7 @@ impl<'a> Emitter<'a> {
             admonition: block.admonition.unwrap_or(pb::AdmonitionKind::Unspecified) as i32,
             task_state: block.task_state.unwrap_or(pb::TaskState::Unspecified) as i32,
             quote_depth: block.quote_depth,
+            raw: block.raw,
         }))
     }
 

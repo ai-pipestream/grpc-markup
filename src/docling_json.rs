@@ -947,6 +947,7 @@ impl Project<'_, '_> {
                         hyperlink: base.hyperlink.clone(),
                         spans: wire_spans(&base.spans),
                         admonition: wire_admonition(base.admonition_kind.as_ref()),
+                        raw: base.raw.clone(),
                         ..Block::default()
                     },
                     base.children.clone(),

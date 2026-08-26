@@ -503,6 +503,12 @@ message TextBlock {
   // an ordinary list.
   TaskState task_state = 16;
 
+  // The source form behind `text`, when the text is a projection of markup
+  // this build does not parse: the verbatim bytes of an HTML block inside a
+  // Markdown document, whose tags were flattened away. Absent for a block
+  // whose text is the source's own words.
+  optional string raw = 18;
+
   // How deep inside a block quotation this block sat, starting at 1 for a
   // top-level quote. Absent for a block outside every quotation: a depth of
   // zero is not a quotation nested zero deep.

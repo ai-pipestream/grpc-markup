@@ -108,7 +108,7 @@ tree branches on format.
 | Image | `ImageBlock` with `src`, `alt`, `title` as written |
 | Footnote definition | `BLOCK_LABEL_FOOTNOTE`, `role` and `anchor_id` = the label; a reference is a superscript span over the label carrying the key |
 | Display math | `BLOCK_LABEL_FORMULA`, verbatim |
-| HTML block / inline HTML | flattened to text (`role: "html"` for blocks) + `WARNING_CODE_EMBEDDED_HTML_FLATTENED` |
+| HTML block / inline HTML | flattened to text (`role: "html"` for blocks) + `WARNING_CODE_EMBEDDED_HTML_FLATTENED`; a block also keeps its own markup verbatim in `raw`, so the flattening is reported *and* recoverable |
 | Thematic break | nothing + `WARNING_CODE_UNMAPPED_CONSTRUCT` |
 
 `source_line` on every block comes from the offset iterator, mapped to
@@ -364,6 +364,10 @@ Carried across from the typed wire, into slots the schema already had:
   (`width=50%,height=5cm`, `width=0.8\textwidth`), which is verbatim what a
   LaTeX option list wrote and a faithful transcription of what two HTML
   attributes said, and is what keeps a lone dimension unambiguous.
+- A block's `raw` becomes `TextItemBase.raw`, the block-level twin of the
+  `InlineSpan.raw` the schema already had for "the rendered text is a
+  projection of this". Only a flattened HTML block carries one; prose is
+  not a projection of anything.
 - A block's `source_line` becomes a `ProvenanceItem` carrying a
   `LineSpan`, on text items, pictures and tables alike. The wire states
   where a block begins and not where it ends, so the range is the one line
@@ -397,8 +401,9 @@ Dropped or demoted per format, deliberately:
   is a `TEXT` item under a quotation group with the quotation fact also on
   the item's custom fields, which is what an item read on its own can say; an unknown code language
   survives only as `code_language_raw`; image `alt` / `title` become custom
-  fields, not caption items; thematic breaks and the raw text of HTML tags
-  are gone entirely (warned on the trailer).
+  fields, not caption items; thematic breaks are gone entirely (warned on
+  the trailer), and an HTML block's own markup is kept in `raw` rather
+  than lost with its tags.
 - **VTT:** cue order is document order, the cue's own timings live in the
   `TrackSource` and its karaoke segments in `prov` as `TimeSpan`s with the
   `charspan` they cover; skipped NOTE/STYLE/REGION content never reaches the

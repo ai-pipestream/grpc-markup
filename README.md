@@ -96,7 +96,7 @@ event kind.
 | Event | Carries |
 |---|---|
 | `info` | `MarkupInfo`: resolved format and the evidence for it, declared title, document metadata as a typed `MetaValue` tree holding the shape the source declared (front matter as its own tree, header lines as scalars) |
-| `text_block` | One unit of text: title, section header, paragraph, list item, code, formula, caption, quote, footnote. `role` is an open refinement (`html`, `admonition`, a footnote label); `spans` are the runs inside the text, `anchor_id` the anchor the block declares, `admonition` the callout kind, `task_state` a list item's checkbox, `quote_depth` how deep a quotation sat |
+| `text_block` | One unit of text: title, section header, paragraph, list item, code, formula, caption, quote, footnote. `role` is an open refinement (`html`, `admonition`, a footnote label); `spans` are the runs inside the text, `anchor_id` the anchor the block declares, `admonition` the callout kind, `task_state` a list item's checkbox, `quote_depth` how deep a quotation sat, `raw` the markup behind a flattened HTML block |
 | `table_start` / `table_row` / `table_end` | A table, streamed a row at a time, header rows and cells flagged, column and row spans carried, the source's declared column geometry on `table_start`, and each cell's own alignment and inline runs |
 | `image` | One image reference — `src`, `alt`, `title` as written, the `width`/`height` the document asks for verbatim in the author's own units, and the `anchor_id` the source names on the image itself. Never dereferenced, so never measured |
 | `cue` | One WebVTT cue: identifier, timings in milliseconds, speaker, flattened text, the `spans` its styling, class and language tags left, and the `timings` its karaoke timestamps cut it into |

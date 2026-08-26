@@ -476,6 +476,7 @@ impl DocumentFold {
             source: vec![self.collector_source()],
             spans: doc_spans(&block.spans),
             admonition_kind: admonition_name(block.admonition).map(str::to_owned),
+            raw: block.raw.clone(),
             ..doc::TextItemBase::default()
         }
     }

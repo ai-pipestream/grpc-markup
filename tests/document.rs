@@ -1064,3 +1064,22 @@ async fn a_code_block_keeps_its_line_even_though_it_inlines_its_base() {
         "CodeItem inlines its base fields, so prov has to be carried by hand"
     );
 }
+
+#[tokio::test]
+async fn the_raw_markup_behind_a_projected_block_reaches_the_document() {
+    let client = client().await;
+    let markdown = "<div class=\"note\"><b>Café</b> λόγος</div>\n";
+    let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+    let Some(doc::base_text_item::Item::Text(item)) = folded.texts[0].item.as_ref() else {
+        panic!("the flattened block is a text item");
+    };
+    let base = item.base.as_ref().unwrap();
+    assert_eq!(base.text, "Café λόγος");
+    assert_eq!(
+        base.raw.as_deref(),
+        Some("<div class=\"note\"><b>Café</b> λόγος</div>"),
+        "the block-level twin of the run-level raw the schema already had"
+    );
+}

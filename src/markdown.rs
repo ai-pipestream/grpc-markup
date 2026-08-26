@@ -652,6 +652,11 @@ impl Walk<'_, '_> {
                         role: "html".to_owned(),
                         text,
                         source_line: Some(line),
+                        // The tags are gone from the text, and the bytes
+                        // that carried them are not: a consumer that wants
+                        // the markup back is handed it rather than told it
+                        // was dropped.
+                        raw: Some(buf.trim().to_owned()),
                         ..Block::default()
                     })?;
                 }

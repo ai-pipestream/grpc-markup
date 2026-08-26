@@ -808,3 +808,32 @@ async fn a_hard_break_survives_the_collapsing_as_the_break_it_is() {
         "a break the author demanded is a newline; a soft wrap is a space"
     );
 }
+
+#[tokio::test]
+async fn a_flattened_html_block_hands_back_the_markup_it_flattened() {
+    let client = client().await;
+    let markdown = "Avant.\n\n<div class=\"note\"><b>Café</b> λόγος</div>\n\nAprès.\n";
+    let events = parse_ok(&client, markdown, options(pb::MarkupFormat::Markdown)).await;
+    let html = text_blocks(&events)
+        .into_iter()
+        .find(|block| block.role == "html")
+        .expect("the HTML block");
+    assert_eq!(
+        html.text, "Café λόγος",
+        "the tags are still gone from the text"
+    );
+    assert_eq!(
+        html.raw.as_deref(),
+        Some("<div class=\"note\"><b>Café</b> λόγος</div>"),
+        "and the bytes that carried them are handed back verbatim"
+    );
+    assert!(
+        warning(&events, pb::WarningCode::EmbeddedHtmlFlattened).is_some(),
+        "flattening is still reported; it is now recoverable as well"
+    );
+    for block in text_blocks(&events) {
+        if block.role != "html" {
+            assert!(block.raw.is_none(), "prose is not a projection of anything");
+        }
+    }
+}
