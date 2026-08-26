@@ -319,9 +319,11 @@ impl Walk<'_, '_> {
                 self.emitter.warn(pb::WarningCode::UnmappedConstruct, "hr");
                 Ok(())
             }
+            // A break the author wrote is a line break, not a word
+            // boundary the collapsing may swallow.
             "br" => {
                 if let Some(buffer) = self.buffer.as_mut() {
-                    buffer.space();
+                    buffer.push_verbatim("\n");
                 }
                 Ok(())
             }
@@ -876,7 +878,7 @@ fn cell_children(element: &ElementRef<'_>, inline: &mut Inline) {
                     continue;
                 }
                 if name == "br" {
-                    inline.space();
+                    inline.push_verbatim("\n");
                     continue;
                 }
                 let link = (name == "a").then(|| link_mark(&child)).flatten();

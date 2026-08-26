@@ -796,3 +796,15 @@ async fn a_toml_preamble_sniffs_as_markdown_and_a_broken_one_warns() {
         "and it is still not emitted as prose"
     );
 }
+
+#[tokio::test]
+async fn a_hard_break_survives_the_collapsing_as_the_break_it_is() {
+    let client = client().await;
+    let markdown = "Première ligne\\\nseconde ligne\n\nPremière\nseconde\n";
+    let events = parse_ok(&client, markdown, options(pb::MarkupFormat::Markdown)).await;
+    assert_eq!(
+        texts(&blocks_labelled(&events, pb::BlockLabel::Paragraph)),
+        ["Première ligne\nseconde ligne", "Première seconde"],
+        "a break the author demanded is a newline; a soft wrap is a space"
+    );
+}

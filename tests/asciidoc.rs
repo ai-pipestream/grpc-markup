@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    blocks_labelled, client, images, info, meta_scalar, options, parse_ok, sniff_options, status,
-    styles, table_rows, texts, warning,
+    blocks_labelled, client, document, images, info, meta_scalar, options, parse_ok, sniff_options,
+    status, styles, table_rows, text_blocks, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -321,4 +321,84 @@ CAUTION: Take care.
         "the marker was matched to be stripped; the kind now survives it"
     );
     assert_eq!(texts(&paragraphs), ["A note.", "A warning.", "Take care."]);
+}
+
+/// A document naming its blocks the way AsciiDoc does, over multi-byte
+/// text so a range that is right in bytes and wrong in code points fails.
+const ANCHORED: &str = "\
+= Le café
+
+[[préparation]]
+== Préparation
+
+Le café [[goût]] est prêt.
+
+[[étapes]]
+* moudre
+";
+
+#[tokio::test]
+async fn an_anchor_line_names_the_block_below_it() {
+    let client = client().await;
+    let events = parse_ok(&client, ANCHORED, options(pb::MarkupFormat::Asciidoc)).await;
+    let headers = blocks_labelled(&events, pb::BlockLabel::SectionHeader);
+    assert_eq!(texts(&headers), ["Préparation"]);
+    assert_eq!(headers[0].anchor_id.as_deref(), Some("préparation"));
+    let items = blocks_labelled(&events, pb::BlockLabel::ListItem);
+    assert_eq!(items[0].anchor_id.as_deref(), Some("étapes"));
+    assert!(
+        !texts(&text_blocks(&events))
+            .iter()
+            .any(|text| text.contains("[[")),
+        "an anchor line is never prose"
+    );
+}
+
+#[tokio::test]
+async fn an_inline_anchor_leaves_a_run_where_it_stood() {
+    let client = client().await;
+    let events = parse_ok(&client, ANCHORED, options(pb::MarkupFormat::Asciidoc)).await;
+    let paragraph = blocks_labelled(&events, pb::BlockLabel::Paragraph)
+        .into_iter()
+        .find(|block| block.text.starts_with("Le café"))
+        .expect("the paragraph");
+    assert_eq!(paragraph.text, "Le café  est prêt.");
+    assert_eq!(paragraph.spans.len(), 1);
+    assert_eq!(paragraph.spans[0].anchor_id.as_deref(), Some("goût"));
+    let range = paragraph.spans[0].range.expect("a range");
+    assert_eq!(
+        (range.start, range.end),
+        (8, 8),
+        "an anchor names a position, counted in code points"
+    );
+}
+
+#[tokio::test]
+async fn asciidoc_anchors_reach_the_document_anchor_list() {
+    let client = client().await;
+    let with_document = pb::ParseOptions {
+        format: pb::MarkupFormat::Asciidoc as i32,
+        emit_document: true,
+        ..pb::ParseOptions::default()
+    };
+    let events = parse_ok(&client, ANCHORED, with_document).await;
+    let folded = document(&events).expect("the fold was requested");
+    let named: Vec<&str> = folded
+        .anchors
+        .iter()
+        .map(|anchor| anchor.name.as_str())
+        .collect();
+    assert_eq!(named, ["goût", "préparation", "étapes"]);
+    let inline = folded
+        .anchors
+        .iter()
+        .find(|anchor| anchor.name == "goût")
+        .expect("the inline anchor");
+    let target = inline.target.as_ref().expect("a target");
+    assert!(target.r#ref.starts_with("#/texts/"));
+    assert_eq!(
+        target.range.map(|range| (range.start, range.end)),
+        Some((8, 8)),
+        "the pointer keeps the position the run named"
+    );
 }

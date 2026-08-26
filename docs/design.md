@@ -95,6 +95,7 @@ tree branches on format.
 | Every other heading | `BLOCK_LABEL_SECTION_HEADER` with the Markdown level |
 | Paragraph | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; `hyperlink` when the whole paragraph is one link, and one `InlineSpan` per formatted, linked or referring run |
 | Emphasis, strong, strikethrough, sub/superscript | span styles over the run they cover |
+| Hard line break (`\\` or two trailing spaces) | a `\n` in the block's text; a soft wrap stays a space |
 | Inline code, inline math | span styles; math also keeps its source notation in `raw` |
 | Inline link | a span with `hyperlink` and the link title, whether or not the block is one link |
 | Heading attribute `{#id}` | `TextBlock.anchor_id` |
@@ -137,6 +138,7 @@ scope by construction.
 | `img`, `figure`/`figcaption` | `ImageBlock` (`src`/`alt`/`title` verbatim), the figcaption as a following `CAPTION` block |
 | `details` | descended; its `summary` keeps its role |
 | `script`, `style`, `head`, `template`, form controls, media embeds | never text |
+| `br` | a `\n` in the enclosing block's text, cells included |
 | `hr` | nothing + `WARNING_CODE_UNMAPPED_CONSTRUCT` |
 | any element without a mapping | text flattened into the enclosing block + one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per element name |
 
@@ -165,12 +167,14 @@ blocks, attribute entries, admonitions).
 | `*`/`**`/`.`/`..`/`-`/`1.` items | `BLOCK_LABEL_LIST_ITEM`, nesting by marker repetition, `enumerated` for dot and numbered markers, marker verbatim |
 | `|===` blocks | streamed table; each row is a line whose cells split on `|`, with the cell specifier before each `|` honoured: `2+`/`2.3+` as `column_span`/`row_span`, `<`/`^`/`>` and their `.`-prefixed forms as `align`/`valign`, `3*` applying one specifier to the cells that follow, `h` marking a header cell and `e`/`s`/`m`/`l` putting a run over the cell text. A row may open with a specifier instead of a `|`. First row flagged as header; a preceding `.Caption` lands on `TableStart` |
 | `[source,lang]` + `----` fences | `BLOCK_LABEL_CODE`, verbatim, with the declared language; an unclosed fence keeps its content and warns `MALFORMED_STRUCTURE` |
+| `[[id]]` / `[[id,reftext]]` | on its own line, the `anchor_id` of the block below it; inside a paragraph, taken out of the text and left as an empty-range anchor run at the position it stood. The reference text is not the name and is dropped: this plane has no slot for a phrase a renderer would substitute |
 | `image::path[alt, k=v]` | `ImageBlock` with the path verbatim (no `file:` URI rewriting — this service never dereferences); a pending `.Caption` follows as a `CAPTION` block |
 
 Deliberately skipped where the format is richer than this fold: block
 quotes (`____`), sidebars (`****`), literal blocks (`....`),
 description lists, includes and conditional directives, inline
-formatting, and comment lines (`//` lines join paragraphs as text). Two
+formatting other than anchors, and comment lines (`//` lines join
+paragraphs as text). Two
 choices made deliberately, both kinder to the author: nesting follows
 marker depth (`**`) rather than leading indentation, and single-cell `|`
 rows inside `|===` are kept.

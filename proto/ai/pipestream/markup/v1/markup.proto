@@ -442,8 +442,11 @@ message TextBlock {
   // The block's text: inline markup flattened away, entity and escape
   // sequences decoded, runs of whitespace collapsed except inside
   // `BLOCK_LABEL_CODE` and `BLOCK_LABEL_FORMULA`, which keep their text
-  // verbatim. Never empty. What the flattening removed is described by
-  // `spans`, whose ranges index this string.
+  // verbatim. A hard line break the source demands (a Markdown `\\` or
+  // two-space break, an HTML `<br>`) survives the collapsing as a `\n`,
+  // because the author asked for a break rather than for whitespace.
+  // Never empty. What the flattening removed is described by `spans`,
+  // whose ranges index this string.
   string text = 4;
 
   // Heading depth for `BLOCK_LABEL_SECTION_HEADER`, starting at 1. Absent

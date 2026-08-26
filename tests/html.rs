@@ -580,3 +580,20 @@ async fn an_image_carries_the_dimensions_the_document_asks_for() {
     );
     assert!(images[1].height.is_none());
 }
+
+#[tokio::test]
+async fn a_br_is_a_line_break_and_not_a_swallowed_word_boundary() {
+    let client = client().await;
+    let html = "<body><p>Première ligne<br>seconde ligne</p>\
+<table><tr><td>haut<br>bas</td></tr></table></body>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    assert_eq!(
+        texts(&blocks_labelled(&events, pb::BlockLabel::Paragraph)),
+        ["Première ligne\nseconde ligne"]
+    );
+    assert_eq!(
+        table_rows(&events)[0].cells[0].text,
+        "haut\nbas",
+        "a cell flattens through the same path"
+    );
+}

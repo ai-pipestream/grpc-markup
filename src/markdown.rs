@@ -411,9 +411,17 @@ impl Walk<'_, '_> {
                     .with_style(pb::SpanStyle::Superscript);
                 self.marked(&label, mark);
             }
-            Event::SoftBreak | Event::HardBreak => {
+            Event::SoftBreak => {
                 if let Some(inline) = self.top_inline() {
                     inline.space();
+                }
+            }
+            // A hard break is a line break the author demanded, not
+            // whitespace the source happens to contain, so it survives
+            // collapsing as the newline it is.
+            Event::HardBreak => {
+                if let Some(inline) = self.top_inline() {
+                    inline.push_verbatim("\n");
                 }
             }
             Event::Rule => self

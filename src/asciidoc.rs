@@ -34,6 +34,9 @@
 //!   `.Caption` follows it as a `CAPTION` block.
 //! - `----` fences a listing block, kept verbatim as `BLOCK_LABEL_CODE`;
 //!   a `[source,lang]` attribute line before it declares the `language`.
+//! - `[[id]]` on its own line names the block below it; `[[id]]` inside a
+//!   paragraph comes out of the text and stays as an anchor run at the
+//!   position it stood.
 
 use std::collections::HashMap;
 
@@ -79,6 +82,7 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         paragraph_line: 0,
         caption: None,
         pending_language: None,
+        pending_anchor: None,
         in_table: false,
         table_row_index: 0,
         listing: None,
@@ -200,6 +204,67 @@ fn table_row(line: &str) -> Option<(Option<CellSpec>, &str)> {
         Some(parse_cell_spec(head)?)
     };
     Some((lead, &line[pipe + 1..]))
+}
+
+/// The id an anchor line declares, when the whole line is one anchor.
+///
+/// AsciiDoc writes `[[id]]` or `[[id,reference text]]` on its own line to
+/// name the block below it. The reference text is the phrase a cross
+/// reference renders when it has none of its own, which this plane has no
+/// slot for and no renderer to use it in; the id is the name, and the name
+/// is what an anchor is.
+fn anchor_line(line: &str) -> Option<String> {
+    anchor_id(line.trim())
+}
+
+/// The id inside one `[[...]]` form, or nothing when the text is not one.
+fn anchor_id(text: &str) -> Option<String> {
+    let inner = text.strip_prefix("[[")?.strip_suffix("]]")?;
+    let id = inner.split(',').next()?.trim();
+    (!id.is_empty() && !id.contains([' ', '[', ']'])).then(|| id.to_owned())
+}
+
+/// Take every inline `[[id]]` out of a paragraph, returning the text
+/// without them and one anchor run per removal.
+///
+/// An anchor names a position, not a run, so its range is empty: it starts
+/// and ends where the anchor stood. That is what the source says, and
+/// widening it to the word that follows would be this fold guessing at a
+/// span the author never wrote.
+fn take_anchors(text: &str) -> (String, Vec<pb::InlineSpan>) {
+    let mut out = String::with_capacity(text.len());
+    let mut spans = Vec::new();
+    let mut chars = 0u32;
+    let mut rest = text;
+    while let Some(at) = rest.find("[[") {
+        let (before, tail) = rest.split_at(at);
+        out.push_str(before);
+        chars += u32::try_from(before.chars().count()).unwrap_or(0);
+        match tail
+            .find("]]")
+            .and_then(|end| anchor_id(&tail[..end + 2]).map(|id| (id, end + 2)))
+        {
+            Some((id, end)) => {
+                spans.push(pb::InlineSpan {
+                    range: Some(pb::IntRange {
+                        start: chars,
+                        end: chars,
+                    }),
+                    anchor_id: Some(id),
+                    ..pb::InlineSpan::default()
+                });
+                rest = &tail[end..];
+            }
+            // Not an anchor: `[[` is two ordinary brackets.
+            None => {
+                out.push_str("[[");
+                chars += 2;
+                rest = &tail[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    (out, spans)
 }
 
 /// True for a listing-block fence: a line of four or more dashes.
@@ -367,6 +432,8 @@ struct Walk<'w, 'e> {
     caption: Option<String>,
     /// The language of a `[source,lang]` line waiting for its listing.
     pending_language: Option<String>,
+    /// The id a `[[id]]` line declared, waiting for the block it names.
+    pending_anchor: Option<String>,
     in_table: bool,
     table_row_index: u32,
     listing: Option<Listing>,
@@ -395,6 +462,12 @@ impl Walk<'_, '_> {
         if let Some(language) = source_attribute(line) {
             self.flush_paragraph()?;
             self.pending_language = language;
+            return Ok(());
+        }
+
+        if let Some(id) = anchor_line(line) {
+            self.flush_paragraph()?;
+            self.pending_anchor = Some(id);
             return Ok(());
         }
 
@@ -449,6 +522,7 @@ impl Walk<'_, '_> {
                 text,
                 level,
                 source_line: Some(line_no),
+                anchor_id: self.pending_anchor.take(),
                 ..Block::default()
             });
         }
@@ -462,6 +536,7 @@ impl Walk<'_, '_> {
                 marker: Some(marker),
                 list_depth: Some(depth),
                 source_line: Some(line_no),
+                anchor_id: self.pending_anchor.take(),
                 ..Block::default()
             });
         }
@@ -592,12 +667,17 @@ impl Walk<'_, '_> {
         if text.is_empty() {
             return Ok(());
         }
+        // The anchors come out after the admonition marker, so their
+        // positions index the text the block actually carries.
+        let (text, spans) = take_anchors(&text);
         self.emitter.text_block(Block {
             label: pb::BlockLabel::Paragraph,
             role,
             text,
             source_line: Some(self.paragraph_line),
+            spans,
             admonition,
+            anchor_id: self.pending_anchor.take(),
             ..Block::default()
         })
     }
@@ -614,6 +694,7 @@ impl Walk<'_, '_> {
             text: text.to_owned(),
             language: listing.language,
             source_line: Some(listing.line),
+            anchor_id: self.pending_anchor.take(),
             ..Block::default()
         })
     }
@@ -761,6 +842,45 @@ mod tests {
         assert_eq!(row, "Name |Role");
 
         assert!(table_row("layout between rows").is_none());
+    }
+
+    #[test]
+    fn an_anchor_line_is_recognized_and_prose_brackets_are_not() {
+        assert_eq!(anchor_line("[[intro]]").as_deref(), Some("intro"));
+        assert_eq!(
+            anchor_line("[[intro,Introduction générale]]").as_deref(),
+            Some("intro"),
+            "the reference text is not the name"
+        );
+        assert_eq!(anchor_line("  [[intro]]  ").as_deref(), Some("intro"));
+        assert_eq!(anchor_line("[[ ]]"), None);
+        assert_eq!(anchor_line("[[a b]]"), None);
+        assert_eq!(anchor_line("voir [[intro]] plus bas"), None);
+    }
+
+    #[test]
+    fn inline_anchors_come_out_of_the_text_at_the_position_they_stood() {
+        let (text, spans) = take_anchors("Le café [[goût]] est prêt [[fin]]");
+        assert_eq!(text, "Le café  est prêt ");
+        assert_eq!(spans.len(), 2);
+        let first = spans[0].range.expect("a range");
+        assert_eq!(
+            (first.start, first.end),
+            (8, 8),
+            "an anchor names a position, and the offsets count code points"
+        );
+        assert_eq!(spans[0].anchor_id.as_deref(), Some("goût"));
+        let second = spans[1].range.expect("a range");
+        assert_eq!((second.start, second.end), (18, 18));
+        assert_eq!(spans[1].anchor_id.as_deref(), Some("fin"));
+    }
+
+    #[test]
+    fn brackets_that_are_not_an_anchor_stay_in_the_text() {
+        let (text, spans) = take_anchors("un tableau [[1]] et [[a b]] et [[ouvert");
+        assert_eq!(text, "un tableau  et [[a b]] et [[ouvert");
+        assert_eq!(spans.len(), 1, "only the well-formed id is an anchor");
+        assert_eq!(spans[0].anchor_id.as_deref(), Some("1"));
     }
 
     #[test]
