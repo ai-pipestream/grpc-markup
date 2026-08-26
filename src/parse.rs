@@ -239,6 +239,23 @@ pub struct Image {
     pub width: Option<String>,
     /// The height the source declares, verbatim in its own units.
     pub height: Option<String>,
+    /// The anchor the source declares on the image itself.
+    pub anchor_id: Option<String>,
+}
+
+/// A table a fold hands to [`Emitter::table_start`]: every field of a
+/// [`pb::TableStart`] the fold decides, with the stream index, the
+/// `table_ref` and the provenance left to the emitter.
+#[derive(Debug, Clone, Default)]
+pub struct Table {
+    /// Caption text, when the source carries one before the table body.
+    pub caption: Option<String>,
+    /// One-based source line of the table's first row, when tracked.
+    pub source_line: Option<u32>,
+    /// The column geometry the source declares, in column order.
+    pub columns: Vec<pb::ColumnSpec>,
+    /// The anchor the source declares on the table itself.
+    pub anchor_id: Option<String>,
 }
 
 /// A cue the WebVTT fold hands to [`Emitter::cue`]: every field of a
@@ -397,25 +414,7 @@ impl<'a> Emitter<'a> {
     /// # Errors
     ///
     /// [`ParseError::ConsumerGone`] when the client stopped reading.
-    pub fn table_start(
-        &mut self,
-        caption: Option<String>,
-        source_line: Option<u32>,
-    ) -> Result<String, ParseError> {
-        self.table_start_with_columns(caption, source_line, Vec::new())
-    }
-
-    /// Open a table whose source declares its column geometry.
-    ///
-    /// # Errors
-    ///
-    /// [`ParseError::ConsumerGone`] when the client stopped reading.
-    pub fn table_start_with_columns(
-        &mut self,
-        caption: Option<String>,
-        source_line: Option<u32>,
-        columns: Vec<pb::ColumnSpec>,
-    ) -> Result<String, ParseError> {
+    pub fn table_start(&mut self, table: Table) -> Result<String, ParseError> {
         let table_ref = format!("t{}", self.tables_opened);
         self.tables_opened += 1;
         let index = self.next_index();
@@ -425,10 +424,11 @@ impl<'a> Emitter<'a> {
             pb::TableStart {
                 index,
                 table_ref: table_ref.clone(),
-                caption,
-                source_line,
+                caption: table.caption,
+                source_line: table.source_line,
                 source: Some(self.source.clone()),
-                columns,
+                columns: table.columns,
+                anchor_id: table.anchor_id,
             },
         ))?;
         Ok(table_ref)
@@ -504,6 +504,7 @@ impl<'a> Emitter<'a> {
             title: image.title,
             source_line: image.source_line,
             source: Some(self.source.clone()),
+            anchor_id: image.anchor_id,
             width: image.width,
             height: image.height,
         }))

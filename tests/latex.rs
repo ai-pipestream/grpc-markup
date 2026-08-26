@@ -5,9 +5,11 @@
 mod common;
 
 use common::{
-    blocks_labelled, client, images, info, options, parse, parse_ok, sniff_options, spanned,
-    status, styles, table_rows, table_starts, texts, warning,
+    blocks_labelled, client, document, images, info, options, parse, parse_ok, sniff_options,
+    spanned, status, styles, table_rows, table_starts, texts, warning,
 };
+use grpc_markup::document::v1 as doc;
+use grpc_markup::document_fold::integrity_errors;
 use grpc_markup::proto::v1 as pb;
 
 /// A document exercising the preamble (skipped machinery, surfaced
@@ -532,4 +534,82 @@ async fn includegraphics_options_carry_the_declared_size() {
     );
     assert_eq!(images[0].height.as_deref(), Some("3cm"));
     assert!(images[1].width.is_none() && images[1].height.is_none());
+}
+
+/// A document with both floats, each labelled after its caption, which is
+/// where LaTeX authors put a label and where it used to be claimed by the
+/// wrong block.
+const FLOATS: &str = "\\documentclass{article}\n\\begin{document}\n\
+Voir la figure~\\ref{fig:schéma} et le tableau~\\ref{tab:résultats}.\n\n\
+\\begin{figure}\n\\includegraphics{figures/schéma.png}\n\
+\\caption{Le schéma}\n\\label{fig:schéma}\n\\end{figure}\n\n\
+\\begin{table}\n\\begin{tabular}{lr}\nA & 1 \\\\\n\\end{tabular}\n\
+\\caption{Les résultats}\n\\label{tab:résultats}\n\\end{table}\n\
+\\end{document}\n";
+
+#[tokio::test]
+async fn a_float_label_names_the_float_and_not_its_caption() {
+    let client = client().await;
+    let events = parse_ok(&client, FLOATS, options(pb::MarkupFormat::Latex)).await;
+
+    assert_eq!(images(&events)[0].anchor_id.as_deref(), Some("fig:schéma"));
+    assert_eq!(
+        table_starts(&events)[0].anchor_id.as_deref(),
+        Some("tab:résultats")
+    );
+    for caption in blocks_labelled(&events, pb::BlockLabel::Caption) {
+        assert!(
+            caption.anchor_id.is_none(),
+            "the caption used to claim the float's label: {caption:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_reference_reads_its_kind_off_what_it_resolved_to() {
+    let client = client().await;
+    let with_document = pb::ParseOptions {
+        format: pb::MarkupFormat::Latex as i32,
+        emit_document: true,
+        ..pb::ParseOptions::default()
+    };
+    let events = parse_ok(&client, FLOATS, with_document).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+
+    let spans: Vec<&doc::InlineSpan> = folded
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref()? {
+            doc::base_text_item::Item::Text(text) => text.base.as_ref(),
+            _ => None,
+        })
+        .flat_map(|base| base.spans.iter())
+        .filter(|span| span.reference.is_some())
+        .collect();
+    assert_eq!(spans.len(), 2);
+
+    let figure = spans
+        .iter()
+        .find(|span| span.reference.as_deref() == Some("fig:schéma"))
+        .expect("the figure reference");
+    assert_eq!(
+        figure.target.as_ref().map(|target| target.r#ref.as_str()),
+        Some("#/pictures/0")
+    );
+    assert_eq!(
+        figure.reference_kind,
+        Some(doc::ReferenceKind::Figure as i32),
+        "the kind is read off the item, not guessed from the key's spelling"
+    );
+
+    let table = spans
+        .iter()
+        .find(|span| span.reference.as_deref() == Some("tab:résultats"))
+        .expect("the table reference");
+    assert_eq!(
+        table.target.as_ref().map(|target| target.r#ref.as_str()),
+        Some("#/tables/0")
+    );
+    assert_eq!(table.reference_kind, Some(doc::ReferenceKind::Table as i32));
 }

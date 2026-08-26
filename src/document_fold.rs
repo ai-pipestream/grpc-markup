@@ -231,12 +231,7 @@ impl DocumentFold {
             let Some(target) = self.anchors.get(&key).cloned() else {
                 continue;
             };
-            // A bare cross reference that lands on a formula is an equation
-            // reference. That is read off the item it resolved to, not
-            // guessed from how the author spelled the key.
-            let resolved_kind = self
-                .is_formula(&target.r#ref)
-                .then_some(doc::ReferenceKind::Equation as i32);
+            let resolved_kind = self.resolved_kind(&target.r#ref);
             for span in self.spans_at(site) {
                 if span.reference_kind == Some(doc::ReferenceKind::CrossRef as i32)
                     && let Some(kind) = resolved_kind
@@ -291,6 +286,25 @@ impl DocumentFold {
                 .collect()
             }
         }
+    }
+
+    /// What a bare cross reference turns out to point at, read off the item
+    /// it resolved to rather than guessed from how the author spelled the
+    /// key.
+    ///
+    /// A key that lands on a picture is a figure reference and one that
+    /// lands on a table is a table reference, which is why a float's own
+    /// label has to name the float: with the label on the caption, every
+    /// such key resolved to a caption and both kinds stayed unused.
+    fn resolved_kind(&self, self_ref: &str) -> Option<i32> {
+        if self_ref.starts_with("#/pictures/") {
+            return Some(doc::ReferenceKind::Figure as i32);
+        }
+        if self_ref.starts_with("#/tables/") {
+            return Some(doc::ReferenceKind::Table as i32);
+        }
+        self.is_formula(self_ref)
+            .then_some(doc::ReferenceKind::Equation as i32)
     }
 
     /// True when a ref names a formula item.
@@ -707,7 +721,12 @@ impl DocumentFold {
             num_cols: 0,
             columns: start.columns.iter().map(column_schema).collect(),
             cell_refs: Vec::new(),
-            cell_anchors: Vec::new(),
+            cell_anchors: start
+                .anchor_id
+                .iter()
+                .filter(|id| !id.is_empty())
+                .cloned()
+                .collect(),
         });
     }
 
@@ -865,6 +884,13 @@ impl DocumentFold {
                 None
             }
         };
+        if let Some(anchor) = image.anchor_id.as_ref().filter(|id| !id.is_empty()) {
+            // A picture is addressed as a whole; there is no range into it.
+            self.anchors.entry(anchor.clone()).or_insert(doc::FineRef {
+                r#ref: self_ref.clone(),
+                range: None,
+            });
+        }
         self.document.pictures.push(doc::PictureItem {
             self_ref: self_ref.clone(),
             parent: Some(reference(&parent)),
@@ -2179,6 +2205,7 @@ mod tests {
                 source_line: Some(3),
                 source: None,
                 columns: Vec::new(),
+                anchor_id: None,
             },
         ));
         fold_state.consume(&pb::parse_markup_response::Event::TableRow(pb::TableRow {
@@ -2276,6 +2303,7 @@ mod tests {
                 source: None,
                 width: None,
                 height: None,
+                anchor_id: None,
             }),
         ]);
         let picture = &document.pictures[0];

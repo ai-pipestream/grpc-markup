@@ -54,7 +54,7 @@ use pulldown_cmark::{
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
-use crate::parse::{Block, Emitter, Image, ParseError};
+use crate::parse::{Block, Emitter, Image, ParseError, Table};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -506,8 +506,11 @@ impl Walk<'_, '_> {
             Tag::FootnoteDefinition(label) => self.footnotes.push(label.into_string()),
             Tag::Table(alignments) => {
                 let columns = alignments.iter().copied().map(column_spec).collect();
-                self.emitter
-                    .table_start_with_columns(None, Some(line), columns)?;
+                self.emitter.table_start(Table {
+                    source_line: Some(line),
+                    columns,
+                    ..Table::default()
+                })?;
                 self.table = Some(TableState {
                     in_head: false,
                     next_column: 0,

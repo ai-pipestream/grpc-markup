@@ -190,7 +190,7 @@ here, and the mapping covers the constructs below.
 | preamble | skipped; `\title` surfaces as `MarkupInfo.title` and a `BLOCK_LABEL_TITLE` block, `\author`/`\date` as paragraphs with their macro name as `role` |
 | `\section` family | `BLOCK_LABEL_SECTION_HEADER` — levels: part/chapter/section 1, subsection 2, subsubsection 3, paragraph 4, subparagraph 5 |
 | text runs | paragraphs split at blank lines; `\textbf`, `\textit`, `\emph`, `\texttt`, `\underline` and `\textsc` leave the run they cover, `\cite`/`\citep`/`\citet` leave a citation reference per key, `\ref` a cross reference and `\eqref` an equation reference, `\href{u}{t}` and `\url{u}` a link run, `$..$` a math run keeping its TeX, `~` a space, `\%` and friends their character; `%` comments stripped |
-| `\label` | the `anchor_id` of the block it follows (a heading, a caption, a formula) or of the paragraph it sits in |
+| `\label` | the `anchor_id` of the block it follows (a heading, a caption, a formula) or of the paragraph it sits in. Inside a `figure` or `table` float it names the float: the picture's or the table's own `anchor_id`, never the caption beside it, because that is what a `\ref` to a figure means |
 | `\footnote` | a `FOOTNOTE` block whose `anchor_id` the marker run left in the interrupted paragraph points at |
 | `itemize`/`enumerate`/`description` | nested `BLOCK_LABEL_LIST_ITEM`s, `enumerated` for enumerate, description terms as `term: ` lead-ins |
 | `tabular` | table events: the preamble (`{|l|c|p{5cm}|}`) as the table's `columns`, `&` splits cells, `\\` ends rows, rules dropped, `\multicolumn` and `\multirow` as spans |
@@ -335,7 +335,8 @@ Carried across from the typed wire, into slots the schema already had:
   no pointer. `ReferenceKind` carries across arm for arm, with one
   refinement read off the resolution rather than guessed from the key's
   spelling: a bare cross reference that lands on a formula item is an
-  equation reference. Resolution is a pass at the end of the parse, because a document
+  equation reference, one that lands on a picture is a figure reference,
+  and one that lands on a table is a table reference. Resolution is a pass at the end of the parse, because a document
   refers forward as often as backward; a reference whose anchor the document
   never declares keeps no target rather than an invented one.
 - A table cell's runs go through that same pass. A cell cannot name its site

@@ -540,6 +540,11 @@ message TableStart {
   // Empty when the source declares none; shorter than the widest row when
   // the source declares only some.
   repeated ColumnSpec columns = 6;
+
+  // The anchor the source declares on the table itself, as it names it: the
+  // `\label` of a LaTeX `table` float. Absent when the source names none.
+  // A cross reference to a table points here, not at its caption.
+  optional string anchor_id = 7;
 }
 
 // TableCell is one cell of a streamed table row.
@@ -626,6 +631,11 @@ message ImageBlock {
 
   // Provenance, always set.
   CollectorSource source = 6;
+
+  // The anchor the source declares on the image itself, as it names it: the
+  // `\label` of a LaTeX `figure` float. Absent when the source names none.
+  // A cross reference to a figure points here, not at its caption.
+  optional string anchor_id = 9;
 
   // The width the source declares for the image, verbatim in the source's
   // own units: an HTML `width="640"` or `width="50%"`, a LaTeX

@@ -40,7 +40,7 @@
 
 use std::collections::HashMap;
 
-use crate::parse::{Block, Emitter, Image, ParseError, scalar};
+use crate::parse::{Block, Emitter, Image, ParseError, Table, scalar};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -481,7 +481,11 @@ impl Walk<'_, '_> {
             self.in_table = true;
             self.table_row_index = 0;
             let caption = self.caption.take();
-            self.emitter.table_start(caption, Some(line_no))?;
+            self.emitter.table_start(Table {
+                caption,
+                source_line: Some(line_no),
+                ..Table::default()
+            })?;
             return Ok(());
         }
         if self.in_table {

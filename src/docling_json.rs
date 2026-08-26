@@ -34,7 +34,7 @@ use serde_json::Value;
 
 use crate::document::v1 as doc;
 use crate::document_fold::code_language_label;
-use crate::parse::{Block, Emitter, Image, ParseError, scalar};
+use crate::parse::{Block, Emitter, Image, ParseError, Table, scalar};
 use crate::proto::v1 as pb;
 use crate::{COLLECTOR, VERSION};
 
@@ -957,7 +957,10 @@ impl Project<'_, '_> {
                 _ => None,
             }
         });
-        self.emitter.table_start(caption, None)?;
+        self.emitter.table_start(Table {
+            caption,
+            ..Table::default()
+        })?;
         if let Some(data) = table.data.as_ref() {
             for row in &data.grid {
                 if row.cells.is_empty() {

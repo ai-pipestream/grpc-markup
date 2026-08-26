@@ -52,7 +52,7 @@
 use scraper::node::Node;
 use scraper::{ElementRef, Html};
 
-use crate::parse::{Block, Emitter, Image, ParseError, scalar};
+use crate::parse::{Block, Emitter, Image, ParseError, Table, scalar};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -671,8 +671,11 @@ impl Walk<'_, '_> {
         let caption = child_element(element, "caption")
             .map(|caption| collapse(&text_of(&caption)))
             .filter(|caption| !caption.is_empty());
-        self.emitter
-            .table_start_with_columns(caption, None, column_specs(element))?;
+        self.emitter.table_start(Table {
+            caption,
+            columns: column_specs(element),
+            ..Table::default()
+        })?;
 
         // Rows in DOM order, `thead`/`tbody`/`tfoot` unwrapped.
         let mut rows: Vec<ElementRef<'_>> = Vec::new();
@@ -798,6 +801,7 @@ impl Walk<'_, '_> {
             source_line: None,
             width: dimension("width"),
             height: dimension("height"),
+            anchor_id: anchor_of(element),
         })
     }
 }

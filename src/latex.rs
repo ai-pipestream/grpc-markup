@@ -40,7 +40,9 @@
 //!   `\footnote` leaves a marker run where it interrupted the paragraph,
 //!   pointing at the anchor its body carries.
 //! - A `\label` anchors the block it follows (a heading, a caption) or the
-//!   paragraph it sits inside.
+//!   paragraph it sits inside. Inside a `figure` or `table` float it
+//!   anchors the float itself: the picture or the table, never the caption
+//!   that sits beside it, because that is what a `\ref` to a figure means.
 //! - `quote` / `quotation` / `verse` paragraphs are `BLOCK_LABEL_QUOTE`;
 //!   `abstract` opens a level-1 `Abstract` header with `role: "abstract"`;
 //!   theorem environments and `proof` lead with a labelled paragraph;
@@ -56,7 +58,7 @@
 
 use std::collections::HashMap;
 
-use crate::parse::{Block, Emitter, Image, ParseError};
+use crate::parse::{Block, Emitter, Image, ParseError, Table};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -290,6 +292,7 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         macros,
         title_taken: false,
         pending_anchor: None,
+        float_anchor: None,
         footnotes: 0,
     };
     if let Some(text) = title {
@@ -988,6 +991,11 @@ struct Walk<'w, 'e> {
     /// A `\label` seen inside running text, waiting for the block that
     /// text becomes.
     pending_anchor: Option<String>,
+    /// The `\label` of the float being walked. A `figure` or `table`
+    /// environment's label names the float itself, not the caption that
+    /// happens to sit beside it, so it waits for the picture or the table
+    /// rather than being claimed by the block before it.
+    float_anchor: Option<String>,
     /// Footnotes emitted so far, for minting the marker a `\footnote`
     /// leaves behind in the paragraph it interrupts.
     footnotes: u32,
@@ -1190,6 +1198,9 @@ impl Walk<'_, '_> {
                     src: arg_text,
                     width: graphics_option(opt, "width"),
                     height: graphics_option(opt, "height"),
+                    // A \ref to a figure means the figure, so the float's
+                    // own label lands here rather than on its caption.
+                    anchor_id: self.float_anchor.take().or(anchor),
                     ..Image::default()
                 })
             }
@@ -1216,7 +1227,19 @@ impl Walk<'_, '_> {
     ) -> Result<(), ParseError> {
         let base = name.trim_end_matches('*');
         match base {
-            "document" | "subequations" | "table" | "figure" | "center" => self.nodes(body, ctx),
+            "document" | "subequations" | "center" => self.nodes(body, ctx),
+            // A float's `\label` names the float. The label node comes out
+            // of the body so the caption beside it cannot claim it, and the
+            // picture or the table inside takes it instead.
+            "figure" | "figure*" | "table" | "table*" => {
+                let (body, anchor) = take_float_label(body, &self.macros);
+                self.float_anchor = anchor;
+                let result = self.nodes(&body, ctx);
+                // A float with no picture and no table has nothing to
+                // anchor; the key does not leak into the next one.
+                self.float_anchor = None;
+                result
+            }
             "abstract" => {
                 self.emitter.text_block(Block {
                     label: pb::BlockLabel::SectionHeader,
@@ -1438,7 +1461,13 @@ impl Walk<'_, '_> {
                 _ => first,
             });
 
-        self.emitter.table_start_with_columns(None, None, columns)?;
+        self.emitter.table_start(Table {
+            columns,
+            // The float's own label names the table, not the caption that
+            // happens to sit beside it.
+            anchor_id: self.float_anchor.take(),
+            ..Table::default()
+        })?;
         let mut row = RowBuilder::default();
         for node in &body[cells_start..] {
             match node {
@@ -1543,6 +1572,31 @@ impl Walk<'_, '_> {
         };
         self.emitter.text_block(block)
     }
+}
+
+/// Split a float's body from the `\label` that names it.
+///
+/// The label may sit anywhere in the body, and in practice sits after the
+/// caption, which is exactly why it cannot be left there: the caption would
+/// claim it and a `\ref` to the figure would point at its caption text.
+fn take_float_label(
+    body: &[Node],
+    macros: &HashMap<String, String>,
+) -> (Vec<Node>, Option<String>) {
+    let found = body.iter().position(|node| {
+        matches!(node, Node::Macro { name, args, .. }
+            if name == "label" && label_key(args, macros).is_some())
+    });
+    let Some(at) = found else {
+        return (body.to_vec(), None);
+    };
+    let key = match &body[at] {
+        Node::Macro { args, .. } => label_key(args, macros),
+        _ => None,
+    };
+    let mut kept = body.to_vec();
+    kept.remove(at);
+    (kept, key)
 }
 
 /// One key of an `\includegraphics` option list, verbatim.

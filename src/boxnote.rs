@@ -35,7 +35,7 @@
 
 use serde_json::Value;
 
-use crate::parse::{Block, Emitter, Image, ParseError};
+use crate::parse::{Block, Emitter, Image, ParseError, Table};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -319,7 +319,7 @@ impl Walk<'_, '_> {
         if rows.is_empty() {
             return Ok(());
         }
-        self.emitter.table_start(None, None)?;
+        self.emitter.table_start(Table::default())?;
         let mut occupied: std::collections::BTreeSet<(u32, u32)> =
             std::collections::BTreeSet::new();
         for (row_index, row) in rows.iter().enumerate() {
