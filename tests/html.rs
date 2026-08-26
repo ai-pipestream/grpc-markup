@@ -561,3 +561,22 @@ async fn open_graph_meta_tags_are_no_longer_skipped() {
     );
     assert_eq!(meta_scalar(&metadata["meta.author"]), "Ada");
 }
+
+#[tokio::test]
+async fn an_image_carries_the_dimensions_the_document_asks_for() {
+    let client = client().await;
+    let html = r#"<body>
+<img src="schéma.png" alt="schéma" width="640" height="480">
+<img src="bandeau.png" alt="bandeau" width="50%">
+</body>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(images[0].width.as_deref(), Some("640"));
+    assert_eq!(images[0].height.as_deref(), Some("480"));
+    assert_eq!(
+        images[1].width.as_deref(),
+        Some("50%"),
+        "a percentage rides verbatim; nothing is converted"
+    );
+    assert!(images[1].height.is_none());
+}

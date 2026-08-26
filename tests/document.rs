@@ -926,3 +926,43 @@ async fn a_task_list_item_folds_as_the_checkbox_it_is() {
         "a checkbox does not break the contiguous list"
     );
 }
+
+#[tokio::test]
+async fn declared_image_dimensions_reach_the_picture_only_when_they_are_numbers() {
+    let client = client().await;
+    let html = r#"<body>
+<img src="schéma.png" alt="schéma" width="640" height="480">
+<img src="bandeau.png" alt="bandeau" width="50%" height="5cm">
+</body>"#;
+    let events = parse_ok(&client, html, with_document(pb::MarkupFormat::Html)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert!(integrity_errors(folded).is_empty());
+
+    let sized = folded.pictures[0].image.as_ref().expect("an image ref");
+    assert_eq!(
+        sized.size,
+        Some(doc::Size {
+            width: 640.0,
+            height: 480.0
+        })
+    );
+
+    let spelled = folded.pictures[1].image.as_ref().expect("an image ref");
+    assert!(
+        spelled.size.is_none(),
+        "Size has no unit beside its doubles, so a percentage cannot go in it"
+    );
+    let fields = &folded.pictures[1]
+        .meta
+        .as_ref()
+        .expect("the spellings are kept")
+        .custom_fields;
+    assert_eq!(
+        fields["html.width"].kind,
+        Some(prost_types::value::Kind::StringValue("50%".to_owned()))
+    );
+    assert_eq!(
+        fields["html.height"].kind,
+        Some(prost_types::value::Kind::StringValue("5cm".to_owned()))
+    );
+}

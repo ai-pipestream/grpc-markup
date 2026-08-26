@@ -34,7 +34,7 @@ use serde_json::Value;
 
 use crate::document::v1 as doc;
 use crate::document_fold::code_language_label;
-use crate::parse::{Block, Emitter, ParseError, scalar};
+use crate::parse::{Block, Emitter, Image, ParseError, scalar};
 use crate::proto::v1 as pb;
 use crate::{COLLECTOR, VERSION};
 
@@ -799,8 +799,12 @@ impl Project<'_, '_> {
                     .as_ref()
                     .map(|image| image.uri.clone())
                     .unwrap_or_default();
-                self.emitter
-                    .image(uri, String::new(), String::new(), None)?;
+                self.emitter.image(Image {
+                    src: uri,
+                    // The declared dimensions of an ingested picture are on
+                    // its own ImageRef, which the document event carries.
+                    ..Image::default()
+                })?;
                 let children = picture.children.clone();
                 self.children(&children, list_depth)?;
             }

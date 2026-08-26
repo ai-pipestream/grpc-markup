@@ -829,8 +829,14 @@ impl DocumentFold {
     // ---------------------------------------------------------------- images
 
     /// One image reference as a picture whose `ImageRef.uri` is the source's
-    /// own string, verbatim. No bytes, no size, no dpi: this collector is
-    /// handed markup, and claiming pixels it never saw would be lying.
+    /// own string, verbatim. No bytes and no dpi: this collector is handed
+    /// markup, and claiming pixels it never saw would be lying.
+    ///
+    /// The size is the one exception, and only when the source stated both
+    /// dimensions as bare numbers: `Size` is two plain doubles with no unit
+    /// beside them, so `20%` or `5cm` cannot go in it without inventing a
+    /// unit the source never named. Those spellings, and a lone dimension,
+    /// stay verbatim in the picture's custom fields.
     fn on_image(&mut self, image: &pb::ImageBlock) {
         self.lists.clear();
         let parent = self.current_parent();
@@ -848,6 +854,17 @@ impl DocumentFold {
                 number(f64::from(line)),
             );
         }
+        let size = match (bare(image.width.as_deref()), bare(image.height.as_deref())) {
+            (Some(width), Some(height)) => Some(doc::Size { width, height }),
+            _ => {
+                for (name, declared) in [("width", &image.width), ("height", &image.height)] {
+                    if let Some(declared) = declared.as_ref().filter(|value| !value.is_empty()) {
+                        fields.insert(format!("{}.{name}", self.prefix), string(declared));
+                    }
+                }
+                None
+            }
+        };
         self.document.pictures.push(doc::PictureItem {
             self_ref: self_ref.clone(),
             parent: Some(reference(&parent)),
@@ -860,7 +877,7 @@ impl DocumentFold {
             image: Some(doc::ImageRef {
                 mimetype: image_mimetype(&image.src).to_owned(),
                 dpi: 0,
-                size: None,
+                size,
                 uri: image.src.clone(),
             }),
             source: vec![self.collector_source()],
@@ -1212,6 +1229,18 @@ const fn flag(value: bool) -> Value {
     Value {
         kind: Some(Kind::BoolValue(value)),
     }
+}
+
+/// A declared dimension as a plain number, or nothing when the source
+/// spelled it with a unit, a percentage or a macro. `Size` has no unit
+/// beside its two doubles, so anything but a bare number would have to
+/// invent one.
+fn bare(declared: Option<&str>) -> Option<f64> {
+    declared?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 /// A wire `uint32` as the schema's `int32`, saturating rather than
@@ -2245,6 +2274,8 @@ mod tests {
                 title: "Fig 1".to_owned(),
                 source_line: Some(9),
                 source: None,
+                width: None,
+                height: None,
             }),
         ]);
         let picture = &document.pictures[0];

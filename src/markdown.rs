@@ -54,7 +54,7 @@ use pulldown_cmark::{
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
-use crate::parse::{Block, Emitter, ParseError};
+use crate::parse::{Block, Emitter, Image, ParseError};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -650,7 +650,13 @@ impl Walk<'_, '_> {
                     return Ok(());
                 };
                 let (alt, _) = inline.take();
-                self.emitter.image(src, alt, title, Some(line))?;
+                self.emitter.image(Image {
+                    src,
+                    alt,
+                    title,
+                    source_line: Some(line),
+                    ..Image::default()
+                })?;
             }
             TagEnd::Link => {
                 if let Some(inline) = self.top_inline() {

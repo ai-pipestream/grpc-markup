@@ -514,3 +514,22 @@ async fn the_tabular_column_specification_is_kept_as_geometry() {
     let rows = table_rows(&events);
     assert_eq!(rows[0].cells[0].text, "Name");
 }
+
+#[tokio::test]
+async fn includegraphics_options_carry_the_declared_size() {
+    let client = client().await;
+    let latex = "\\documentclass{article}\n\\begin{document}\n\
+        \\includegraphics[width=0.8\\textwidth,height=3cm]{figures/schéma.png}\n\
+        \\includegraphics{figures/nu.png}\n\\end{document}\n";
+    let events = parse_ok(&client, latex, options(pb::MarkupFormat::Latex)).await;
+    let images = images(&events);
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0].src, "figures/schéma.png");
+    assert_eq!(
+        images[0].width.as_deref(),
+        Some("0.8\\textwidth"),
+        "a TeX length is kept as the author wrote it, macro and all"
+    );
+    assert_eq!(images[0].height.as_deref(), Some("3cm"));
+    assert!(images[1].width.is_none() && images[1].height.is_none());
+}

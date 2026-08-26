@@ -623,6 +623,16 @@ message ImageBlock {
 
   // Provenance, always set.
   CollectorSource source = 6;
+
+  // The width the source declares for the image, verbatim in the source's
+  // own units: an HTML `width="640"` or `width="50%"`, a LaTeX
+  // `[width=0.8\textwidth]`. Absent when the source declares none. This is
+  // what the *document* asks for, not what the image is: this service never
+  // fetches an image and so never measures one.
+  optional string width = 7;
+
+  // The height the source declares, on the same terms as `width`.
+  optional string height = 8;
 }
 
 // CueTiming is one karaoke segment of a cue: the run of the cue's text a

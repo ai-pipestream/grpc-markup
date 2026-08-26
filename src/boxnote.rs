@@ -35,7 +35,7 @@
 
 use serde_json::Value;
 
-use crate::parse::{Block, Emitter, ParseError};
+use crate::parse::{Block, Emitter, Image, ParseError};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -391,12 +391,12 @@ impl Walk<'_, '_> {
             .or_else(|| attr("src"))
             .or_else(|| attr("fileName"))
             .unwrap_or_default();
-        self.emitter.image(
+        self.emitter.image(Image {
             src,
-            attr("alt").unwrap_or_default(),
-            attr("fileName").unwrap_or_default(),
-            None,
-        )
+            alt: attr("alt").unwrap_or_default(),
+            title: attr("fileName").unwrap_or_default(),
+            ..Image::default()
+        })
     }
 }
 

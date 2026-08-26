@@ -56,7 +56,7 @@
 
 use std::collections::HashMap;
 
-use crate::parse::{Block, Emitter, ParseError};
+use crate::parse::{Block, Emitter, Image, ParseError};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -1103,7 +1103,7 @@ impl Walk<'_, '_> {
     fn structural(
         &mut self,
         name: &str,
-        _opt: Option<&str>,
+        opt: Option<&str>,
         args: &[Vec<Node>],
         anchor: Option<String>,
     ) -> Result<(), ParseError> {
@@ -1183,8 +1183,15 @@ impl Walk<'_, '_> {
                 if arg_text.is_empty() {
                     return Ok(());
                 }
-                self.emitter
-                    .image(arg_text, String::new(), String::new(), None)
+                // The option list is the author's own key=value vocabulary;
+                // the two keys that say how big the figure should be are
+                // kept verbatim, units and macros and all.
+                self.emitter.image(Image {
+                    src: arg_text,
+                    width: graphics_option(opt, "width"),
+                    height: graphics_option(opt, "height"),
+                    ..Image::default()
+                })
             }
             "input" | "include" => {
                 // Diskless by doctrine: the referenced file is never read.
@@ -1536,6 +1543,22 @@ impl Walk<'_, '_> {
         };
         self.emitter.text_block(block)
     }
+}
+
+/// One key of an `\includegraphics` option list, verbatim.
+///
+/// The list is `key=value` pairs separated by commas, and the value is
+/// whatever the author wrote: `5cm`, `0.8\textwidth`, `120`. Nothing is
+/// converted, because a length in a TeX unit or in a macro the preamble
+/// defines is not a number this fold can honestly produce.
+fn graphics_option(options: Option<&str>, key: &str) -> Option<String> {
+    options?.split(',').find_map(|option| {
+        let (name, value) = option.split_once('=')?;
+        (name.trim().eq_ignore_ascii_case(key))
+            .then(|| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// The `\label` key of a label macro's argument.

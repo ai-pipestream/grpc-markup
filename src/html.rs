@@ -52,7 +52,7 @@
 use scraper::node::Node;
 use scraper::{ElementRef, Html};
 
-use crate::parse::{Block, Emitter, ParseError, scalar};
+use crate::parse::{Block, Emitter, Image, ParseError, scalar};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -779,7 +779,24 @@ impl Walk<'_, '_> {
             // A bare <img> with nothing on it carries no reference at all.
             return Ok(());
         }
-        self.emitter.image(src, alt, title, None)
+        // The attributes say how wide the document asks the image to be, in
+        // whatever the author wrote: `640`, `50%`. Kept verbatim, because
+        // this service never fetches the image and so never measures one.
+        let dimension = |name: &str| {
+            element
+                .attr(name)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        self.emitter.image(Image {
+            src,
+            alt,
+            title,
+            source_line: None,
+            width: dimension("width"),
+            height: dimension("height"),
+        })
     }
 }
 

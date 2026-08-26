@@ -37,7 +37,7 @@
 
 use std::collections::HashMap;
 
-use crate::parse::{Block, Emitter, ParseError, scalar};
+use crate::parse::{Block, Emitter, Image, ParseError, scalar};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -469,8 +469,12 @@ impl Walk<'_, '_> {
         if let Some((path, alt)) = image_macro(line) {
             self.flush_paragraph()?;
             let caption = self.caption.take();
-            self.emitter
-                .image(path, alt, String::new(), Some(line_no))?;
+            self.emitter.image(Image {
+                src: path,
+                alt,
+                source_line: Some(line_no),
+                ..Image::default()
+            })?;
             if let Some(caption) = caption {
                 self.emitter.text_block(Block {
                     label: pb::BlockLabel::Caption,

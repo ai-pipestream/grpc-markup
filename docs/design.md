@@ -351,6 +351,11 @@ Carried across from the typed wire, into slots the schema already had:
   declared alignment lands on the cell. The wire merges both alignment axes
   into one enum and the folds keep them in the right field, so the
   projection splits them and refuses a vertical value in a horizontal slot.
+- An image's declared `width` and `height` become `ImageRef.size`, but only
+  when the source stated both as bare numbers: `Size` is two plain doubles
+  with no unit beside them, so `20%`, `5cm` and `0.8\textwidth` cannot go in
+  it without inventing a unit the source never named. Those spellings, and a
+  lone dimension, stay verbatim in the picture's custom fields.
 - `MarkupInfo.metadata` becomes `Document.source_meta`: title, authors,
   dates, language, generator and keywords in their own slots, other scalars
   in `extra` under their own names. A declared date lands in the shape the

@@ -222,6 +222,25 @@ pub struct Block {
     pub quote_depth: Option<u32>,
 }
 
+/// An image reference a fold hands to [`Emitter::image`]: every field of a
+/// [`pb::ImageBlock`] the fold decides, with the stream index and the
+/// provenance left to the emitter.
+#[derive(Debug, Clone, Default)]
+pub struct Image {
+    /// The reference as written, never dereferenced.
+    pub src: String,
+    /// Alternative text, empty when the source has none.
+    pub alt: String,
+    /// Title or tooltip text, empty when the source has none.
+    pub title: String,
+    /// One-based source line, when the fold tracks lines.
+    pub source_line: Option<u32>,
+    /// The width the source declares, verbatim in its own units.
+    pub width: Option<String>,
+    /// The height the source declares, verbatim in its own units.
+    pub height: Option<String>,
+}
+
 /// A cue the WebVTT fold hands to [`Emitter::cue`]: every field of a
 /// [`pb::Cue`] the fold decides, with the stream index and the provenance
 /// left to the emitter.
@@ -475,22 +494,18 @@ impl<'a> Emitter<'a> {
     /// # Errors
     ///
     /// [`ParseError::ConsumerGone`] when the client stopped reading.
-    pub fn image(
-        &mut self,
-        src: String,
-        alt: String,
-        title: String,
-        source_line: Option<u32>,
-    ) -> Result<(), ParseError> {
+    pub fn image(&mut self, image: Image) -> Result<(), ParseError> {
         let index = self.next_index();
         self.counts.images += 1;
         self.send(pb::parse_markup_response::Event::Image(pb::ImageBlock {
             index,
-            src,
-            alt,
-            title,
-            source_line,
+            src: image.src,
+            alt: image.alt,
+            title: image.title,
+            source_line: image.source_line,
             source: Some(self.source.clone()),
+            width: image.width,
+            height: image.height,
         }))
     }
 
