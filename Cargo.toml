@@ -18,8 +18,8 @@ prost = "0.14.4"
 # well-known types to this crate rather than regenerating them.
 prost-types = "0.14.4"
 # Inline `<svg>` drawings ride in the Document as `data:image/svg+xml;base64,`
-# URIs; this is the same crate the transport already pulls in.
-base64 = "0.22"
+# URIs. tonic still asks for 0.22, so the build links both versions.
+base64 = "0.23"
 # CommonMark parsing for the markdown fold. The extensions match what the
 # fold maps: pipe tables, footnotes, strikethrough and task lists.
 pulldown-cmark = { version = "0.13", default-features = false }
