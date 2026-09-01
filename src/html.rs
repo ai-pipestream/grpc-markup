@@ -37,7 +37,15 @@
 //! - `pre` keeps its text verbatim as `BLOCK_LABEL_CODE` with a
 //!   `language-*` class as the declared language.
 //! - `img` becomes an `ImageBlock` (`src`, `alt`, `title` verbatim, never
-//!   fetched); a `figure`'s `figcaption` follows as a `CAPTION` block.
+//!   fetched; a `srcset` with no `src` lends its first candidate); a
+//!   `figure`'s `figcaption` follows as a `CAPTION` block. The other ways a
+//!   page places a picture map onto the same block through
+//!   [`crate::html_pictures`]: an `<svg>` yields one `ImageBlock` per
+//!   `<image>` it holds (`href`, else `xlink:href`), or one carrying its
+//!   own drawing as a `data:` URI when it holds none and is small enough,
+//!   and nothing when it is decorative; an `<object>` or `<embed>` whose
+//!   type is an image yields one from its `data` / `src`; a `<picture>`
+//!   yields exactly the one its `<img>` fallback names.
 //! - `details` descends and `summary` / `address` keep their name in
 //!   `role`.
 //! - `script`, `style`, `head` content and form controls never become
@@ -52,16 +60,19 @@
 use scraper::node::Node;
 use scraper::{ElementRef, Html};
 
+use crate::html_pictures::{embedded_picture, srcset_first_candidate, svg_pictures};
 use crate::parse::{Block, Emitter, Image, ParseError, Table, scalar};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
 /// Elements whose entire subtree is dropped: executable, presentational or
-/// interactive machinery whose text is not document content.
+/// interactive machinery whose text is not document content. `svg`,
+/// `object` and `embed` are not here because each can place a picture; the
+/// ones that do not are dropped by their own arms.
 const SKIPPED: &[&str] = &[
-    "script", "style", "noscript", "template", "iframe", "object", "embed", "svg", "canvas",
-    "audio", "video", "source", "track", "input", "select", "option", "optgroup", "textarea",
-    "button", "datalist", "map", "area", "base", "link", "meta", "title", "head",
+    "script", "style", "noscript", "template", "iframe", "canvas", "audio", "video", "source",
+    "track", "input", "select", "option", "optgroup", "textarea", "button", "datalist", "map",
+    "area", "base", "link", "meta", "title", "head",
 ];
 
 /// Inline elements whose text flows into the enclosing block unchanged.
@@ -310,6 +321,9 @@ impl Walk<'_, '_> {
                 self.flush()?;
                 self.image(element)
             }
+            "svg" => self.pictures(svg_pictures(element)),
+            "object" => self.pictures(embedded_picture(element, "data")),
+            "embed" => self.pictures(embedded_picture(element, "src")),
             "details" => {
                 self.flush()?;
                 self.container(element)
@@ -775,9 +789,25 @@ impl Walk<'_, '_> {
         self.flush()
     }
 
+    /// The pictures an element other than `<img>` places, if any. A source
+    /// that places none leaves the inline buffer alone, exactly as the
+    /// skipped subtree it used to be did.
+    fn pictures(&mut self, images: impl IntoIterator<Item = Image>) -> Result<(), ParseError> {
+        let mut images = images.into_iter().peekable();
+        if images.peek().is_some() {
+            self.flush()?;
+        }
+        images.try_for_each(|image| self.emitter.image(image))
+    }
+
     fn image(&mut self, element: &ElementRef<'_>) -> Result<(), ParseError> {
         let attr = |name: &str| element.attr(name).unwrap_or("").trim().to_owned();
-        let src = attr("src");
+        let mut src = attr("src");
+        if src.is_empty() {
+            // A responsive image with no fallback `src` still names its
+            // candidates; the first one is the reference.
+            src = srcset_first_candidate(&attr("srcset")).unwrap_or_default();
+        }
         let alt = attr("alt");
         let title = attr("title");
         if src.is_empty() && alt.is_empty() && title.is_empty() {

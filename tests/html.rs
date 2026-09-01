@@ -597,3 +597,181 @@ async fn a_br_is_a_line_break_and_not_a_swallowed_word_boundary() {
         "a cell flattens through the same path"
     );
 }
+
+/// The cover page real EPUBs ship: an XHTML 1.1 document, the XLink
+/// namespace declared, the image wrapped in an inline `<svg>` inside a
+/// cover `div`, and the reference spelled `xlink:href` only.
+const XHTML_COVER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:xlink="http://www.w3.org/1999/xlink">
+<head><title>Cover</title></head>
+<body>
+  <div class="cover">
+    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+         version="1.1" width="100%" height="100%" viewBox="0 0 1200 1800" preserveAspectRatio="xMidYMid meet">
+      <image width="1200" height="1800" xlink:href="../Images/cover.jpg"/>
+    </svg>
+  </div>
+</body>
+</html>
+"#;
+
+#[tokio::test]
+async fn the_nested_xhtml_cover_yields_one_image_from_the_xlink_href() {
+    let client = client().await;
+    let events = parse_ok(&client, XHTML_COVER, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(images.len(), 1);
+    assert_eq!(
+        images[0].src, "../Images/cover.jpg",
+        "the reference is the attribute verbatim, exactly as an <img src> would be"
+    );
+    assert_eq!(images[0].alt, "");
+    assert_eq!(images[0].width.as_deref(), Some("1200"));
+    assert_eq!(images[0].height.as_deref(), Some("1800"));
+    assert!(text_blocks(&events).is_empty(), "a cover page has no prose");
+    assert!(
+        warning(&events, pb::WarningCode::UnmappedConstruct).is_none(),
+        "svg is mapped, not flattened"
+    );
+}
+
+#[tokio::test]
+async fn an_svg_yields_one_image_per_image_element_named_by_its_text() {
+    let client = client().await;
+    let html = r#"<body>
+<svg id="plates" viewBox="0 0 10 10">
+  <title>Two plates</title>
+  <desc>Side by side</desc>
+  <g><image href="left.png" xlink:href="stale.png" width="5" height="10"/></g>
+  <image id="right" xlink:href="right.png"><title>The right plate</title></image>
+</svg>
+</body>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0].src, "left.png", "href wins over xlink:href");
+    assert_eq!(
+        images[0].alt, "Two plates",
+        "the svg's title names an unnamed image"
+    );
+    assert_eq!(images[0].title, "Side by side");
+    assert_eq!(images[0].width.as_deref(), Some("5"));
+    assert_eq!(images[0].anchor_id.as_deref(), Some("plates"));
+    assert_eq!(images[1].src, "right.png");
+    assert_eq!(
+        images[1].alt, "The right plate",
+        "an image's own title wins"
+    );
+    assert_eq!(images[1].anchor_id.as_deref(), Some("right"));
+}
+
+#[tokio::test]
+async fn decorative_svgs_yield_nothing_and_no_warning() {
+    let client = client().await;
+    let html = r#"<body>
+<p>Before <svg aria-hidden="true"><image href="hidden.png"/></svg> after.</p>
+<svg role="presentation"><image href="chrome.png"/></svg>
+<svg width="16" height="16"><path d="M0 0h16v16z"/></svg>
+<svg viewBox="0 0 1 1"></svg>
+</body>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    assert!(images(&events).is_empty(), "{:?}", images(&events));
+    assert_eq!(
+        texts(&text_blocks(&events)),
+        ["Before after."],
+        "a decorative svg does not split the paragraph around it"
+    );
+    assert!(warning(&events, pb::WarningCode::UnmappedConstruct).is_none());
+}
+
+#[tokio::test]
+async fn an_svg_drawing_rides_as_a_data_uri_under_the_cap() {
+    let client = client().await;
+    let html = r#"<body><svg width="200" height="100"><title>A bar</title><rect width="200" height="100"/></svg></body>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(images.len(), 1);
+    assert!(
+        images[0].src.starts_with("data:image/svg+xml;base64,"),
+        "{}",
+        images[0].src
+    );
+    assert_eq!(images[0].alt, "A bar");
+    assert_eq!(images[0].width.as_deref(), Some("200"));
+}
+
+#[tokio::test]
+async fn a_picture_element_yields_exactly_its_img_fallback() {
+    let client = client().await;
+    let html = r#"<body><picture>
+<source srcset="hero.avif" type="image/avif">
+<source srcset="hero.webp 1x, hero@2x.webp 2x" type="image/webp">
+<img src="hero.jpg" alt="Hero">
+</picture></body>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(images.len(), 1, "never one per <source>");
+    assert_eq!(images[0].src, "hero.jpg");
+    assert_eq!(images[0].alt, "Hero");
+}
+
+#[tokio::test]
+async fn an_img_with_only_a_srcset_takes_the_first_candidate() {
+    let client = client().await;
+    let html = r#"<body>
+<img srcset="small.jpg 480w, large.jpg 1200w" alt="Responsive">
+<img src="plain.jpg" srcset="other.jpg 2x" alt="Plain">
+</body>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0].src, "small.jpg");
+    assert_eq!(
+        images[1].src, "plain.jpg",
+        "a src is never displaced by a srcset"
+    );
+}
+
+#[tokio::test]
+async fn objects_and_embeds_of_image_type_yield_pictures() {
+    let client = client().await;
+    let html = r#"<body>
+<object data="diagram.svg" type="image/svg+xml" width="400">The flow, as a diagram</object>
+<embed src="scan.png" type="image/png" title="Page scan">
+<object data="movie.swf" type="application/x-shockwave-flash">Flash fallback</object>
+<embed src="clip.mp4" type="video/mp4">
+</body>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(images.len(), 2, "{images:?}");
+    assert_eq!(images[0].src, "diagram.svg");
+    assert_eq!(images[0].alt, "The flow, as a diagram");
+    assert_eq!(images[0].width.as_deref(), Some("400"));
+    assert_eq!(images[1].src, "scan.png");
+    assert_eq!(images[1].title, "Page scan");
+    assert!(
+        text_blocks(&events).is_empty(),
+        "a non-image object is still dropped whole: {:?}",
+        texts(&text_blocks(&events))
+    );
+}
+
+#[tokio::test]
+async fn a_figure_wrapping_an_svg_image_yields_the_image_then_its_caption() {
+    let client = client().await;
+    let html = r#"<body><figure>
+<svg viewBox="0 0 1 1"><image xlink:href="plate.jpg"/></svg>
+<figcaption>Plate II.</figcaption>
+</figure></body>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].src, "plate.jpg");
+    assert_eq!(
+        texts(&blocks_labelled(&events, pb::BlockLabel::Caption)),
+        ["Plate II."]
+    );
+    let caption_index = blocks_labelled(&events, pb::BlockLabel::Caption)[0].index;
+    assert!(images[0].index < caption_index, "the image comes first");
+}

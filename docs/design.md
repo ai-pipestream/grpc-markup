@@ -136,7 +136,10 @@ scope by construction.
 | `dl` / `dt` / `dd` | list items with the proto's `definition-term` / `definition-description` roles, descriptions one level under their term |
 | `table` (+`thead`/`tbody`/`tfoot`, `caption`, `colspan`/`rowspan`, `colgroup`/`col`) | streamed table with the caption on `TableStart`, the `col` geometry as `columns` (a `span` repeated across the columns it covers), header cells and rows flagged, spans advancing the column index over an occupancy grid, each cell's own `align`/`valign` and its inline runs |
 | `pre` (+`language-*` class) | `BLOCK_LABEL_CODE`, text verbatim |
-| `img`, `figure`/`figcaption` | `ImageBlock` (`src`/`alt`/`title` verbatim), the figcaption as a following `CAPTION` block |
+| `img`, `figure`/`figcaption` | `ImageBlock` (`src`/`alt`/`title` verbatim; a `srcset` with no `src` lends its first candidate), the figcaption as a following `CAPTION` block |
+| `picture` | exactly the one `ImageBlock` its `img` fallback names; `source` candidates are never pictures of their own |
+| `svg` | one `ImageBlock` per `image` it holds, `href` preferred over `xlink:href`, the reference verbatim exactly as an `img src`; `aria-label`, the `<title>` child or the `<desc>` as `alt`, an unused `<desc>` as `title`; the `image`'s own `width`/`height`. An `svg` with drawn content and no `image` is one `ImageBlock` whose `src` is the element serialized as a `data:image/svg+xml;base64,` URI, only under a 32 KiB source cap (`html_pictures::INLINE_SVG_MAX_BYTES`). Decorative `svg` (`aria-hidden="true"`, `role="presentation"`/`"none"`, or both `width` and `height` at most 24 px) is nothing, and so is a sprite sheet of `defs`/`use` |
+| `object data`, `embed src` | one `ImageBlock` when the `type` is `image/*` (or, with no `type`, the reference has an image extension); `title` as `title`, `aria-label` or the `object`'s fallback text as `alt`; anything else stays dropped |
 | `details` | descended; its `summary` keeps its role |
 | `script`, `style`, `head`, `template`, form controls, media embeds | never text |
 | `br` | a `\n` in the enclosing block's text, cells included |
@@ -324,6 +327,12 @@ Carried across from the typed wire, into slots the schema already had:
   run with no typography carries no all-false `Formatting`. A link's title
   and the raw payload behind projected text (an abbreviation's expansion,
   inline math in its source syntax) ride on the span.
+- A `CAPTION` block adjacent to a picture, on either side, becomes that
+  picture's `captions` reference: an HTML `figcaption` beside its image, an
+  AsciiDoc `.Title` before its `image::`, a LaTeX `\caption` next to its
+  `\includegraphics`. Any other item in between breaks the adjacency and
+  the caption stays a free-standing `CAPTION` item. A table's caption
+  never waits here; `TableStart` carries it and the table owns it.
 - A block's `admonition` becomes `TextItemBase.admonition_kind`, lower-cased.
 - A list item's `task_state` becomes its label:
   `DOC_ITEM_LABEL_CHECKBOX_SELECTED` or `..._UNSELECTED`. It stays a

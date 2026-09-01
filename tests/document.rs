@@ -1146,3 +1146,140 @@ async fn the_origin_says_what_its_mimetype_claim_rests_on() {
         "structure was classified, and a consumer can tell that from a claim"
     );
 }
+
+/// The text of the caption a picture references, resolved through the arena.
+fn caption_texts(document: &doc::Document, picture: &doc::PictureItem) -> Vec<String> {
+    picture
+        .captions
+        .iter()
+        .map(|caption| {
+            let index: usize = caption
+                .r#ref
+                .strip_prefix("#/texts/")
+                .expect("a caption is a text item")
+                .parse()
+                .unwrap();
+            match document.texts[index].item.as_ref() {
+                Some(doc::base_text_item::Item::Text(text)) => {
+                    let base = text.base.as_ref().unwrap();
+                    assert_eq!(base.label, doc::DocItemLabel::Caption as i32);
+                    base.text.clone()
+                }
+                other => panic!("a caption folds as a TextItem, got {other:?}"),
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_figcaption_binds_to_the_picture_beside_it_on_either_side() {
+    let client = client().await;
+    let html = r#"<body>
+<figure><img src="a.png" alt="a"><figcaption>After the image.</figcaption></figure>
+<figure><figcaption>Before the image.</figcaption><img src="b.png" alt="b"></figure>
+<figure><img src="c.png" alt="c"><p>Prose in between.</p><figcaption>Not adjacent.</figcaption></figure>
+</body>"#;
+    let events = parse_ok(&client, html, with_document(pb::MarkupFormat::Html)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert_eq!(integrity_errors(folded), Vec::<String>::new());
+    assert_eq!(folded.pictures.len(), 3);
+    assert_eq!(
+        caption_texts(folded, &folded.pictures[0]),
+        ["After the image."]
+    );
+    assert_eq!(
+        caption_texts(folded, &folded.pictures[1]),
+        ["Before the image."]
+    );
+    assert!(
+        folded.pictures[2].captions.is_empty(),
+        "a block in between breaks the adjacency"
+    );
+    let stray = folded
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref() {
+            Some(doc::base_text_item::Item::Text(text)) => text.base.as_ref(),
+            _ => None,
+        })
+        .find(|base| base.text == "Not adjacent.")
+        .expect("the unbound caption is still an item");
+    assert_eq!(stray.label, doc::DocItemLabel::Caption as i32);
+}
+
+#[tokio::test]
+async fn the_epub_cover_svg_folds_to_a_picture_shaped_like_an_img() {
+    let client = client().await;
+    let xhtml = r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:xlink="http://www.w3.org/1999/xlink">
+<head><title>Cover</title></head>
+<body>
+  <div class="cover">
+    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+         version="1.1" width="100%" height="100%" viewBox="0 0 1200 1800">
+      <title>The Great Cover</title>
+      <image width="1200" height="1800" xlink:href="../Images/cover.jpg"/>
+    </svg>
+  </div>
+  <figure>
+    <svg viewBox="0 0 1 1"><image href="../Images/plate.png"/></svg>
+    <figcaption>Frontispiece.</figcaption>
+  </figure>
+</body>
+</html>"#;
+    let events = parse_ok(&client, xhtml, with_document(pb::MarkupFormat::Html)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert_eq!(integrity_errors(folded), Vec::<String>::new());
+    assert_eq!(folded.pictures.len(), 2);
+
+    let cover = &folded.pictures[0];
+    let image = cover.image.as_ref().expect("an image ref");
+    assert_eq!(
+        image.uri, "../Images/cover.jpg",
+        "the uri is the href verbatim, the same slot an <img src> fills"
+    );
+    assert_eq!(image.mimetype, "image/jpeg");
+    assert_eq!(
+        image.size,
+        Some(doc::Size {
+            width: 1200.0,
+            height: 1800.0
+        })
+    );
+    let fields = &cover
+        .meta
+        .as_ref()
+        .expect("alt text rides as a field")
+        .custom_fields;
+    assert_eq!(
+        fields["html.alt"].kind,
+        Some(prost_types::value::Kind::StringValue(
+            "The Great Cover".to_owned()
+        ))
+    );
+    assert!(
+        !fields.keys().any(|key| key.contains("src")),
+        "the reference lives in ImageRef.uri, never in a keyed field: {fields:?}"
+    );
+    assert_eq!(
+        cover.parent.as_ref().map(|parent| parent.r#ref.as_str()),
+        Some("#/body")
+    );
+
+    let plate = &folded.pictures[1];
+    assert_eq!(plate.image.as_ref().unwrap().uri, "../Images/plate.png");
+    assert_eq!(caption_texts(folded, plate), ["Frontispiece."]);
+}
+
+#[tokio::test]
+async fn an_asciidoc_caption_binds_to_the_image_it_titles() {
+    let client = client().await;
+    let adoc =
+        "= Plates\n\n.The engine\nimage::engine.png[Engine]\n\nA paragraph.\n\n.A loose title\n\n";
+    let events = parse_ok(&client, adoc, with_document(pb::MarkupFormat::Asciidoc)).await;
+    let folded = document(&events).expect("the fold was requested");
+    assert_eq!(integrity_errors(folded), Vec::<String>::new());
+    assert_eq!(folded.pictures.len(), 1);
+    assert_eq!(caption_texts(folded, &folded.pictures[0]), ["The engine"]);
+}

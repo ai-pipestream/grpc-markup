@@ -18,7 +18,8 @@
 //!   the same [`ParseMarkupResponse`](pb::ParseMarkupResponse) event the
 //!   service is about to write to the socket and does a bounded amount of
 //!   work with it. The only state that outlives an event is the table being
-//!   streamed, the open heading ladder, and the open list-group stack.
+//!   streamed, the open heading ladder, the open list-group stack, and the
+//!   last picture or caption, so that the two can bind.
 //! - **A self-contained fragment.** Refs are dense and local (`#/texts/0`,
 //!   `#/tables/1`), every item's `parent` is set and every parent lists the
 //!   item in its `children`, so the coordinator's additive merge can
@@ -99,6 +100,29 @@ pub struct DocumentFold {
     /// backward, so resolution is a pass at [`take`](DocumentFold::take)
     /// rather than a lookup at fold time.
     pending_refs: Vec<(Site, String)>,
+    /// The picture a caption could still bind to, or the caption a picture
+    /// could still claim: the item before this one, when it was either.
+    adjacent: Adjacent,
+}
+
+/// What the previous event left for a caption or a picture to bind to.
+///
+/// A `CAPTION` block next to a picture is that picture's caption, the way
+/// a `<figcaption>` sits beside its `<img>`, an AsciiDoc `.Title` precedes
+/// its `image::` macro and a LaTeX `\caption` follows its
+/// `\includegraphics`. Adjacency on either side binds; any other item in
+/// between breaks it, and a caption a table start created never waits here
+/// because the table already owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum Adjacent {
+    /// The previous item was neither a picture nor an unbound caption.
+    #[default]
+    Nothing,
+    /// The previous item was the picture at this ref, still without a
+    /// following caption.
+    Picture(String),
+    /// The previous item was the caption at this ref, bound to nothing yet.
+    Caption(String),
 }
 
 /// Where one run waiting for its anchor lives.
@@ -172,6 +196,7 @@ impl DocumentFold {
             quotes: Vec::new(),
             anchors: BTreeMap::new(),
             pending_refs: Vec::new(),
+            adjacent: Adjacent::Nothing,
         }
     }
 
@@ -217,6 +242,7 @@ impl DocumentFold {
         self.quotes.clear();
         self.anchors.clear();
         self.pending_refs.clear();
+        self.adjacent = Adjacent::Nothing;
         std::mem::replace(&mut self.document, skeleton())
     }
 
@@ -358,6 +384,11 @@ impl DocumentFold {
     fn on_text_block(&mut self, block: &pb::TextBlock) {
         let label = pb::BlockLabel::try_from(block.label).unwrap_or_default();
         self.follow_quotes(block.quote_depth.unwrap_or(0));
+        if label != pb::BlockLabel::Caption {
+            // Any block that is not a caption stands between a picture and
+            // whatever caption might have followed it.
+            self.adjacent = Adjacent::Nothing;
+        }
         if label == pb::BlockLabel::ListItem {
             self.push_list_item(block);
             return;
@@ -393,6 +424,9 @@ impl DocumentFold {
         });
         self.register_refs(index, &self_ref, block);
         self.link_child(&parent, &self_ref);
+        if label == pb::BlockLabel::Caption {
+            self.bind_caption(self_ref.clone());
+        }
         if matches!(label, pb::BlockLabel::Title | pb::BlockLabel::SectionHeader) {
             // The heading ladder is the document's own table of contents;
             // a source that declares one of its own would overwrite this.
@@ -414,6 +448,30 @@ impl DocumentFold {
             // title item.
             self.document.name.clone_from(&block.text);
         }
+    }
+
+    /// A caption item just created: the picture right before it takes it,
+    /// otherwise it waits for the picture right after it.
+    fn bind_caption(&mut self, caption_ref: String) {
+        match std::mem::take(&mut self.adjacent) {
+            Adjacent::Picture(picture_ref) => {
+                if let Some(picture) = self.picture_at(&picture_ref) {
+                    picture.captions.push(reference(&caption_ref));
+                }
+                // One caption per picture from adjacency: a second caption
+                // block belongs to whatever comes next, not to the same
+                // picture twice.
+            }
+            Adjacent::Nothing | Adjacent::Caption(_) => {
+                self.adjacent = Adjacent::Caption(caption_ref);
+            }
+        }
+    }
+
+    /// The picture at a `#/pictures/N` ref.
+    fn picture_at(&mut self, self_ref: &str) -> Option<&mut doc::PictureItem> {
+        let index: usize = self_ref.strip_prefix("#/pictures/")?.parse().ok()?;
+        self.document.pictures.get_mut(index)
     }
 
     /// TRAP, and the reason this branch exists: `CodeItem` does not wrap a
@@ -660,6 +718,7 @@ impl DocumentFold {
 
     fn on_table_start(&mut self, start: &pb::TableStart) {
         self.lists.clear();
+        self.adjacent = Adjacent::Nothing;
         // An unclosed predecessor cannot happen on a conformant stream, but
         // dropping its rows silently if it did would be worse than keeping
         // them.
@@ -849,6 +908,13 @@ impl DocumentFold {
         self.lists.clear();
         let parent = self.current_parent();
         let self_ref = format!("#/pictures/{}", self.document.pictures.len());
+        // A caption the previous block left waiting is this picture's; the
+        // picture then waits for one more on its other side.
+        let captions =
+            match std::mem::replace(&mut self.adjacent, Adjacent::Picture(self_ref.clone())) {
+                Adjacent::Caption(caption_ref) => vec![reference(&caption_ref)],
+                Adjacent::Nothing | Adjacent::Picture(_) => Vec::new(),
+            };
         let mut fields = HashMap::new();
         if !image.alt.is_empty() {
             fields.insert(format!("{}.alt", self.prefix), string(&image.alt));
@@ -874,6 +940,7 @@ impl DocumentFold {
             }),
             label: doc::DocItemLabel::Picture as i32,
             prov: line_prov(image.source_line),
+            captions,
             image: Some(doc::ImageRef {
                 mimetype: image_mimetype(&image.src).to_owned(),
                 dpi: 0,
@@ -900,6 +967,7 @@ impl DocumentFold {
     /// wrote the timestamps.
     fn on_cue(&mut self, cue: &pb::Cue) {
         self.lists.clear();
+        self.adjacent = Adjacent::Nothing;
         if cue.text.trim().is_empty() {
             // A cue with no visible text has nothing to put in a TextItem,
             // whose `text` the schema expects to mean something.
@@ -2357,6 +2425,35 @@ mod tests {
         assert_eq!(
             fields["markdown.alt"].kind,
             Some(Kind::StringValue("the pipeline".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_caption_beside_a_picture_binds_to_it_and_a_separated_one_does_not() {
+        let image = |src: &str| {
+            pb::parse_markup_response::Event::Image(pb::ImageBlock {
+                src: src.to_owned(),
+                ..pb::ImageBlock::default()
+            })
+        };
+        let document = fold(&[
+            info(pb::MarkupFormat::Html),
+            image("after.png"),
+            block(pb::BlockLabel::Caption, "after"),
+            block(pb::BlockLabel::Caption, "before"),
+            image("before.png"),
+            image("alone.png"),
+            block(pb::BlockLabel::Paragraph, "between"),
+            block(pb::BlockLabel::Caption, "stray"),
+        ]);
+        assert_eq!(integrity_errors(&document), Vec::<String>::new());
+        assert_eq!(document.pictures[0].captions[0].r#ref, "#/texts/0");
+        assert_eq!(document.pictures[1].captions[0].r#ref, "#/texts/1");
+        assert!(document.pictures[2].captions.is_empty());
+        assert_eq!(
+            document.texts.len(),
+            4,
+            "the stray caption is still an item"
         );
     }
 

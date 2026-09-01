@@ -330,6 +330,7 @@ dependencies = [
 name = "grpc-markup"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "prost",
  "prost-types",
  "pulldown-cmark",

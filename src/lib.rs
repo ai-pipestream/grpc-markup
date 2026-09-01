@@ -36,6 +36,7 @@ pub mod boxnote;
 pub mod docling_json;
 pub mod document_fold;
 pub mod html;
+pub mod html_pictures;
 pub mod latex;
 pub mod markdown;
 pub mod metrics;
