@@ -145,6 +145,7 @@ fn svg_image_picture(svg: &ElementRef<'_>, image: &ElementRef<'_>) -> Option<Ima
         width: trimmed_attr(image, "width"),
         height: trimmed_attr(image, "height"),
         anchor_id: trimmed_attr(image, "id"),
+        hyperlink: None,
     })
 }
 
@@ -179,6 +180,7 @@ fn inline_svg_picture(svg: &ElementRef<'_>) -> Option<Image> {
         width: trimmed_attr(svg, "width"),
         height: trimmed_attr(svg, "height"),
         anchor_id: trimmed_attr(svg, "id"),
+        hyperlink: None,
     })
 }
 
@@ -215,6 +217,7 @@ pub fn embedded_picture(element: &ElementRef<'_>, reference_attr: &str) -> Optio
         width: trimmed_attr(element, "width"),
         height: trimmed_attr(element, "height"),
         anchor_id: trimmed_attr(element, "id"),
+        hyperlink: None,
     })
 }
 

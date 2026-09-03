@@ -487,6 +487,7 @@ fn map_picture(value: &Value, unmapped: &mut Unmapped) -> Option<doc::PictureIte
         image: obj
             .get("image")
             .and_then(|value| map_image_ref(value, obj.unmapped)),
+        hyperlink: obj.string("hyperlink"),
         ..doc::PictureItem::default()
     };
     obj.finish();
@@ -817,8 +818,10 @@ impl Project<'_, '_> {
                     .as_ref()
                     .map(|image| image.uri.clone())
                     .unwrap_or_default();
+                let hyperlink = picture.hyperlink.clone();
                 self.emitter.image(Image {
                     src: uri,
+                    hyperlink,
                     // The declared dimensions of an ingested picture are on
                     // its own ImageRef, which the document event carries.
                     ..Image::default()

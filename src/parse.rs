@@ -254,6 +254,8 @@ pub struct Image {
     pub height: Option<String>,
     /// The anchor the source declares on the image itself.
     pub anchor_id: Option<String>,
+    /// The href of a link whose only content is this image.
+    pub hyperlink: Option<String>,
 }
 
 /// A table a fold hands to [`Emitter::table_start`]: every field of a
@@ -521,6 +523,7 @@ impl<'a> Emitter<'a> {
             anchor_id: image.anchor_id,
             width: image.width,
             height: image.height,
+            hyperlink: image.hyperlink,
         }))
     }
 

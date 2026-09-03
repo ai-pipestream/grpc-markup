@@ -38,7 +38,10 @@
 //!   `language-*` class as the declared language.
 //! - `img` becomes an `ImageBlock` (`src`, `alt`, `title` verbatim, never
 //!   fetched; a `srcset` with no `src` lends its first candidate); a
-//!   `figure`'s `figcaption` follows as a `CAPTION` block. The other ways a
+//!   `figure`'s `figcaption` follows as a `CAPTION` block. An `<a>` whose
+//!   only content is the image lends the block its `href`, and a caption
+//!   that merely holds links carries the first one's target; the anchor
+//!   text stays inline either way. The other ways a
 //!   page places a picture map onto the same block through
 //!   [`crate::html_pictures`]: an `<svg>` yields one `ImageBlock` per
 //!   `<image>` it holds (`href`, else `xlink:href`), or one carrying its
@@ -367,6 +370,19 @@ impl Walk<'_, '_> {
     /// run it covers is recorded. A nested block (invalid but common)
     /// flushes and dispatches.
     fn inline(&mut self, element: &ElementRef<'_>, name: &str) -> Result<(), ParseError> {
+        // An <a> whose only content is one image is a link on the picture,
+        // not on prose: the href rides on the ImageBlock. Text beside the
+        // image keeps the link a prose link instead.
+        if name == "a"
+            && let Some(href) = element
+                .attr("href")
+                .map(str::trim)
+                .filter(|href| !href.is_empty())
+            && let Some(img) = lone_image(element)
+        {
+            self.flush()?;
+            return self.linked_image(&img, href);
+        }
         let link = (name == "a").then(|| link_mark(element)).flatten();
         let mark = link.clone().or_else(|| inline_mark(element, name));
         if let Some(mark) = mark.clone() {
@@ -773,6 +789,11 @@ impl Walk<'_, '_> {
                 "figcaption" => {
                     let (text, spans, hyperlink) = self.flatten(&child)?;
                     if !text.is_empty() {
+                        // A caption that is one link carries it as the
+                        // block's own; a caption that merely holds links
+                        // names the first of them as the picture's target.
+                        // The anchor text stays inline either way.
+                        let hyperlink = hyperlink.or_else(|| first_href(&child));
                         self.emit(Block {
                             label: pb::BlockLabel::Caption,
                             text,
@@ -801,39 +822,103 @@ impl Walk<'_, '_> {
     }
 
     fn image(&mut self, element: &ElementRef<'_>) -> Result<(), ParseError> {
-        let attr = |name: &str| element.attr(name).unwrap_or("").trim().to_owned();
-        let mut src = attr("src");
-        if src.is_empty() {
-            // A responsive image with no fallback `src` still names its
-            // candidates; the first one is the reference.
-            src = srcset_first_candidate(&attr("srcset")).unwrap_or_default();
+        if let Some(image) = image_block(element) {
+            self.emitter.image(image)?;
         }
-        let alt = attr("alt");
-        let title = attr("title");
-        if src.is_empty() && alt.is_empty() && title.is_empty() {
-            // A bare <img> with nothing on it carries no reference at all.
-            return Ok(());
-        }
-        // The attributes say how wide the document asks the image to be, in
-        // whatever the author wrote: `640`, `50%`. Kept verbatim, because
-        // this service never fetches the image and so never measures one.
-        let dimension = |name: &str| {
-            element
-                .attr(name)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        };
-        self.emitter.image(Image {
-            src,
-            alt,
-            title,
-            source_line: None,
-            width: dimension("width"),
-            height: dimension("height"),
-            anchor_id: anchor_of(element),
-        })
+        Ok(())
     }
+
+    /// The one image of an `<a>` that holds nothing else: the link belongs
+    /// to the picture, so the href rides on the block rather than on a
+    /// text run.
+    fn linked_image(&mut self, element: &ElementRef<'_>, href: &str) -> Result<(), ParseError> {
+        if let Some(mut image) = image_block(element) {
+            image.hyperlink = Some(href.to_owned());
+            self.emitter.image(image)?;
+        }
+        Ok(())
+    }
+}
+
+/// The image reference one `<img>` declares, or nothing when it carries no
+/// reference at all.
+fn image_block(element: &ElementRef<'_>) -> Option<Image> {
+    let attr = |name: &str| element.attr(name).unwrap_or("").trim().to_owned();
+    let mut src = attr("src");
+    if src.is_empty() {
+        // A responsive image with no fallback `src` still names its
+        // candidates; the first one is the reference.
+        src = srcset_first_candidate(&attr("srcset")).unwrap_or_default();
+    }
+    let alt = attr("alt");
+    let title = attr("title");
+    if src.is_empty() && alt.is_empty() && title.is_empty() {
+        // A bare <img> with nothing on it carries no reference at all.
+        return None;
+    }
+    // The attributes say how wide the document asks the image to be, in
+    // whatever the author wrote: `640`, `50%`. Kept verbatim, because
+    // this service never fetches the image and so never measures one.
+    let dimension = |name: &str| {
+        element
+            .attr(name)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    Some(Image {
+        src,
+        alt,
+        title,
+        source_line: None,
+        width: dimension("width"),
+        height: dimension("height"),
+        anchor_id: anchor_of(element),
+        hyperlink: None,
+    })
+}
+
+/// The one image an element holds, when an image is all it holds: the
+/// `<a href><img></a>` shape, where the link belongs to the picture.
+/// Whitespace around the image is nothing; a second element or a word of
+/// text makes the element not image-only.
+fn lone_image<'a>(element: &ElementRef<'a>) -> Option<ElementRef<'a>> {
+    let mut image = None;
+    for node in element.children() {
+        match node.value() {
+            Node::Text(text) if text.trim().is_empty() => {}
+            Node::Element(_) => {
+                let child = ElementRef::wrap(node).expect("an element node wraps");
+                if image.is_some() || child.value().name() != "img" {
+                    return None;
+                }
+                image = Some(child);
+            }
+            // A word of text, a comment, anything else: not image-only.
+            _ => return None,
+        }
+    }
+    image
+}
+
+/// The destination of the first link a subtree declares, in document
+/// order: the link a caption names even when the caption is more than the
+/// link alone.
+fn first_href(element: &ElementRef<'_>) -> Option<String> {
+    for child in element.child_elements() {
+        if child.value().name() == "a"
+            && let Some(href) = child
+                .attr("href")
+                .map(str::trim)
+                .filter(|href| !href.is_empty())
+        {
+            return Some(href.to_owned());
+        }
+        if let Some(href) = first_href(&child) {
+            return Some(href);
+        }
+    }
+    None
 }
 
 /// The column geometry a table's `<colgroup>` and `<col>` elements

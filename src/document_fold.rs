@@ -941,6 +941,9 @@ impl DocumentFold {
             label: doc::DocItemLabel::Picture as i32,
             prov: line_prov(image.source_line),
             captions,
+            // The href of a link whose only content was the image: a click
+            // on the picture follows it.
+            hyperlink: image.hyperlink.clone(),
             image: Some(doc::ImageRef {
                 mimetype: image_mimetype(&image.src).to_owned(),
                 dpi: 0,
@@ -2416,6 +2419,7 @@ mod tests {
                 width: None,
                 height: None,
                 anchor_id: None,
+                hyperlink: None,
             }),
         ]);
         let picture = &document.pictures[0];
@@ -2454,6 +2458,39 @@ mod tests {
             document.texts.len(),
             4,
             "the stray caption is still an item"
+        );
+    }
+
+    #[test]
+    fn a_linked_image_and_a_linked_caption_carry_their_targets() {
+        let document = fold(&[
+            info(pb::MarkupFormat::Html),
+            pb::parse_markup_response::Event::Image(pb::ImageBlock {
+                src: "plate.png".to_owned(),
+                hyperlink: Some("https://example.com/plate".to_owned()),
+                ..pb::ImageBlock::default()
+            }),
+            pb::parse_markup_response::Event::TextBlock(pb::TextBlock {
+                label: pb::BlockLabel::Caption as i32,
+                text: "Photo by Ada.".to_owned(),
+                hyperlink: Some("https://ada.example".to_owned()),
+                ..pb::TextBlock::default()
+            }),
+        ]);
+        let picture = &document.pictures[0];
+        assert_eq!(
+            picture.hyperlink.as_deref(),
+            Some("https://example.com/plate"),
+            "the link that wrapped the image lands on the picture"
+        );
+        assert_eq!(picture.captions[0].r#ref, "#/texts/0");
+        let Some(doc::base_text_item::Item::Text(caption)) = document.texts[0].item.as_ref() else {
+            panic!("the caption is a text item");
+        };
+        assert_eq!(
+            caption.base.as_ref().unwrap().hyperlink.as_deref(),
+            Some("https://ada.example"),
+            "the caption item keeps the link the caption block carried"
         );
     }
 

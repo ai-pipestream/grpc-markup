@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    blocks_labelled, client, images, info, meta_scalar, options, parse_ok, sniff_options, spanned,
-    status, styles, table_rows, table_starts, text_blocks, texts, warning,
+    blocks_labelled, client, document, images, info, meta_scalar, options, parse_ok, sniff_options,
+    spanned, status, styles, table_rows, table_starts, text_blocks, texts, warning,
 };
 use grpc_markup::proto::v1 as pb;
 
@@ -788,5 +788,105 @@ async fn a_leading_bom_parses_the_same_as_none() {
     assert_eq!(
         texts(&blocks_labelled(&events, pb::BlockLabel::Title)),
         ["Title"]
+    );
+}
+
+// --------------------------------------------------- picture link targets
+
+/// A figure whose image is wrapped in a link and whose caption holds one:
+/// the two places upstream docling sources a picture's caption link from.
+const LINKED_FIGURE: &str = r#"<body>
+<figure>
+<a href="https://example.com/plate"><img src="plate.png" alt="The plate"></a>
+<figcaption>Photo by <a href="https://ada.example">Ada</a>, with <a href="https://bb.example">Babbage</a>.</figcaption>
+</figure>
+</body>"#;
+
+#[tokio::test]
+async fn a_link_wrapping_only_an_image_lends_the_picture_its_href() {
+    let client = client().await;
+    let html = r#"<body>
+<a href="https://example.com/plate"><img src="plate.png" alt="The plate"></a>
+<a href="https://example.com/figure"><img src="fig.png" alt="The figure"> and its text</a>
+</body>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(images.len(), 2);
+    assert_eq!(
+        images[0].hyperlink.as_deref(),
+        Some("https://example.com/plate"),
+        "a link whose only content is the image belongs to the picture"
+    );
+    assert!(
+        images[1].hyperlink.is_none(),
+        "text beside the image keeps the link a prose link, not the picture's"
+    );
+    assert_eq!(
+        texts(&blocks_labelled(&events, pb::BlockLabel::Paragraph)),
+        ["and its text"],
+        "the text beside the image is still the prose it always was"
+    );
+}
+
+#[tokio::test]
+async fn a_figcaption_names_the_first_link_it_holds() {
+    let client = client().await;
+    let events = parse_ok(&client, LINKED_FIGURE, options(pb::MarkupFormat::Html)).await;
+    let images = images(&events);
+    assert_eq!(
+        images[0].hyperlink.as_deref(),
+        Some("https://example.com/plate"),
+        "the link wrapping the figure's image"
+    );
+    let captions = blocks_labelled(&events, pb::BlockLabel::Caption);
+    assert_eq!(captions.len(), 1);
+    assert_eq!(
+        captions[0].text, "Photo by Ada, with Babbage.",
+        "the anchor texts stay inline in the caption"
+    );
+    assert_eq!(
+        captions[0].hyperlink.as_deref(),
+        Some("https://ada.example"),
+        "the caption carries the first link it holds, though it is not one link"
+    );
+    let links: Vec<&str> = captions[0]
+        .spans
+        .iter()
+        .filter_map(|span| span.hyperlink.as_deref())
+        .collect();
+    assert_eq!(links, ["https://ada.example", "https://bb.example"]);
+}
+
+#[tokio::test]
+async fn the_picture_and_caption_items_carry_the_links_into_the_document() {
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        LINKED_FIGURE,
+        pb::ParseOptions {
+            format: pb::MarkupFormat::Html as i32,
+            emit_document: true,
+            ..pb::ParseOptions::default()
+        },
+    )
+    .await;
+    let document = document(&events).expect("the fold was requested");
+    let picture = &document.pictures[0];
+    assert_eq!(
+        picture.hyperlink.as_deref(),
+        Some("https://example.com/plate"),
+        "the PictureItem keeps the href of the link that wrapped the image"
+    );
+    assert_eq!(picture.captions[0].r#ref, "#/texts/0");
+    let caption = &document.texts[0];
+    let Some(grpc_markup::document::v1::base_text_item::Item::Text(caption)) =
+        caption.item.as_ref()
+    else {
+        panic!("the caption is a text item");
+    };
+    assert_eq!(
+        caption.base.as_ref().unwrap().hyperlink.as_deref(),
+        Some("https://ada.example"),
+        "the caption item carries the first link the figcaption held"
     );
 }

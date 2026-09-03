@@ -657,6 +657,12 @@ message ImageBlock {
 
   // The height the source declares, on the same terms as `width`.
   optional string height = 8;
+
+  // The href of an `<a>` whose only content is this image: the link a
+  // click on the picture would follow. Absent when the anchor wraps more
+  // than the image — an `<a>` over image and text together is a link over
+  // prose, and its URL rides on the text's runs instead.
+  optional string hyperlink = 10;
 }
 
 // CueTiming is one karaoke segment of a cue: the run of the cue's text a
