@@ -890,3 +890,236 @@ async fn the_picture_and_caption_items_carry_the_links_into_the_document() {
         "the caption item carries the first link the figcaption held"
     );
 }
+
+// ------------------------------------------------------------- rich cells
+
+/// The block of one cell block's text arm, for the assertions below.
+fn cell_text(block: &pb::CellBlock) -> &pb::TextBlock {
+    match block.kind.as_ref() {
+        Some(pb::cell_block::Kind::Text(text)) => text,
+        other => panic!("expected a text block, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_nested_table_rides_on_its_cell_as_blocks() {
+    let client = client().await;
+    let html = "<table><tr><td>plain</td>\
+                <td><table><tr><td>in</td><td>ner</td></tr></table></td></tr></table>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let cells = &table_rows(&events)[0].cells;
+    assert!(cells[0].blocks.is_empty(), "a plain cell carries no blocks");
+    assert_eq!(
+        cells[1].text, "in ner",
+        "the flat walk is untouched: the nested table still flattens"
+    );
+    assert_eq!(cells[1].blocks.len(), 1);
+    let Some(pb::cell_block::Kind::Table(nested)) = cells[1].blocks[0].kind.as_ref() else {
+        panic!("the block is the nested table");
+    };
+    assert_eq!(nested.rows.len(), 1);
+    assert_eq!(nested.rows[0].cells[0].text, "in");
+    assert_eq!(nested.rows[0].cells[1].text, "ner");
+    assert!(
+        nested.rows[0]
+            .cells
+            .iter()
+            .all(|cell| cell.blocks.is_empty()),
+        "the nested cells are plain"
+    );
+}
+
+#[tokio::test]
+async fn a_list_in_a_cell_keeps_its_items_as_blocks() {
+    let client = client().await;
+    let html = "<table><tr><td><ul><li>one</li><li>two</li></ul></td></tr></table>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let cell = &table_rows(&events)[0].cells[0];
+    assert_eq!(cell.text, "one two", "the flat text is the flattened list");
+    let items: Vec<&pb::TextBlock> = cell.blocks.iter().map(cell_text).collect();
+    assert_eq!(items.len(), 2);
+    for (item, text) in items.iter().zip(["one", "two"]) {
+        assert_eq!(item.label, pb::BlockLabel::ListItem as i32);
+        assert_eq!(item.text, text);
+        assert_eq!(item.list_depth, Some(1));
+        assert!(!item.enumerated);
+    }
+}
+
+#[tokio::test]
+async fn a_heading_in_a_cell_stays_a_section_header_block() {
+    let client = client().await;
+    let html = "<table><tr><td><h3>Sub</h3>trailing</td></tr></table>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let cell = &table_rows(&events)[0].cells[0];
+    assert_eq!(cell.text, "Sub trailing");
+    assert_eq!(cell.blocks.len(), 2);
+    let heading = cell_text(&cell.blocks[0]);
+    assert_eq!(heading.label, pb::BlockLabel::SectionHeader as i32);
+    assert_eq!(heading.text, "Sub");
+    assert_eq!(heading.level, Some(3));
+    let prose = cell_text(&cell.blocks[1]);
+    assert_eq!(prose.label, pb::BlockLabel::Paragraph as i32);
+    assert_eq!(prose.text, "trailing");
+}
+
+#[tokio::test]
+async fn underline_formatting_makes_a_cell_rich_and_plain_cells_stay_flat() {
+    let client = client().await;
+    let html = "<table><tr><td>a <u>signed</u> note</td><td>plain</td></tr></table>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let cells = &table_rows(&events)[0].cells;
+    assert!(
+        cells[1].blocks.is_empty(),
+        "uniform prose is not rich, so its cell stays block-free"
+    );
+    let block = cell_text(&cells[0].blocks[0]);
+    assert_eq!(block.text, "a signed note");
+    let underlined = block
+        .spans
+        .iter()
+        .find(|span| styles(span).contains(&pb::SpanStyle::Underline))
+        .expect("the underline run survives in the block");
+    assert_eq!(spanned(&block.text, underlined), "signed");
+}
+
+#[tokio::test]
+async fn a_pre_with_inline_structure_keeps_code_styled_runs() {
+    let client = client().await;
+    let html = r#"<table><tr><td><pre>See <a href="https://docs.example">the docs</a> first</pre></td></tr></table>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let cell = &table_rows(&events)[0].cells[0];
+    let block = cell_text(&cell.blocks[0]);
+    assert_eq!(block.label, pb::BlockLabel::Code as i32);
+    assert_eq!(block.text, "See the docs first");
+    let code = block
+        .spans
+        .iter()
+        .find(|span| styles(span).contains(&pb::SpanStyle::Code))
+        .expect("the whole block is code-styled");
+    assert_eq!(spanned(&block.text, code), "See the docs first");
+    let link = block
+        .spans
+        .iter()
+        .find(|span| span.hyperlink.is_some())
+        .expect("the link inside survives as a run, not a backticked fragment");
+    assert_eq!(spanned(&block.text, link), "the docs");
+    assert_eq!(link.hyperlink.as_deref(), Some("https://docs.example"));
+}
+
+#[tokio::test]
+async fn a_spanning_rich_cell_keeps_its_blocks_on_the_anchor_cell_only() {
+    let client = client().await;
+    let html = r#"<table><tr><td rowspan="2"><ul><li>x</li></ul></td><td>b</td></tr><tr><td>c</td></tr></table>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let rows = table_rows(&events);
+    assert_eq!(rows[0].cells[0].row_span, 2);
+    assert_eq!(rows[0].cells[0].blocks.len(), 1, "the anchor cell is rich");
+    assert!(rows[0].cells[1].blocks.is_empty());
+    assert_eq!(rows[1].cells.len(), 1, "the covered position is not a cell");
+    assert_eq!(rows[1].cells[0].column_index, 1);
+    assert_eq!(rows[1].cells[0].text, "c");
+    assert!(
+        rows[1].cells[0].blocks.is_empty(),
+        "a covered position carries no blocks"
+    );
+}
+
+#[tokio::test]
+async fn a_plain_table_carries_no_blocks() {
+    let client = client().await;
+    let html =
+        r#"<table><tr><td>a</td><td><b>b</b> <a href="https://c.example">c</a></td></tr></table>"#;
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let cells = &table_rows(&events)[0].cells;
+    assert!(
+        cells.iter().all(|cell| cell.blocks.is_empty()),
+        "emphasis and links are runs, not structure: the cells stay plain"
+    );
+    assert_eq!(cells[1].text, "b c");
+    assert_eq!(
+        cells[1].spans[1].hyperlink.as_deref(),
+        Some("https://c.example")
+    );
+}
+
+#[tokio::test]
+async fn a_rich_cell_points_at_a_group_holding_its_structure() {
+    let client = client().await;
+    let html = "<table><tr><td><ul><li>one</li><li>two</li></ul></td></tr></table>";
+    let events = parse_ok(
+        &client,
+        html,
+        pb::ParseOptions {
+            format: pb::MarkupFormat::Html as i32,
+            emit_document: true,
+            ..pb::ParseOptions::default()
+        },
+    )
+    .await;
+    let document = document(&events).expect("the fold was requested");
+    assert!(
+        grpc_markup::document_fold::integrity_errors(document).is_empty(),
+        "the fragment stays merge-safe"
+    );
+    let table = &document.tables[0];
+    let cell = &table.data.as_ref().unwrap().grid[0].cells[0];
+    let cell_ref = &cell.r#ref.as_ref().expect("the rich cell points").r#ref;
+    assert_eq!(cell_ref, "#/groups/0");
+    assert_eq!(
+        table.data.as_ref().unwrap().table_cells[0]
+            .r#ref
+            .as_ref()
+            .unwrap()
+            .r#ref,
+        "#/groups/0",
+        "both shapes of the cell name the same group"
+    );
+    let group = &document.groups[0];
+    assert_eq!(group.parent.as_ref().unwrap().r#ref, "#/tables/0");
+    assert_eq!(group.label_raw.as_deref(), Some("rich_cell"));
+    assert_eq!(group.children.len(), 2, "the two list items");
+    for child in &group.children {
+        let item = &document.texts[child
+            .r#ref
+            .strip_prefix("#/texts/")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()];
+        let base = match item.item.as_ref() {
+            Some(grpc_markup::document::v1::base_text_item::Item::ListItem(item)) => {
+                item.base.as_ref().unwrap()
+            }
+            other => panic!("the cell's items are list items, got {other:?}"),
+        };
+        assert_eq!(
+            base.label,
+            grpc_markup::document::v1::DocItemLabel::ListItem as i32
+        );
+        assert_eq!(base.parent.as_ref().unwrap().r#ref, "#/groups/0");
+    }
+}
+
+#[tokio::test]
+async fn a_flat_stream_request_strips_the_cell_block_runs_too() {
+    let client = client().await;
+    let html = "<table><tr><td>a <u>signed</u> note</td></tr></table>";
+    let events = parse_ok(
+        &client,
+        html,
+        pb::ParseOptions {
+            format: pb::MarkupFormat::Html as i32,
+            emit_inline_spans: Some(false),
+            ..pb::ParseOptions::default()
+        },
+    )
+    .await;
+    let cell = &table_rows(&events)[0].cells[0];
+    assert!(cell.spans.is_empty());
+    let block = cell_text(&cell.blocks[0]);
+    assert_eq!(block.text, "a signed note", "the text is still the text");
+    assert!(
+        block.spans.is_empty(),
+        "the runs inside a cell block follow the same option"
+    );
+}

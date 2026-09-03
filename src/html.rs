@@ -32,8 +32,11 @@
 //!   `rowspan` / `colspan` honored through an occupancy grid, the
 //!   `<caption>` element on `TableStart`, `<colgroup>` / `<col>` geometry
 //!   as the table's column specs, and each cell's own `align` / `valign`.
-//!   Nested block structure inside a cell still flattens to its text; its
-//!   emphasis and its links do not.
+//!   A cell's text is flattened as always; a *rich* cell — one holding a
+//!   nested table, a list, a heading, a `pre` with inline structure, or
+//!   `u`/`ins`/`sub`/`sup` formatting — also carries its structure as
+//!   `CellBlock`s on the cell, because no block events may stream between
+//!   a `TableRow` and its `TableEnd`.
 //! - `pre` keeps its text verbatim as `BLOCK_LABEL_CODE` with a
 //!   `language-*` class as the declared language.
 //! - `img` becomes an `ImageBlock` (`src`, `alt`, `title` verbatim, never
@@ -706,76 +709,9 @@ impl Walk<'_, '_> {
             columns: column_specs(element),
             ..Table::default()
         })?;
-
-        // Rows in DOM order, `thead`/`tbody`/`tfoot` unwrapped.
-        let mut rows: Vec<ElementRef<'_>> = Vec::new();
-        for child in element.child_elements() {
-            match child.value().name() {
-                "tr" => rows.push(child),
-                "thead" | "tbody" | "tfoot" => {
-                    rows.extend(
-                        child
-                            .child_elements()
-                            .filter(|row| row.value().name() == "tr"),
-                    );
-                }
-                _ => {}
-            }
-        }
-
-        let mut occupied: std::collections::BTreeSet<(u32, u32)> =
-            std::collections::BTreeSet::new();
-        for (row_index, row) in rows.iter().enumerate() {
-            let row_index = u32::try_from(row_index).unwrap_or(u32::MAX);
-            let in_head = row
-                .parent()
-                .and_then(ElementRef::wrap)
-                .is_some_and(|parent| parent.value().name() == "thead");
-            let mut column = 0u32;
-            let mut cells = Vec::new();
-            let mut all_headers = true;
-            for cell in row.child_elements() {
-                let cell_name = cell.value().name();
-                if cell_name != "td" && cell_name != "th" {
-                    continue;
-                }
-                while occupied.contains(&(row_index, column)) {
-                    column += 1;
-                }
-                let span = |attr: &str| {
-                    cell.attr(attr)
-                        .and_then(|value| value.trim().parse::<u32>().ok())
-                        .filter(|span| *span >= 1)
-                        .unwrap_or(1)
-                };
-                let column_span = span("colspan");
-                let row_span = span("rowspan");
-                for r in row_index..row_index.saturating_add(row_span) {
-                    for c in column..column.saturating_add(column_span) {
-                        occupied.insert((r, c));
-                    }
-                }
-                let is_header = cell_name == "th" || in_head;
-                all_headers &= is_header;
-                // Nested block structure inside a cell still flattens to
-                // its text; its emphasis and its links no longer do.
-                let (text, spans) = cell_inline(&cell);
-                cells.push(pb::TableCell {
-                    column_index: column,
-                    text,
-                    column_span,
-                    row_span,
-                    is_header,
-                    spans,
-                    align: attr_alignment(&cell, "align") as i32,
-                    valign: attr_alignment(&cell, "valign") as i32,
-                });
-                column = column.saturating_add(column_span);
-            }
-            if cells.is_empty() {
-                continue;
-            }
-            self.emitter.table_row(all_headers, cells)?;
+        let source = self.emitter.source().clone();
+        for row in table_rows(element, &source) {
+            self.emitter.table_row(row.is_header, row.cells)?;
         }
         self.emitter.table_end()
     }
@@ -1023,6 +959,427 @@ fn cell_children(element: &ElementRef<'_>, inline: &mut Inline) {
             }
             _ => {}
         }
+    }
+}
+
+/// The rows of one `<table>`, in DOM order with `thead`/`tbody`/`tfoot`
+/// unwrapped, header cells and rows flagged, and `rowspan` / `colspan`
+/// applied through an occupancy grid.
+///
+/// `table_ref` stays empty on the result: the emitter stamps the identity
+/// of a streamed table, and a table nested in a cell has no stream
+/// identity of its own.
+fn table_rows(element: &ElementRef<'_>, source: &pb::CollectorSource) -> Vec<pb::TableRow> {
+    let mut rows: Vec<ElementRef<'_>> = Vec::new();
+    for child in element.child_elements() {
+        match child.value().name() {
+            "tr" => rows.push(child),
+            "thead" | "tbody" | "tfoot" => {
+                rows.extend(
+                    child
+                        .child_elements()
+                        .filter(|row| row.value().name() == "tr"),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let mut occupied: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let row_index = u32::try_from(row_index).unwrap_or(u32::MAX);
+        let in_head = row
+            .parent()
+            .and_then(ElementRef::wrap)
+            .is_some_and(|parent| parent.value().name() == "thead");
+        let mut column = 0u32;
+        let mut cells = Vec::new();
+        let mut all_headers = true;
+        for cell in row.child_elements() {
+            let cell_name = cell.value().name();
+            if cell_name != "td" && cell_name != "th" {
+                continue;
+            }
+            while occupied.contains(&(row_index, column)) {
+                column += 1;
+            }
+            let span = |attr: &str| {
+                cell.attr(attr)
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+                    .filter(|span| *span >= 1)
+                    .unwrap_or(1)
+            };
+            let column_span = span("colspan");
+            let row_span = span("rowspan");
+            for r in row_index..row_index.saturating_add(row_span) {
+                for c in column..column.saturating_add(column_span) {
+                    occupied.insert((r, c));
+                }
+            }
+            let is_header = cell_name == "th" || in_head;
+            all_headers &= is_header;
+            // The flat walk is the cell's text, unchanged; a rich cell's
+            // structure rides beside it on `blocks`.
+            let (text, spans) = cell_inline(&cell);
+            let blocks = if is_rich_cell(&cell) {
+                cell_blocks(&cell, source)
+            } else {
+                Vec::new()
+            };
+            cells.push(pb::TableCell {
+                column_index: column,
+                text,
+                column_span,
+                row_span,
+                is_header,
+                spans,
+                align: attr_alignment(&cell, "align") as i32,
+                valign: attr_alignment(&cell, "valign") as i32,
+                blocks,
+            });
+            column = column.saturating_add(column_span);
+        }
+        if cells.is_empty() {
+            continue;
+        }
+        out.push(pb::TableRow {
+            table_ref: String::new(),
+            row_index,
+            is_header: all_headers,
+            cells,
+        });
+    }
+    out
+}
+
+/// Whether a cell is rich: it holds nested block structure (a table, a
+/// list, a heading, a `pre` with inline structure inside it) or the
+/// inline formatting a flat projection cannot say (`u`, `ins`, `sub`,
+/// `sup`). This is docling's rule for when a cell's content becomes a
+/// group of blocks rather than flat text alone.
+fn is_rich_cell(cell: &ElementRef<'_>) -> bool {
+    let mut stack: Vec<ElementRef<'_>> = cell.child_elements().collect();
+    while let Some(element) = stack.pop() {
+        let name = element.value().name();
+        match name {
+            "table" | "ul" | "ol" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "u" | "ins"
+            | "sub" | "sup" => return true,
+            // A `pre` is a code block, which flat text carries; one holding
+            // inline elements has structure the flat text cannot say.
+            "pre" if element.child_elements().next().is_some() => return true,
+            _ => stack.extend(element.child_elements()),
+        }
+    }
+    false
+}
+
+/// A rich cell's content as cell blocks: the nested tables, lists,
+/// headings and structured code the flat text flattens away, with the
+/// prose between them as paragraphs.
+///
+/// This is a second, structured walk beside the flat one, and it emits
+/// nothing: no block events may stream between a `TableRow` and its
+/// `TableEnd`, so the blocks ride on the cell itself.
+fn cell_blocks(cell: &ElementRef<'_>, source: &pb::CollectorSource) -> Vec<pb::CellBlock> {
+    let mut walk = CellBlocks::default();
+    walk.children(cell, source);
+    walk.flush(source);
+    walk.blocks
+}
+
+/// The accumulating state of the structured cell walk: the blocks built
+/// so far and the prose collected since the last block boundary.
+#[derive(Default)]
+struct CellBlocks {
+    blocks: Vec<pb::CellBlock>,
+    inline: Inline,
+}
+
+impl CellBlocks {
+    /// One level of a rich cell's content: block elements become blocks,
+    /// everything between them collects as prose.
+    fn children(&mut self, element: &ElementRef<'_>, source: &pb::CollectorSource) {
+        for node in element.children() {
+            match node.value() {
+                Node::Text(text) => self.inline.push(text),
+                Node::Element(_) => {
+                    let child = ElementRef::wrap(node).expect("an element node wraps");
+                    let name = child.value().name().to_ascii_lowercase();
+                    match name.as_str() {
+                        _ if SKIPPED.contains(&name.as_str()) => {}
+                        "table" => {
+                            self.flush(source);
+                            self.blocks.push(pb::CellBlock {
+                                kind: Some(pb::cell_block::Kind::Table(cell_table(&child, source))),
+                            });
+                        }
+                        "ul" => {
+                            self.flush(source);
+                            self.list(&child, false, 1, source);
+                        }
+                        "ol" => {
+                            self.flush(source);
+                            self.list(&child, true, 1, source);
+                        }
+                        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                            self.flush(source);
+                            let mut inline = Inline::default();
+                            cell_runs(&child, &mut inline, false);
+                            let (text, spans) = inline.take();
+                            if !text.is_empty() {
+                                let level = u32::from(name.as_bytes()[1] - b'0');
+                                let mut block = cell_text_block(
+                                    pb::BlockLabel::SectionHeader,
+                                    text,
+                                    spans,
+                                    source,
+                                );
+                                block.level = Some(level);
+                                block.anchor_id = anchor_of(&child);
+                                self.blocks.push(into_cell_text(block));
+                            }
+                        }
+                        "pre" if child.child_elements().next().is_some() => {
+                            self.flush(source);
+                            self.pre(&child, source);
+                        }
+                        "img" => {
+                            self.flush(source);
+                            if let Some(image) = image_block(&child) {
+                                self.blocks.push(cell_image_block(image, source));
+                            }
+                        }
+                        // A container is a boundary, not a block of its
+                        // own: its content joins the cell's sequence.
+                        _ if CONTAINERS.contains(&name.as_str()) => {
+                            self.flush(source);
+                            self.children(&child, source);
+                        }
+                        _ => cell_run_element(&child, &mut self.inline, false),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The prose accumulated since the last block, as one paragraph block.
+    fn flush(&mut self, source: &pb::CollectorSource) {
+        if self.inline.is_empty() {
+            return;
+        }
+        let (text, spans) = self.inline.take();
+        if text.is_empty() {
+            return;
+        }
+        self.blocks.push(into_cell_text(cell_text_block(
+            pb::BlockLabel::Paragraph,
+            text,
+            spans,
+            source,
+        )));
+    }
+
+    /// A list inside a rich cell: one list-item block per `li`, a nested
+    /// list following the item it belongs to.
+    fn list(
+        &mut self,
+        list: &ElementRef<'_>,
+        ordered: bool,
+        depth: u32,
+        source: &pb::CollectorSource,
+    ) {
+        // As on the document level: a marker exists only when the source
+        // numbered the list itself.
+        let start: Option<u64> = list
+            .attr("start")
+            .and_then(|start| start.trim().parse().ok())
+            .filter(|_| ordered);
+        let mut counter = start;
+        for child in list.child_elements() {
+            match child.value().name() {
+                "li" => {
+                    let marker = counter.map(|n| format!("{n}."));
+                    if let Some(n) = counter.as_mut() {
+                        *n += 1;
+                    }
+                    self.list_item(&child, ordered, depth, marker, source);
+                }
+                "ul" => self.list(&child, false, depth + 1, source),
+                "ol" => self.list(&child, true, depth + 1, source),
+                _ => {}
+            }
+        }
+    }
+
+    /// One `li`: its inline content is the item's text, nested lists
+    /// follow as deeper items.
+    fn list_item(
+        &mut self,
+        li: &ElementRef<'_>,
+        ordered: bool,
+        depth: u32,
+        marker: Option<String>,
+        source: &pb::CollectorSource,
+    ) {
+        let mut inline = Inline::default();
+        let mut nested = Vec::new();
+        for node in li.children() {
+            match node.value() {
+                Node::Text(text) => inline.push(text),
+                Node::Element(_) => {
+                    let child = ElementRef::wrap(node).expect("an element node wraps");
+                    match child.value().name() {
+                        "ul" | "ol" => nested.push(child),
+                        _ => cell_run_element(&child, &mut inline, false),
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (text, spans) = inline.take();
+        if !text.is_empty() {
+            let mut block = cell_text_block(pb::BlockLabel::ListItem, text, spans, source);
+            block.enumerated = ordered;
+            block.marker = marker;
+            block.list_depth = Some(depth);
+            block.anchor_id = anchor_of(li);
+            self.blocks.push(into_cell_text(block));
+        }
+        for child in nested {
+            match child.value().name() {
+                "ul" => self.list(&child, false, depth + 1, source),
+                "ol" => self.list(&child, true, depth + 1, source),
+                _ => {}
+            }
+        }
+    }
+
+    /// A `pre` with inline structure: the text verbatim as a code block,
+    /// every run code-styled, and the inner elements' own runs kept — the
+    /// link inside stays a link rather than the whole becoming a bare
+    /// backticked fragment.
+    fn pre(&mut self, pre: &ElementRef<'_>, source: &pb::CollectorSource) {
+        let mut inline = Inline::default();
+        inline.open(Mark::style(pb::SpanStyle::Code));
+        cell_runs(pre, &mut inline, true);
+        inline.close();
+        let (text, spans) = inline.take();
+        if text.trim().is_empty() {
+            return;
+        }
+        let mut block = cell_text_block(pb::BlockLabel::Code, text, spans, source);
+        block.language = language_class(pre)
+            .or_else(|| child_element(pre, "code").and_then(|code| language_class(&code)));
+        block.anchor_id = anchor_of(pre);
+        self.blocks.push(into_cell_text(block));
+    }
+}
+
+/// One text block of a rich cell, stamped with the parse's provenance.
+/// Its `index` is unused: the cell carrying it is its position.
+fn cell_text_block(
+    label: pb::BlockLabel,
+    text: String,
+    spans: Vec<pb::InlineSpan>,
+    source: &pb::CollectorSource,
+) -> pb::TextBlock {
+    pb::TextBlock {
+        label: label as i32,
+        text,
+        source: Some(source.clone()),
+        spans,
+        ..pb::TextBlock::default()
+    }
+}
+
+/// Wrap a rich cell's text block as a cell block.
+fn into_cell_text(block: pb::TextBlock) -> pb::CellBlock {
+    pb::CellBlock {
+        kind: Some(pb::cell_block::Kind::Text(block)),
+    }
+}
+
+/// One image of a rich cell, as the wire's own image block.
+fn cell_image_block(image: Image, source: &pb::CollectorSource) -> pb::CellBlock {
+    pb::CellBlock {
+        kind: Some(pb::cell_block::Kind::Image(pb::ImageBlock {
+            index: 0,
+            src: image.src,
+            alt: image.alt,
+            title: image.title,
+            source_line: image.source_line,
+            source: Some(source.clone()),
+            anchor_id: image.anchor_id,
+            width: image.width,
+            height: image.height,
+            hyperlink: image.hyperlink,
+        })),
+    }
+}
+
+/// A `<table>` nested in a cell, in the wire's own row shape.
+fn cell_table(table: &ElementRef<'_>, source: &pb::CollectorSource) -> pb::CellTable {
+    let caption = child_element(table, "caption")
+        .map(|caption| collapse(&text_of(&caption)))
+        .filter(|caption| !caption.is_empty());
+    pb::CellTable {
+        rows: table_rows(table, source),
+        caption,
+    }
+}
+
+/// Walk an inline subtree into a cell block's flattener: the same marks
+/// the flat walk records, with `verbatim` keeping the author's spacing
+/// inside `pre`.
+fn cell_runs(element: &ElementRef<'_>, inline: &mut Inline, verbatim: bool) {
+    for node in element.children() {
+        match node.value() {
+            Node::Text(text) => {
+                if verbatim {
+                    inline.push_verbatim(text);
+                } else {
+                    inline.push(text);
+                }
+            }
+            Node::Element(_) => {
+                let child = ElementRef::wrap(node).expect("an element node wraps");
+                cell_run_element(&child, inline, verbatim);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One element's contribution to a cell block's runs: its own mark over
+/// the run it covers, or its text flattened in with word boundaries.
+fn cell_run_element(element: &ElementRef<'_>, inline: &mut Inline, verbatim: bool) {
+    let name = element.value().name().to_ascii_lowercase();
+    if SKIPPED.contains(&name.as_str()) {
+        return;
+    }
+    if name == "br" {
+        inline.push_verbatim("\n");
+        return;
+    }
+    let link = (name == "a").then(|| link_mark(element)).flatten();
+    let mark = link.clone().or_else(|| inline_mark(element, &name));
+    match (link.is_some(), mark) {
+        (true, Some(mark)) => inline.open_link_mark(mark),
+        (false, Some(mark)) => inline.open(mark),
+        (_, None) => {
+            inline.space();
+            cell_runs(element, inline, verbatim);
+            inline.space();
+            return;
+        }
+    }
+    cell_runs(element, inline, verbatim);
+    if link.is_some() {
+        inline.close_link();
+    } else {
+        inline.close();
     }
 }
 

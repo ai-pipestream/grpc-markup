@@ -565,7 +565,8 @@ message TableCell {
 
   // Cell text, flattened the same way as `TextBlock.text`, with `spans`
   // describing what the flattening removed. Nested block structure inside
-  // a cell flattens into this text. May be empty.
+  // a cell flattens into this text; when the cell is rich the same
+  // structure also rides on `blocks`. May be empty.
   string text = 2;
 
   // Columns this cell spans. At least 1; always 1 in formats without spans.
@@ -590,6 +591,48 @@ message TableCell {
   // Vertical alignment the source declares on the cell itself, which
   // overrides the column's. `ALIGNMENT_UNSPECIFIED` when it declares none.
   Alignment valign = 8;
+
+  // The cell's structured content, present only when the cell is rich: it
+  // holds nested block markup (a nested table, a list, a heading, a `pre`
+  // with inline structure) or inline formatting a flat projection would
+  // lose (`u`, `ins`, `sub`, `sup`). The same content still flattens into
+  // `text`; this field is the structure beside the flattening, so a plain
+  // cell never sets it. Only the anchor cell of a span carries blocks: the
+  // positions a span covers are not cells and carry nothing.
+  repeated CellBlock blocks = 9;
+}
+
+// CellBlock is one structured block inside a rich table cell: a text
+// block, an image, or a nested table.
+//
+// No block events stream between `TableRow` and `TableEnd` — the stream's
+// document order forbids them there — so a rich cell's structure rides on
+// the cell itself. A block nested in a cell has no stream `index`: the
+// cell carrying it is its position.
+message CellBlock {
+  // The one shape this block has.
+  oneof kind {
+    // A paragraph, list item, heading or code block of the cell, with its
+    // runs.
+    TextBlock text = 1;
+
+    // An image the cell holds.
+    ImageBlock image = 2;
+
+    // A table nested inside the cell.
+    CellTable table = 3;
+  }
+}
+
+// CellTable is a table nested inside a table cell.
+message CellTable {
+  // The nested table's rows in row order, in the same shape a streamed
+  // table's rows arrive. Their `table_ref` is empty: a nested table has no
+  // stream identity of its own.
+  repeated TableRow rows = 1;
+
+  // The nested table's caption, when it declares one.
+  optional string caption = 2;
 }
 
 // TableRow is one row of a table, emitted as soon as it is parsed.

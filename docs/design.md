@@ -27,9 +27,11 @@
   wrote.
 - Rendering, syntax highlighting, or language detection beyond what the
   source declares.
-- Rich block structure inside a table cell or an image alt: nested lists
-  and nested tables inside a cell flatten to the cell's text. The cell's
-  own emphasis and links survive as runs; its structure does not.
+- Rich block structure inside an image alt: alt text stays text. Inside a
+  table cell, nested lists and nested tables still flatten to the cell's
+  `text` — but a *rich* cell (nested table, list, heading, `pre` with
+  inline structure, or `u`/`ins`/`sub`/`sup` formatting) also carries the
+  structure as `TableCell.blocks`, so the flattening is no longer lossy.
 - Resolving what a reference points at *on the typed wire*: a span carries
   the key, and the Document projection is where a key becomes a `FineRef`
   into a real item.
@@ -134,7 +136,7 @@ scope by construction.
 | `blockquote` | `BLOCK_LABEL_QUOTE` per paragraph, every block inside carrying its `quote_depth` |
 | `ul` / `ol` / `li` | `BLOCK_LABEL_LIST_ITEM` with nesting depth; `enumerated` for `ol`; a marker is written only when the source numbered the list (`ol start`) |
 | `dl` / `dt` / `dd` | list items with the proto's `definition-term` / `definition-description` roles, descriptions one level under their term |
-| `table` (+`thead`/`tbody`/`tfoot`, `caption`, `colspan`/`rowspan`, `colgroup`/`col`) | streamed table with the caption on `TableStart`, the `col` geometry as `columns` (a `span` repeated across the columns it covers), header cells and rows flagged, spans advancing the column index over an occupancy grid, each cell's own `align`/`valign` and its inline runs |
+| `table` (+`thead`/`tbody`/`tfoot`, `caption`, `colspan`/`rowspan`, `colgroup`/`col`) | streamed table with the caption on `TableStart`, the `col` geometry as `columns` (a `span` repeated across the columns it covers), header cells and rows flagged, spans advancing the column index over an occupancy grid, each cell's own `align`/`valign` and its inline runs; a rich cell (nested table, list, heading, structured `pre`, `u`/`ins`/`sub`/`sup`) also carries its structure as `blocks`: list items stay list-item blocks, headings stay section headers, a nested table stays a `CellTable` |
 | `pre` (+`language-*` class) | `BLOCK_LABEL_CODE`, text verbatim |
 | `img`, `figure`/`figcaption` | `ImageBlock` (`src`/`alt`/`title` verbatim; a `srcset` with no `src` lends its first candidate; an `<a>` whose only content is the image lends it the `href` as `hyperlink`), the figcaption as a following `CAPTION` block carrying the first link it holds |
 | `picture` | exactly the one `ImageBlock` its `img` fallback names; `source` candidates are never pictures of their own |
@@ -150,10 +152,9 @@ scope by construction.
 tree-builder error list — repairs the parser actually made — with the
 missing-doctype complaint excluded, because a body-only fragment is a legal
 input. Deliberately out of scope: browser rendering, bounding boxes,
-form/key-value extraction, checkbox recognition, block structure inside a
-table cell (nested lists and tables flatten to the cell's text, though the
-cell's own emphasis and links survive as runs), the `<inline-formula>`
-JATS-ism, and image fetching.
+form/key-value extraction, checkbox recognition, the `<inline-formula>`
+JATS-ism, and image fetching. A table cell's flat text is unchanged by the
+rich-cell walk: `blocks` ride beside it, never replace it.
 
 ### 4.3 AsciiDoc (line-oriented)
 
@@ -400,9 +401,14 @@ Dropped or demoted per format, deliberately:
   Everything else the typed wire carries has a first-class slot on this
   plane.
 - **HTML:** anything derived from a rendered page (provenance
-  boxes, visibility, forms) never existed here; nested structure inside a
-  table cell survives only as the cell's flattened text; `hr` and unmapped
-  elements survive only as warnings.
+  boxes, visibility, forms) never existed here; `hr` and unmapped
+  elements survive only as warnings. A rich table cell's `blocks` become a
+  group the document cell's `ref` points at — the group vocabulary has no
+  rich-cell member, so it states its kind as `label_raw: "rich_cell"` the
+  way a quotation group does — with the blocks folded as real child items
+  (text items at their own labels, nested tables, pictures) parented to
+  the group and the group parented to the owning table. A plain cell's
+  text is the cell as before.
 - **AsciiDoc:** attribute entries live only on the body meta.
 - **LaTeX:** everything TeX (macro definitions, spacing, counters, page
   furniture) dissolves; tikz survives only as its source; description-term

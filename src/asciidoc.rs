@@ -640,6 +640,8 @@ impl Walk<'_, '_> {
                 spans,
                 align: spec.align as i32,
                 valign: spec.valign as i32,
+                // An AsciiDoc cell is flat text by construction.
+                blocks: Vec::new(),
             });
             column = column.saturating_add(spec.column_span);
             if let Some(spec) = next {

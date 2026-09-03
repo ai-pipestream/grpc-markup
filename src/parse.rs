@@ -170,6 +170,25 @@ fn strip_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
+/// Drop a cell's runs when the request asked for a flat stream — the runs
+/// inside its cell blocks go with them, nested tables included.
+fn clear_cell_spans(cell: &mut pb::TableCell) {
+    cell.spans.clear();
+    for block in &mut cell.blocks {
+        match block.kind.as_mut() {
+            Some(pb::cell_block::Kind::Text(text)) => text.spans.clear(),
+            Some(pb::cell_block::Kind::Table(table)) => {
+                for row in &mut table.rows {
+                    for cell in &mut row.cells {
+                        clear_cell_spans(cell);
+                    }
+                }
+            }
+            Some(pb::cell_block::Kind::Image(_)) | None => {}
+        }
+    }
+}
+
 /// A [`pb::MetaValue`] holding one verbatim scalar, so a fold whose
 /// metadata is naturally flat stays a one-liner per key.
 #[must_use]
@@ -373,6 +392,14 @@ impl<'a> Emitter<'a> {
         self.fold.is_some() || self.document.is_some()
     }
 
+    /// This parse's provenance stamp, for content a fold attaches to
+    /// another event — a rich cell's blocks — rather than sending through
+    /// the emitter.
+    #[must_use]
+    pub const fn source(&self) -> &pb::CollectorSource {
+        &self.source
+    }
+
     /// Send the `MarkupInfo` header. Must be the fold's first emission.
     ///
     /// # Errors
@@ -462,7 +489,7 @@ impl<'a> Emitter<'a> {
     ) -> Result<(), ParseError> {
         if !self.emit_inline_spans {
             for cell in &mut cells {
-                cell.spans.clear();
+                clear_cell_spans(cell);
             }
         }
         let (table_ref, row_index) = {

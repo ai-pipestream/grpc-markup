@@ -1001,6 +1001,9 @@ impl Project<'_, '_> {
                         spans: wire_spans(&cell.spans),
                         align: wire_alignment(cell.align) as i32,
                         valign: wire_valignment(cell.valign) as i32,
+                        // A rich cell's group lives on the document event,
+                        // which this format carries item for item.
+                        blocks: Vec::new(),
                     })
                     .collect();
                 let is_header = row.cells.iter().all(|cell| cell.column_header);

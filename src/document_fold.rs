@@ -67,6 +67,12 @@ const FURNITURE_REF: &str = "#/furniture";
 /// it provides for exactly that.
 const QUOTE_GROUP: &str = "quote";
 
+/// `name` and `label_raw` of a rich table cell's content group. The group
+/// vocabulary has no rich-cell member either — `INLINE` means runs inside
+/// a paragraph, not blocks inside a cell — so the group states its kind in
+/// the same raw-label fallback a quotation group uses.
+const RICH_CELL_GROUP: &str = "rich_cell";
+
 /// A fold of one parse's events into one Document.
 ///
 /// Feed it every event of one `ParseMarkup` response stream in order, then
@@ -166,6 +172,10 @@ struct PendingTable {
     cell_refs: Vec<(usize, usize, usize, usize, String)>,
     /// Anchors the cells' runs declare, in first-declaration order.
     cell_anchors: Vec<String>,
+    /// Arena indexes of the rich-cell groups the rows created, waiting for
+    /// the table's own arena index to become their parent, the way the
+    /// cells' references wait for it.
+    cell_groups: Vec<usize>,
 }
 
 impl Default for DocumentFold {
@@ -402,22 +412,7 @@ impl DocumentFold {
         let parent = self.current_parent();
         let self_ref = format!("#/texts/{}", self.document.texts.len());
         let base = self.text_base(&self_ref, &parent, block, doc_label(label));
-        let variant = match label {
-            pb::BlockLabel::Title => {
-                doc::base_text_item::Item::Title(doc::TitleItem { base: Some(base) })
-            }
-            pb::BlockLabel::SectionHeader => {
-                doc::base_text_item::Item::SectionHeader(doc::SectionHeaderItem {
-                    base: Some(base),
-                    level: int(level),
-                })
-            }
-            pb::BlockLabel::Formula => {
-                doc::base_text_item::Item::Formula(doc::FormulaItem { base: Some(base) })
-            }
-            pb::BlockLabel::Code => doc::base_text_item::Item::Code(self.code_item(block, base)),
-            _ => doc::base_text_item::Item::Text(doc::TextItem { base: Some(base) }),
-        };
+        let variant = self.text_variant(label, block, base);
         let index = self.document.texts.len();
         self.document.texts.push(doc::BaseTextItem {
             item: Some(variant),
@@ -472,6 +467,39 @@ impl DocumentFold {
     fn picture_at(&mut self, self_ref: &str) -> Option<&mut doc::PictureItem> {
         let index: usize = self_ref.strip_prefix("#/pictures/")?.parse().ok()?;
         self.document.pictures.get_mut(index)
+    }
+
+    /// The text variant one wire label maps to, with the block's own
+    /// fields on it. `ListItem` is reachable only from a rich cell's
+    /// blocks: a streamed list item goes through
+    /// [`push_list_item`](Self::push_list_item) for its grouping.
+    fn text_variant(
+        &self,
+        label: pb::BlockLabel,
+        block: &pb::TextBlock,
+        base: doc::TextItemBase,
+    ) -> doc::base_text_item::Item {
+        match label {
+            pb::BlockLabel::Title => {
+                doc::base_text_item::Item::Title(doc::TitleItem { base: Some(base) })
+            }
+            pb::BlockLabel::SectionHeader => {
+                doc::base_text_item::Item::SectionHeader(doc::SectionHeaderItem {
+                    base: Some(base),
+                    level: int(block.level.unwrap_or(1)),
+                })
+            }
+            pb::BlockLabel::ListItem => doc::base_text_item::Item::ListItem(doc::ListItem {
+                base: Some(base),
+                enumerated: block.enumerated,
+                marker: block.marker.clone(),
+            }),
+            pb::BlockLabel::Formula => {
+                doc::base_text_item::Item::Formula(doc::FormulaItem { base: Some(base) })
+            }
+            pb::BlockLabel::Code => doc::base_text_item::Item::Code(self.code_item(block, base)),
+            _ => doc::base_text_item::Item::Text(doc::TextItem { base: Some(base) }),
+        }
     }
 
     /// TRAP, and the reason this branch exists: `CodeItem` does not wrap a
@@ -775,6 +803,7 @@ impl DocumentFold {
                 .filter(|id| !id.is_empty())
                 .cloned()
                 .collect(),
+            cell_groups: Vec::new(),
         });
     }
 
@@ -782,12 +811,24 @@ impl DocumentFold {
     /// accounts for the spans before each cell, so it is trusted rather
     /// than recomputed.
     fn on_table_row(&mut self, row: &pb::TableRow) {
+        if !self
+            .table
+            .as_ref()
+            .is_some_and(|table| table.reference == row.table_ref)
+        {
+            return;
+        }
+        // A rich cell's blocks become their group first: the group arena
+        // is independent of the pending table, and the group names the
+        // cell's `ref` before the cell exists.
+        let rich: Vec<Option<usize>> = row
+            .cells
+            .iter()
+            .map(|cell| (!cell.blocks.is_empty()).then(|| self.rich_cell_group(&cell.blocks)))
+            .collect();
         let Some(table) = self.table.as_mut() else {
             return;
         };
-        if table.reference != row.table_ref {
-            return;
-        }
         let row_index = int(row.row_index);
         // Where this row lands in both shapes, so a cell run can name its
         // own position before the table has an arena index.
@@ -813,7 +854,7 @@ impl DocumentFold {
             let col_span = int(cell.column_span.max(1));
             let row_span = int(cell.row_span.max(1));
             let end_col = start_col.saturating_add(col_span);
-            cells.push(doc::TableCell {
+            let mut doc_cell = doc::TableCell {
                 row_span,
                 col_span,
                 start_row_offset_idx: row_index,
@@ -828,7 +869,12 @@ impl DocumentFold {
                 align: horizontal(cell.align).map(|align| align as i32),
                 valign: vertical(cell.valign).map(|valign| valign as i32),
                 ..doc::TableCell::default()
-            });
+            };
+            if let Some(group) = rich[position] {
+                table.cell_groups.push(group);
+                doc_cell.r#ref = Some(reference(&format!("#/groups/{group}")));
+            }
+            cells.push(doc_cell);
             table.num_cols = table.num_cols.max(end_col);
         }
         table.cells.extend(cells.iter().cloned());
@@ -885,12 +931,200 @@ impl DocumentFold {
             ..doc::TableData::default()
         });
         let self_ref = item.self_ref.clone();
+        // The rich-cell groups were minted while the table streamed; now
+        // that the table has its arena slot, both halves of the link land:
+        // the group names the table as its parent and the table lists it.
+        for group in pending.cell_groups {
+            let group_ref = format!("#/groups/{group}");
+            if let Some(item_group) = self.document.groups.get_mut(group) {
+                item_group.parent = Some(reference(&self_ref));
+            }
+            item.children.push(reference(&group_ref));
+        }
         let parent = item
             .parent
             .as_ref()
             .map_or_else(|| BODY_REF.to_owned(), |parent| parent.r#ref.clone());
         self.document.tables.push(item);
         self.link_child(&parent, &self_ref);
+    }
+
+    // ----------------------------------------------------------- rich cells
+
+    /// A rich cell's blocks as the group the cell's `ref` points at:
+    /// docling's RichTableCell shape, where the flat cell text stays the
+    /// display text and the structure survives as real items.
+    ///
+    /// Returns the group's arena index. The group's parent is the owning
+    /// table, whose arena position only [`append_table`](Self::append_table)
+    /// knows — it patches both halves of the link, the way it resolves the
+    /// cells' waiting references. A table nested inside a cell knows its
+    /// own position immediately and patches its own groups on the spot.
+    fn rich_cell_group(&mut self, blocks: &[pb::CellBlock]) -> usize {
+        let index = self.document.groups.len();
+        let self_ref = format!("#/groups/{index}");
+        let mut fields = HashMap::new();
+        self.attribute(&mut fields);
+        self.document.groups.push(doc::GroupItem {
+            self_ref: self_ref.clone(),
+            parent: None,
+            children: Vec::new(),
+            content_layer: doc::ContentLayer::Body as i32,
+            meta: Some(doc::BaseMeta {
+                custom_fields: fields,
+                ..doc::BaseMeta::default()
+            }),
+            name: Some(RICH_CELL_GROUP.to_owned()),
+            label: doc::GroupLabel::Unspecified as i32,
+            label_raw: Some(RICH_CELL_GROUP.to_owned()),
+            ..doc::GroupItem::default()
+        });
+        for block in blocks {
+            // Each child links itself into the group, in block order.
+            self.cell_block(block, &self_ref);
+        }
+        index
+    }
+
+    /// One cell block as a real item under the cell's group.
+    fn cell_block(&mut self, block: &pb::CellBlock, parent: &str) {
+        match block.kind.as_ref() {
+            Some(pb::cell_block::Kind::Text(text)) => {
+                self.cell_text(text, parent);
+            }
+            Some(pb::cell_block::Kind::Image(image)) => {
+                self.append_picture(image, parent, Vec::new());
+            }
+            Some(pb::cell_block::Kind::Table(table)) => {
+                self.cell_table(table, parent);
+            }
+            None => {}
+        }
+    }
+
+    /// A text block of a rich cell: the same fold as a streamed block,
+    /// minus the document-level state (heading ladder, list stack, caption
+    /// adjacency) a cell never joins.
+    fn cell_text(&mut self, block: &pb::TextBlock, parent: &str) {
+        let label = pb::BlockLabel::try_from(block.label).unwrap_or_default();
+        let self_ref = format!("#/texts/{}", self.document.texts.len());
+        let base = self.text_base(&self_ref, parent, block, doc_label(label));
+        let variant = self.text_variant(label, block, base);
+        let index = self.document.texts.len();
+        self.document.texts.push(doc::BaseTextItem {
+            item: Some(variant),
+        });
+        self.register_refs(index, &self_ref, block);
+        self.link_child(parent, &self_ref);
+    }
+
+    /// A table nested in a rich cell, folded as a real table item child of
+    /// the cell's group. Unlike the streamed table it knows its arena slot
+    /// up front, so its own rich cells link without waiting.
+    fn cell_table(&mut self, table: &pb::CellTable, parent: &str) {
+        let index = self.document.tables.len();
+        let self_ref = format!("#/tables/{index}");
+        let mut item = doc::TableItem {
+            self_ref: self_ref.clone(),
+            parent: Some(reference(parent)),
+            content_layer: doc::ContentLayer::Body as i32,
+            label: doc::DocItemLabel::Table as i32,
+            source: vec![self.collector_source()],
+            ..doc::TableItem::default()
+        };
+        if let Some(caption) = table.caption.as_ref().filter(|c| !c.is_empty()) {
+            // The streamed table's rule: the caption is its own item and
+            // the table points at it. It parents to the table itself: the
+            // cell's group holds the table, not the table's caption.
+            let caption_ref = format!("#/texts/{}", self.document.texts.len());
+            let base = self.text_base(
+                &caption_ref,
+                &self_ref,
+                &pb::TextBlock {
+                    text: caption.clone(),
+                    ..pb::TextBlock::default()
+                },
+                doc::DocItemLabel::Caption,
+            );
+            self.document.texts.push(doc::BaseTextItem {
+                item: Some(doc::base_text_item::Item::Text(doc::TextItem {
+                    base: Some(base),
+                })),
+            });
+            item.children.push(reference(&caption_ref));
+            item.captions.push(reference(&caption_ref));
+        }
+        let mut grid = Vec::new();
+        let mut cells = Vec::new();
+        let mut num_cols = 0;
+        for row in &table.rows {
+            let row_index = int(row.row_index);
+            let grid_row = grid.len();
+            let flat_base = cells.len();
+            let mut row_cells = Vec::with_capacity(row.cells.len());
+            for (position, cell) in row.cells.iter().enumerate() {
+                // The same run bookkeeping the streamed table does, except
+                // the arena index is known, so the sites are immediate.
+                for (span, run) in cell.spans.iter().enumerate() {
+                    if let Some(anchor) = run.anchor_id.as_ref().filter(|id| !id.is_empty()) {
+                        self.anchors.entry(anchor.clone()).or_insert(doc::FineRef {
+                            r#ref: self_ref.clone(),
+                            range: None,
+                        });
+                    }
+                    if let Some(key) = run.reference.as_ref().filter(|key| !key.is_empty()) {
+                        self.pending_refs.push((
+                            Site::Cell {
+                                table: index,
+                                row: grid_row,
+                                cell: position,
+                                flat: flat_base + position,
+                                span,
+                            },
+                            key.clone(),
+                        ));
+                    }
+                }
+                let start_col = int(cell.column_index);
+                let col_span = int(cell.column_span.max(1));
+                let row_span = int(cell.row_span.max(1));
+                let end_col = start_col.saturating_add(col_span);
+                let mut doc_cell = doc::TableCell {
+                    row_span,
+                    col_span,
+                    start_row_offset_idx: row_index,
+                    end_row_offset_idx: row_index.saturating_add(row_span),
+                    start_col_offset_idx: start_col,
+                    end_col_offset_idx: end_col,
+                    text: cell.text.clone(),
+                    column_header: row.is_header || cell.is_header,
+                    spans: doc_spans(&cell.spans),
+                    align: horizontal(cell.align).map(|align| align as i32),
+                    valign: vertical(cell.valign).map(|valign| valign as i32),
+                    ..doc::TableCell::default()
+                };
+                if !cell.blocks.is_empty() {
+                    let group = self.rich_cell_group(&cell.blocks);
+                    let group_ref = format!("#/groups/{group}");
+                    self.document.groups[group].parent = Some(reference(&self_ref));
+                    item.children.push(reference(&group_ref));
+                    doc_cell.r#ref = Some(reference(&group_ref));
+                }
+                num_cols = num_cols.max(end_col);
+                row_cells.push(doc_cell);
+            }
+            cells.extend(row_cells.iter().cloned());
+            grid.push(doc::TableRow { cells: row_cells });
+        }
+        item.data = Some(doc::TableData {
+            num_rows: int_from_usize(grid.len()),
+            num_cols,
+            table_cells: cells,
+            grid,
+            ..doc::TableData::default()
+        });
+        self.document.tables.push(item);
+        self.link_child(parent, &self_ref);
     }
 
     // ---------------------------------------------------------------- images
@@ -907,14 +1141,26 @@ impl DocumentFold {
     fn on_image(&mut self, image: &pb::ImageBlock) {
         self.lists.clear();
         let parent = self.current_parent();
-        let self_ref = format!("#/pictures/{}", self.document.pictures.len());
         // A caption the previous block left waiting is this picture's; the
         // picture then waits for one more on its other side.
-        let captions =
-            match std::mem::replace(&mut self.adjacent, Adjacent::Picture(self_ref.clone())) {
-                Adjacent::Caption(caption_ref) => vec![reference(&caption_ref)],
-                Adjacent::Nothing | Adjacent::Picture(_) => Vec::new(),
-            };
+        let captions = match std::mem::take(&mut self.adjacent) {
+            Adjacent::Caption(caption_ref) => vec![reference(&caption_ref)],
+            Adjacent::Nothing | Adjacent::Picture(_) => Vec::new(),
+        };
+        let self_ref = self.append_picture(image, &parent, captions);
+        self.adjacent = Adjacent::Picture(self_ref);
+    }
+
+    /// Append one picture under `parent`, returning its ref. Shared with
+    /// the rich-cell path, which parents the picture to the cell's group
+    /// and has no caption adjacency to settle.
+    fn append_picture(
+        &mut self,
+        image: &pb::ImageBlock,
+        parent: &str,
+        captions: Vec<doc::RefItem>,
+    ) -> String {
+        let self_ref = format!("#/pictures/{}", self.document.pictures.len());
         let mut fields = HashMap::new();
         if !image.alt.is_empty() {
             fields.insert(format!("{}.alt", self.prefix), string(&image.alt));
@@ -932,7 +1178,7 @@ impl DocumentFold {
         }
         self.document.pictures.push(doc::PictureItem {
             self_ref: self_ref.clone(),
-            parent: Some(reference(&parent)),
+            parent: Some(reference(parent)),
             content_layer: doc::ContentLayer::Body as i32,
             meta: (!fields.is_empty()).then(|| doc::PictureMeta {
                 custom_fields: fields,
@@ -954,7 +1200,8 @@ impl DocumentFold {
             source: vec![self.collector_source()],
             ..doc::PictureItem::default()
         });
-        self.link_child(&parent, &self_ref);
+        self.link_child(parent, &self_ref);
+        self_ref
     }
 
     // ------------------------------------------------------------------ cues
@@ -2492,6 +2739,149 @@ mod tests {
             Some("https://ada.example"),
             "the caption item keeps the link the caption block carried"
         );
+    }
+
+    #[test]
+    fn a_rich_cells_blocks_fold_into_a_group_the_cell_references() {
+        let wire_cell = |text: &str, blocks: Vec<pb::CellBlock>| pb::TableCell {
+            text: text.to_owned(),
+            blocks,
+            ..pb::TableCell::default()
+        };
+        let cell_text = |label: pb::BlockLabel, text: &str| pb::CellBlock {
+            kind: Some(pb::cell_block::Kind::Text(pb::TextBlock {
+                label: label as i32,
+                text: text.to_owned(),
+                ..pb::TextBlock::default()
+            })),
+        };
+        // A nested table whose own cell is rich in turn: its group knows
+        // its parent on the spot, where the outer table's groups wait for
+        // `append_table`.
+        let nested = pb::CellBlock {
+            kind: Some(pb::cell_block::Kind::Table(pb::CellTable {
+                rows: vec![pb::TableRow {
+                    table_ref: String::new(),
+                    row_index: 0,
+                    is_header: false,
+                    cells: vec![wire_cell(
+                        "in",
+                        vec![cell_text(pb::BlockLabel::Paragraph, "deep")],
+                    )],
+                }],
+                caption: Some("inner".to_owned()),
+            })),
+        };
+        let image = pb::CellBlock {
+            kind: Some(pb::cell_block::Kind::Image(pb::ImageBlock {
+                src: "i.png".to_owned(),
+                ..pb::ImageBlock::default()
+            })),
+        };
+        let document = fold(&[
+            info(pb::MarkupFormat::Html),
+            pb::parse_markup_response::Event::TableStart(pb::TableStart {
+                table_ref: "t0".to_owned(),
+                ..pb::TableStart::default()
+            }),
+            pb::parse_markup_response::Event::TableRow(pb::TableRow {
+                table_ref: "t0".to_owned(),
+                row_index: 0,
+                is_header: false,
+                cells: vec![
+                    wire_cell(
+                        "one in i.png",
+                        vec![cell_text(pb::BlockLabel::Paragraph, "one"), nested, image],
+                    ),
+                    wire_cell("plain", Vec::new()),
+                ],
+            }),
+            pb::parse_markup_response::Event::TableEnd(pb::TableEnd {
+                table_ref: "t0".to_owned(),
+                row_count: 1,
+                column_count: 2,
+            }),
+        ]);
+        // Navigate by ref rather than by arena index: a nested table is
+        // appended before its still-streaming owner, so the arenas number
+        // inside out (dense either way; integrity asserted by `fold`).
+        let outer = document
+            .tables
+            .iter()
+            .find(|table| table.parent.as_ref().unwrap().r#ref == BODY_REF)
+            .expect("the streamed table");
+        let data = outer.data.as_ref().unwrap();
+        let group_ref = data.grid[0].cells[0]
+            .r#ref
+            .as_ref()
+            .expect("the rich cell points")
+            .r#ref
+            .clone();
+        assert_eq!(
+            data.table_cells[0].r#ref.as_ref().unwrap().r#ref,
+            group_ref,
+            "both shapes of the cell name the same group"
+        );
+        assert!(
+            data.grid[0].cells[1].r#ref.is_none(),
+            "a plain cell points nowhere"
+        );
+        let group = document
+            .groups
+            .iter()
+            .find(|group| group.self_ref == group_ref)
+            .expect("the group the cell names");
+        assert_eq!(
+            group.parent.as_ref().unwrap().r#ref,
+            outer.self_ref,
+            "patched once the table had its arena slot"
+        );
+        assert_eq!(group.label, doc::GroupLabel::Unspecified as i32);
+        assert_eq!(group.label_raw.as_deref(), Some("rich_cell"));
+        assert!(
+            outer.children.iter().any(|child| child.r#ref == group_ref),
+            "the table lists the group, reciprocally"
+        );
+        let inner = document
+            .tables
+            .iter()
+            .find(|table| table.parent.as_ref().unwrap().r#ref == group_ref)
+            .expect("the nested table is the group's child");
+        assert_eq!(
+            group
+                .children
+                .iter()
+                .map(|child| child.r#ref.as_str())
+                .collect::<Vec<_>>(),
+            ["#/texts/0", inner.self_ref.as_str(), "#/pictures/0"],
+            "paragraph, nested table, picture, in block order"
+        );
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+            panic!("the cell's prose is a text item");
+        };
+        assert_eq!(
+            item.base.as_ref().unwrap().parent.as_ref().unwrap().r#ref,
+            group_ref
+        );
+        // The nested table's caption and its own rich cell.
+        assert_eq!(inner.captions[0].r#ref, "#/texts/1");
+        let inner_cell_group = inner.data.as_ref().unwrap().grid[0].cells[0]
+            .r#ref
+            .as_ref()
+            .expect("the nested cell is rich too")
+            .r#ref
+            .clone();
+        let inner_group = document
+            .groups
+            .iter()
+            .find(|group| group.self_ref == inner_cell_group)
+            .expect("the nested group");
+        assert_eq!(
+            inner_group.parent.as_ref().unwrap().r#ref,
+            inner.self_ref,
+            "a nested table's own rich groups link on the spot"
+        );
+        assert_eq!(document.pictures[0].image.as_ref().unwrap().uri, "i.png");
     }
 
     #[test]
