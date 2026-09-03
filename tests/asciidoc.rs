@@ -402,3 +402,19 @@ async fn asciidoc_anchors_reach_the_document_anchor_list() {
         "the pointer keeps the position the run named"
     );
 }
+
+#[tokio::test]
+async fn a_leading_bom_does_not_hide_the_document_title() {
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        "\u{feff}= Title\n\nSome prose.\n",
+        options(pb::MarkupFormat::Asciidoc),
+    )
+    .await;
+    assert_eq!(
+        texts(&blocks_labelled(&events, pb::BlockLabel::Title)),
+        ["Title"],
+        "a kept BOM would leave the `=` line an ordinary paragraph"
+    );
+}

@@ -132,7 +132,7 @@ pub fn run(
     emit: EmitFn<'_>,
 ) -> Result<Format, ParseError> {
     let (text, lossy) = decode(bytes);
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let text = strip_bom(&text);
 
     let (format, evidence) =
         sniff::resolve(config.format, text).map_err(|e| ParseError::Unsupported(e.to_string()))?;
@@ -158,6 +158,16 @@ fn decode(bytes: &[u8]) -> (String, bool) {
         Ok(text) => (text, false),
         Err(error) => (String::from_utf8_lossy(error.as_bytes()).into_owned(), true),
     }
+}
+
+/// The text with one leading UTF-8 BOM dropped, `utf-8-sig` style: present,
+/// it goes; absent, nothing changes. Only the first character — a U+FEFF
+/// anywhere else is a zero-width no-break space the author wrote. The WebVTT
+/// grammar allows exactly this one optional mark before the signature, and a
+/// kept BOM demotes an opening `# heading` to paragraph text and breaks JSON
+/// outright, so the strip happens once here, before the sniff and every fold.
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 /// A [`pb::MetaValue`] holding one verbatim scalar, so a fold whose
@@ -714,6 +724,40 @@ mod tests {
         let text = "\u{feff}WEBVTT\n\n00:00.000 --> 00:01.000\nhi\n";
         let (format, _) = collect(text.as_bytes(), &ParseConfig::default()).expect("parses");
         assert_eq!(format, Format::Vtt);
+    }
+
+    #[test]
+    fn a_bom_is_valid_utf8_and_warns_about_nothing() {
+        let text = "\u{feff}# Title\n\nbody\n";
+        let config = ParseConfig {
+            format: Some(Format::Markdown),
+            emit_document: false,
+            ..ParseConfig::default()
+        };
+        let (_, events) = collect(text.as_bytes(), &config).expect("parses");
+        let Some(pb::parse_markup_response::Event::Status(status)) =
+            events.last().and_then(|e| e.event.as_ref())
+        else {
+            panic!("last event is the trailer");
+        };
+        assert!(
+            status.warnings.is_empty(),
+            "a BOM is not an encoding fault: {:?}",
+            status.warnings
+        );
+        assert_eq!(
+            status.bytes_consumed,
+            text.len() as u64,
+            "the BOM is consumed input, so it is counted"
+        );
+    }
+
+    #[test]
+    fn only_the_leading_bom_is_stripped() {
+        assert_eq!(strip_bom("\u{feff}\u{feff}x"), "\u{feff}x");
+        assert_eq!(strip_bom("a\u{feff}b"), "a\u{feff}b");
+        assert_eq!(strip_bom("plain"), "plain");
+        assert_eq!(strip_bom(""), "");
     }
 
     #[test]

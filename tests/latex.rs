@@ -613,3 +613,12 @@ async fn a_reference_reads_its_kind_off_what_it_resolved_to() {
     );
     assert_eq!(table.reference_kind, Some(doc::ReferenceKind::Table as i32));
 }
+
+#[tokio::test]
+async fn a_leading_bom_parses_the_same_as_none() {
+    let client = client().await;
+    let document = "\u{feff}\\documentclass{article}\n\\begin{document}\n\\section{Intro}\nbody\n\\end{document}\n";
+    let events = parse_ok(&client, document, options(pb::MarkupFormat::Latex)).await;
+    let headers = blocks_labelled(&events, pb::BlockLabel::SectionHeader);
+    assert_eq!(texts(&headers), ["Intro"]);
+}

@@ -429,3 +429,27 @@ async fn boxnote_marks_beyond_link_reach_the_wire() {
         "a second run in the block used to delete the link outright"
     );
 }
+
+#[tokio::test]
+async fn a_leading_bom_does_not_break_the_boxnote_json() {
+    let client = client().await;
+    let document = format!("\u{feff}{BOXNOTE}");
+    let events = parse_ok(&client, &document, options(pb::MarkupFormat::Boxnote)).await;
+    assert_eq!(
+        info(&events).title.as_deref(),
+        Some("Meeting Notes"),
+        "a kept BOM would fail the JSON parse outright"
+    );
+}
+
+#[tokio::test]
+async fn a_leading_bom_does_not_break_the_docling_json() {
+    let client = client().await;
+    let document = format!("\u{feff}{DOCLING}");
+    let events = parse_ok(&client, &document, options(pb::MarkupFormat::DoclingJson)).await;
+    assert_eq!(
+        info(&events).title.as_deref(),
+        Some("Quarterly Review"),
+        "a kept BOM would fail the JSON parse outright"
+    );
+}

@@ -290,3 +290,21 @@ async fn a_ruby_reading_reaches_both_planes_as_the_annotation_it_is() {
         "a ruby is a reading, not a rendering signal"
     );
 }
+
+#[tokio::test]
+async fn a_leading_bom_still_satisfies_the_signature() {
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        "\u{feff}WEBVTT\n\n00:00.000 --> 00:01.000\nhi\n",
+        options(pb::MarkupFormat::Vtt),
+    )
+    .await;
+    let cues = cues(&events);
+    assert_eq!(
+        cues.len(),
+        1,
+        "the grammar allows one optional U+FEFF before WEBVTT"
+    );
+    assert_eq!(cues[0].text, "hi");
+}

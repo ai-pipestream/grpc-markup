@@ -775,3 +775,18 @@ async fn a_figure_wrapping_an_svg_image_yields_the_image_then_its_caption() {
     let caption_index = blocks_labelled(&events, pb::BlockLabel::Caption)[0].index;
     assert!(images[0].index < caption_index, "the image comes first");
 }
+
+#[tokio::test]
+async fn a_leading_bom_parses_the_same_as_none() {
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        "\u{feff}<h1>Title</h1><p>body</p>",
+        options(pb::MarkupFormat::Html),
+    )
+    .await;
+    assert_eq!(
+        texts(&blocks_labelled(&events, pb::BlockLabel::Title)),
+        ["Title"]
+    );
+}

@@ -837,3 +837,19 @@ async fn a_flattened_html_block_hands_back_the_markup_it_flattened() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_leading_bom_does_not_demote_the_opening_heading() {
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        "\u{feff}# Title\n\nbody\n",
+        options(pb::MarkupFormat::Markdown),
+    )
+    .await;
+    assert_eq!(
+        texts(&blocks_labelled(&events, pb::BlockLabel::Title)),
+        ["Title"],
+        "a kept BOM would parse `# Title` as paragraph text"
+    );
+}
