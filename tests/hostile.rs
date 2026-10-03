@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use grpc_markup::document_fold::integrity_errors;
 use grpc_markup::parse::{self, Cancel, ParseConfig, ParseError};
 use grpc_markup::proto::v1 as pb;
 use grpc_markup::sniff::Format;
@@ -108,6 +109,17 @@ fn hostile_with(format: Format, document: String, cancel: Cancel) -> Outcome {
             // The document and every event are dropped on this thread too:
             // dropping a deep tree recurses just as building one does.
             drop(document);
+            // Every fold a hostile input completes is still a merge-safe
+            // fragment, however much of it was flattened or clamped.
+            if result.is_ok() {
+                for event in &events {
+                    if let Some(pb::parse_markup_response::Event::Document(fold)) =
+                        event.event.as_ref()
+                    {
+                        assert_eq!(integrity_errors(fold), Vec::<String>::new());
+                    }
+                }
+            }
             Outcome {
                 result,
                 events,
@@ -290,15 +302,22 @@ fn a_hundred_thousand_chained_groups_project_without_recursing() {
         } else {
             "#/texts/0".to_owned()
         };
+        let parent = if index == 0 {
+            "#/body".to_owned()
+        } else {
+            format!("#/groups/{}", index - 1)
+        };
         groups.push_str(&format!(
-            r##"{{"self_ref":"#/groups/{index}","children":[{{"$ref":"{child}"}}],"name":"g","label":"unspecified"}}"##
+            r##"{{"self_ref":"#/groups/{index}","parent":{{"$ref":"{parent}"}},"children":[{{"$ref":"{child}"}}],"name":"g","label":"unspecified"}}"##
         ));
     }
     let document = format!(
         r##"{{"schema_name":"DoclingDocument","version":"1.3.0","name":"chain",
+"furniture":{{"self_ref":"#/furniture","children":[],"name":"_root_","label":"unspecified"}},
 "body":{{"self_ref":"#/body","children":[{{"$ref":"#/groups/0"}}],"name":"_root_","label":"unspecified"}},
 "groups":[{groups}],
-"texts":[{{"self_ref":"#/texts/0","children":[],"label":"text","prov":[],"orig":"bottom","text":"bottom"}}]}}"##
+"texts":[{{"self_ref":"#/texts/0","parent":{{"$ref":"#/groups/{last}"}},"children":[],"label":"text","prov":[],"orig":"bottom","text":"bottom"}}]}}"##,
+        last = DEPTH - 1
     );
     let outcome = hostile(Format::DoclingJson, document);
     outcome.within(BOUND);
@@ -325,6 +344,19 @@ fn a_yaml_alias_bomb_in_front_matter_is_skipped_with_a_warning() {
     outcome.within(BOUND);
     assert!(outcome.warned(pb::WarningCode::Metadata, "aliases"));
     assert!(outcome.text().contains("Body"));
+}
+
+#[test]
+fn deeply_nested_toml_front_matter_is_skipped_instead_of_overflowing() {
+    // The TOML reader recurses once per array or inline table, so these
+    // aborted the process before the nesting bound.
+    for opener in ["[", "{b="] {
+        let document = format!("+++\na = {}\n+++\n# Body\n", opener.repeat(100_000));
+        let outcome = hostile(Format::Markdown, document);
+        outcome.within(BOUND);
+        assert!(outcome.warned(pb::WarningCode::Metadata, "not a TOML mapping"));
+        assert!(outcome.text().contains("Body"));
+    }
 }
 
 #[test]
