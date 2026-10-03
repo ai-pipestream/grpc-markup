@@ -176,6 +176,131 @@ async fn a_request_may_lower_but_not_raise_past_the_ceiling() {
     assert_eq!(error.code(), Code::ResourceExhausted);
 }
 
+// ------------------------------------------------- memory budget, timeouts
+
+#[tokio::test]
+async fn the_memory_budget_is_shared_across_parses_and_released_after() {
+    // A 1 MiB budget: one upload holding 768 KiB leaves too little for a
+    // second one of 512 KiB, which is refused while the first is open.
+    let client = client_with(MarkupGrpc::new().with_memory_budget_mib(1)).await;
+    let first = LiveUpload::start(&client, options(pb::MarkupFormat::Markdown)).await;
+    for _ in 0..3 {
+        assert!(first.send(&vec![b'a'; 256 * 1024]).await);
+    }
+    // Let the server buffer those chunks before the second call arrives.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let second = parse(
+        &client,
+        &"b".repeat(512 * 1024),
+        options(pb::MarkupFormat::Markdown),
+    )
+    .await
+    .expect_err("the budget is in use");
+    assert_eq!(second.code(), Code::ResourceExhausted);
+    assert!(
+        second.message().contains("memory budget"),
+        "{}",
+        second.message()
+    );
+
+    // Finishing the first parse gives its bytes back.
+    drop(first.requests);
+    let mut stream = tokio::time::timeout(CALL_TIMEOUT, first.call)
+        .await
+        .expect("first call answers")
+        .expect("client task")
+        .expect("first parse admitted")
+        .into_inner();
+    while stream
+        .message()
+        .await
+        .expect("first parse streams")
+        .is_some()
+    {}
+    parse_ok(
+        &client,
+        &"c".repeat(512 * 1024),
+        options(pb::MarkupFormat::Markdown),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_stalled_upload_is_abandoned_and_frees_its_slot() {
+    // One slot, held by a client that sends its options and then nothing.
+    let client = client_with(
+        MarkupGrpc::new()
+            .with_max_concurrent_parses(1)
+            .with_upload_idle_timeout(std::time::Duration::from_millis(300)),
+    )
+    .await;
+    let stalled = LiveUpload::start(&client, options(pb::MarkupFormat::Markdown)).await;
+    assert!(stalled.send(b"# partial").await);
+    let error = tokio::time::timeout(CALL_TIMEOUT, stalled.call)
+        .await
+        .expect("the idle timeout fires while the stream is still open")
+        .expect("client task")
+        .expect_err("the stalled upload is refused");
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+    assert!(
+        error.message().contains("no request frame"),
+        "{}",
+        error.message()
+    );
+    // The slot it held is free again.
+    parse_ok(&client, "# hi\n", options(pb::MarkupFormat::Markdown)).await;
+    drop(stalled.requests);
+}
+
+#[tokio::test]
+async fn a_slow_trickle_hits_the_total_upload_timeout() {
+    let client = client_with(
+        MarkupGrpc::new()
+            .with_upload_idle_timeout(std::time::Duration::from_secs(5))
+            .with_upload_total_timeout(std::time::Duration::from_millis(500)),
+    )
+    .await;
+    let LiveUpload { requests, call } =
+        LiveUpload::start(&client, options(pb::MarkupFormat::Markdown)).await;
+    let trickle = async {
+        // A byte every 100 ms never trips the idle timeout.
+        while requests
+            .send(pb::ParseMarkupRequest {
+                payload: Some(pb::parse_markup_request::Payload::Chunk(b"a".to_vec())),
+            })
+            .await
+            .is_ok()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    let call = async {
+        tokio::time::timeout(CALL_TIMEOUT, call)
+            .await
+            .expect("the total timeout fires")
+            .expect("client task")
+    };
+    let (_, outcome) = tokio::join!(trickle, call);
+    let error = outcome.expect_err("the trickle is refused");
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+    assert!(
+        error.message().contains("upload took longer"),
+        "{}",
+        error.message()
+    );
+}
+
+#[tokio::test]
+async fn a_parse_past_the_server_budget_is_deadline_exceeded() {
+    // A zero budget: the parse is over before the fold sends anything.
+    let client =
+        client_with(MarkupGrpc::new().with_max_parse_time(std::time::Duration::ZERO)).await;
+    let error = parse(&client, "# hi\n", options(pb::MarkupFormat::Markdown))
+        .await
+        .expect_err("no time to parse");
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+}
+
 // --------------------------------------------------------------- admission
 
 #[tokio::test]
@@ -292,7 +417,7 @@ async fn get_service_info_reports_identity_limits_and_formats() {
     assert_eq!(ui.path, "/ui/markup");
     assert_eq!(
         ui.description,
-        "LaTeX, WebVTT, BoxNote, Docling JSON to a shared block vocabulary"
+        "Markdown, HTML, AsciiDoc, LaTeX, WebVTT, BoxNote, Docling JSON to a shared block vocabulary"
     );
 }
 

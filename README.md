@@ -112,7 +112,8 @@ event:
 
 | Condition | Code |
 |---|---|
-| Over the byte cap (refused on the crossing chunk, mid-upload), or past the concurrency limit | `RESOURCE_EXHAUSTED` |
+| Over the byte cap (refused on the crossing chunk, mid-upload), past the concurrency limit, or past the server-wide memory budget for buffered documents | `RESOURCE_EXHAUSTED` |
+| An upload that stalls past the idle timeout or runs past the total upload timeout, or a parse that runs past the client's deadline or the server's per-parse budget | `DEADLINE_EXCEEDED` |
 | Input the format's own error rules cannot repair: a VTT without its header, bytes that are not the JSON a JSON format requires, a legacy `atext` BoxNote | `INVALID_ARGUMENT` |
 | A format outside the build (none today; the registry, not the enum, decides), or a sniff that found nothing | `UNIMPLEMENTED` |
 | A parser fault | `INTERNAL` |
@@ -244,6 +245,10 @@ payloads, whose provenance passes through untouched.
 | `GRPC_MARKUP_MAX_CONCURRENT_PARSES` | 64 | Parses admitted at once; past it, `RESOURCE_EXHAUSTED` |
 | `GRPC_MARKUP_MAX_DOCUMENT_MIB` | 256 | Byte cap when a request asks for 0 |
 | `GRPC_MARKUP_MAX_DOCUMENT_MIB_CEILING` | 1024 | Hard cap a request cannot exceed |
+| `GRPC_MARKUP_MEMORY_BUDGET_MIB` | 2048 | Document bytes buffered across all parses at once; past it, `RESOURCE_EXHAUSTED` |
+| `GRPC_MARKUP_UPLOAD_IDLE_SECS` | 30 | Longest gap between request frames; past it, `DEADLINE_EXCEEDED` |
+| `GRPC_MARKUP_UPLOAD_TOTAL_SECS` | 600 | Longest a whole upload may take; past it, `DEADLINE_EXCEEDED` |
+| `GRPC_MARKUP_MAX_PARSE_SECS` | 300 | Wall-clock budget for one parse; a shorter client deadline wins; past it, `DEADLINE_EXCEEDED` |
 | `GRPC_MARKUP_METRICS_INTERVAL_SECS` | 60 | Seconds between metrics lines; 0 disables |
 | `GRPC_MARKUP_WINDOW_BYTES` | 16 MiB | HTTP/2 initial stream and connection window |
 

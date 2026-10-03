@@ -777,21 +777,31 @@ fn project(document: &doc::Document, emitter: &mut Emitter<'_>) -> Result<(), Pa
         document,
         emitter,
         visited: HashSet::new(),
+        pending: Vec::new(),
     };
     if let Some(body) = document.body.as_ref() {
-        for child in &body.children {
-            walk.item(&child.r#ref, 0)?;
-        }
+        walk.children(&body.children, 0);
+    }
+    while let Some((self_ref, list_depth)) = walk.pending.pop() {
+        walk.item(&self_ref, list_depth)?;
     }
     Ok(())
 }
 
 /// The projection walk: refs resolved against the arenas, cycles and
 /// double-references broken by the visited set.
+///
+/// The walk is depth-first and in reading order, but iterative: refs are
+/// flat strings, so serde_json's nesting limit says nothing about how deep
+/// a `children` chain goes, and a recursive walk over a long chain of
+/// groups overflowed the stack and aborted the process.
 struct Project<'w, 'e> {
     document: &'w doc::Document,
     emitter: &'w mut Emitter<'e>,
     visited: HashSet<String>,
+    /// Refs still to visit, with the list depth they sit at; the next one
+    /// in reading order is on top.
+    pending: Vec<(String, u32)>,
 }
 
 impl Project<'_, '_> {
@@ -827,7 +837,7 @@ impl Project<'_, '_> {
                     ..Image::default()
                 })?;
                 let children = picture.children.clone();
-                self.children(&children, list_depth)?;
+                self.children(&children, list_depth);
             }
             return Ok(());
         }
@@ -841,16 +851,19 @@ impl Project<'_, '_> {
                 list_depth
             };
             let children = group.children.clone();
-            self.children(&children, depth)?;
+            self.children(&children, depth);
         }
         Ok(())
     }
 
-    fn children(&mut self, children: &[doc::RefItem], list_depth: u32) -> Result<(), ParseError> {
-        for child in children {
-            self.item(&child.r#ref, list_depth)?;
-        }
-        Ok(())
+    /// Queue an item's children to be visited next, first child on top.
+    fn children(&mut self, children: &[doc::RefItem], list_depth: u32) {
+        self.pending.extend(
+            children
+                .iter()
+                .rev()
+                .map(|child| (child.r#ref.clone(), list_depth)),
+        );
     }
 
     fn text(&mut self, item: &doc::BaseTextItem, list_depth: u32) -> Result<(), ParseError> {
@@ -962,7 +975,8 @@ impl Project<'_, '_> {
         if !block.text.is_empty() {
             self.emitter.text_block(block)?;
         }
-        self.children(&children, list_depth)
+        self.children(&children, list_depth);
+        Ok(())
     }
 
     fn table(&mut self, table: &doc::TableItem) -> Result<(), ParseError> {

@@ -194,6 +194,18 @@ async fn the_html_fold_is_a_merge_safe_fragment_with_docling_structure() {
 }
 
 #[tokio::test]
+async fn tables_nested_three_deep_each_keep_their_own_arena_slot() {
+    // A rich cell's table folds its own rich cells first, so the inner
+    // table used to take the outer one's index and leave two #/tables/0.
+    let client = client().await;
+    let html = "<table><tr><td><table><tr><td><table><tr><td>x</td></tr></table></td></tr></table></td></tr></table>";
+    let events = parse_ok(&client, html, with_document(pb::MarkupFormat::Html)).await;
+    let document = document(&events).expect("the fold was requested");
+    assert_eq!(integrity_errors(document), Vec::<String>::new());
+    assert_eq!(document.tables.len(), 3);
+}
+
+#[tokio::test]
 async fn the_asciidoc_fold_is_a_merge_safe_fragment() {
     let client = client().await;
     let adoc = ":author: Ada\n\n= The Title\n\n== Section\n\nunder it\n\n* one\n** two\n\n[source,rust]\n----\nfn x() {}\n----\n\nimage::img.png[a]\n";

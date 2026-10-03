@@ -1021,8 +1021,13 @@ impl DocumentFold {
     /// A table nested in a rich cell, folded as a real table item child of
     /// the cell's group. Unlike the streamed table it knows its arena slot
     /// up front, so its own rich cells link without waiting.
+    ///
+    /// The slot is claimed before the rows fold: a rich cell can hold a
+    /// table of its own, which folds first and would otherwise take this
+    /// table's index.
     fn cell_table(&mut self, table: &pb::CellTable, parent: &str) {
         let index = self.document.tables.len();
+        self.document.tables.push(doc::TableItem::default());
         let self_ref = format!("#/tables/{index}");
         let mut item = doc::TableItem {
             self_ref: self_ref.clone(),
@@ -1123,7 +1128,7 @@ impl DocumentFold {
             grid,
             ..doc::TableData::default()
         });
-        self.document.tables.push(item);
+        self.document.tables[index] = item;
         self.link_child(parent, &self_ref);
     }
 

@@ -63,11 +63,12 @@
 //! html5ever's own tree-builder error list — the repairs the parser
 //! actually made — never guessed.
 
+use html5ever::tendril::TendrilSink;
 use scraper::node::Node;
-use scraper::{ElementRef, Html};
+use scraper::{ElementRef, Html, HtmlTreeSink};
 
 use crate::html_pictures::{embedded_picture, srcset_first_candidate, svg_pictures};
-use crate::parse::{Block, Emitter, Image, ParseError, Table, scalar};
+use crate::parse::{Block, Cancel, Emitter, Image, ParseError, Table, scalar};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -95,6 +96,15 @@ const CONTAINERS: &[&str] = &[
     "form", "fieldset", "center", "hgroup", "picture", "figure",
 ];
 
+/// How deep elements may nest before the rest of a subtree is flattened.
+///
+/// html5ever builds trees of any depth, and the walk below recurses once or
+/// more per element, so a few kilobytes of nested `<div>`s would overflow
+/// the blocking pool's 2 MiB stack and abort the process. Real pages nest a
+/// few dozen levels; past this one the subtree keeps its text and loses
+/// its structure.
+pub const MAX_ELEMENT_DEPTH: usize = 256;
+
 /// Map one HTML document or fragment. Empty input is a valid empty parse:
 /// HTML has no mandatory header the way WebVTT does.
 ///
@@ -103,7 +113,13 @@ const CONTAINERS: &[&str] = &[
 /// Only [`ParseError::ConsumerGone`]: html5ever's tree builder repairs
 /// rather than rejects, and every repair it reports becomes a warning.
 pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
-    let html = Html::parse_document(text);
+    let mut html = parse_document(text, emitter.cancel())?;
+    let flattened = flatten_deep_subtrees(&mut html);
+    emitter.warn_n(
+        pb::WarningCode::UnmappedConstruct,
+        &format!("elements nested deeper than {MAX_ELEMENT_DEPTH} levels flattened to their text"),
+        flattened,
+    );
 
     // The tree builder's own error list is the only source of
     // MALFORMED_STRUCTURE: these are repairs html5ever actually made. Two
@@ -156,6 +172,93 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         walk.container(&body)?;
     }
     Ok(())
+}
+
+/// How many bytes the tree builder is fed between cancellation checks.
+/// The cost of a slice grows with the nesting it opens, so this is what
+/// bounds how far past its deadline a hostile parse can run: at 64 KiB a
+/// `<ul><li>` ladder overran a 200 ms deadline by a second in release and
+/// by half a minute in debug.
+const PARSE_SLICE: usize = 4 * 1024;
+
+/// `Html::parse_document`, fed in slices with a cancellation check
+/// between them.
+///
+/// html5ever's tree builder scans the stack of open elements for scope
+/// checks, so deeply nested input costs time quadratic in its depth before
+/// the fold sees a single node; slicing is what lets a deadline or a
+/// departed client stop that work.
+fn parse_document(text: &str, cancel: &Cancel) -> Result<Html, ParseError> {
+    let mut parser = html5ever::driver::parse_document(
+        HtmlTreeSink::new(Html::new_document()),
+        Default::default(),
+    );
+    let mut rest = text;
+    while !rest.is_empty() {
+        cancel.check()?;
+        let mut cut = rest.len().min(PARSE_SLICE);
+        while !rest.is_char_boundary(cut) {
+            cut += 1;
+        }
+        let (slice, tail) = rest.split_at(cut);
+        parser.process(slice.into());
+        rest = tail;
+    }
+    Ok(parser.finish())
+}
+
+/// Replace the children of every element sitting [`MAX_ELEMENT_DEPTH`]
+/// elements deep with one text node holding their text, so every walk
+/// after this one recurses a bounded number of times. Iterative throughout;
+/// returns how many subtrees were flattened.
+fn flatten_deep_subtrees(html: &mut Html) -> u64 {
+    let mut cut = Vec::new();
+    let mut stack = vec![(html.tree.root().id(), 0usize)];
+    while let Some((id, depth)) = stack.pop() {
+        let Some(node) = html.tree.get(id) else {
+            continue;
+        };
+        if depth >= MAX_ELEMENT_DEPTH && node.has_children() {
+            cut.push(id);
+            continue;
+        }
+        for child in node.children() {
+            let child_depth = depth + usize::from(child.value().is_element());
+            stack.push((child.id(), child_depth));
+        }
+    }
+    for id in &cut {
+        // The subtree's text, iteratively, leaving out the subtrees the
+        // walk would have skipped and separating elements with a space so
+        // block boundaries do not glue words together.
+        let mut text = String::new();
+        let mut pending: Vec<_> = html
+            .tree
+            .get(*id)
+            .into_iter()
+            .flat_map(|n| n.children().rev())
+            .collect();
+        while let Some(node) = pending.pop() {
+            match node.value() {
+                Node::Text(run) => text.push_str(run),
+                Node::Element(element) if !SKIPPED.contains(&element.name()) => {
+                    text.push(' ');
+                    pending.extend(node.children().rev());
+                }
+                _ => {}
+            }
+        }
+        let Some(mut node) = html.tree.get_mut(*id) else {
+            continue;
+        };
+        while let Some(mut child) = node.first_child() {
+            child.detach();
+        }
+        if !text.trim().is_empty() {
+            node.append(Node::Text(scraper::node::Text { text: text.into() }));
+        }
+    }
+    cut.len() as u64
 }
 
 /// The first child element named `name`.
@@ -885,7 +988,11 @@ fn column_specs(table: &ElementRef<'_>) -> Vec<pb::ColumnSpec> {
             .and_then(|span| span.trim().parse::<usize>().ok())
             .unwrap_or(1)
             .clamp(1, 1024);
+        let repeat = repeat.min(MAX_COLUMN_SPECS - specs.len());
         specs.extend(std::iter::repeat_n(spec, repeat));
+        if specs.len() == MAX_COLUMN_SPECS {
+            break;
+        }
     }
     specs
 }
@@ -962,6 +1069,20 @@ fn cell_children(element: &ElementRef<'_>, inline: &mut Inline) {
     }
 }
 
+/// The largest `colspan` the HTML table model honours.
+const MAX_COLSPAN: u32 = 1000;
+
+/// The largest `rowspan` the HTML table model honours.
+const MAX_ROWSPAN: u32 = 65534;
+
+/// How many cells may span down across later rows at once before further
+/// `rowspan`s are dropped. Placing a cell sweeps the spans still open, so
+/// this bounds the cost of every row.
+const MAX_CARRIED_SPANS: usize = 1024;
+
+/// The most column specs one table's `<col>` declarations may produce.
+const MAX_COLUMN_SPECS: usize = 16_384;
+
 /// The rows of one `<table>`, in DOM order with `thead`/`tbody`/`tfoot`
 /// unwrapped, header cells and rows flagged, and `rowspan` / `colspan`
 /// applied through an occupancy grid.
@@ -985,10 +1106,19 @@ fn table_rows(element: &ElementRef<'_>, source: &pb::CollectorSource) -> Vec<pb:
         }
     }
 
-    let mut occupied: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
+    let row_count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    // Cells from earlier rows that still cover later ones, as (first
+    // column, end column, first row no longer covered), sorted by first
+    // column. Tracking spans rather than every (row, column) pair they
+    // cover keeps the cost proportional to the cells, not to the area a
+    // hostile `rowspan` times `colspan` claims.
+    let mut carried: Vec<(u32, u32, u32)> = Vec::new();
     let mut out = Vec::new();
     for (row_index, row) in rows.iter().enumerate() {
         let row_index = u32::try_from(row_index).unwrap_or(u32::MAX);
+        carried.retain(|&(_, _, until)| until > row_index);
+        let mut sweep = 0usize;
+        let mut started_here = Vec::new();
         let in_head = row
             .parent()
             .and_then(ElementRef::wrap)
@@ -1001,8 +1131,16 @@ fn table_rows(element: &ElementRef<'_>, source: &pb::CollectorSource) -> Vec<pb:
             if cell_name != "td" && cell_name != "th" {
                 continue;
             }
-            while occupied.contains(&(row_index, column)) {
-                column += 1;
+            // Skip the columns a cell from an earlier row still covers.
+            while let Some(&(start, end, _)) = carried.get(sweep) {
+                if end <= column {
+                    sweep += 1;
+                } else if start <= column {
+                    column = end;
+                    sweep += 1;
+                } else {
+                    break;
+                }
             }
             let span = |attr: &str| {
                 cell.attr(attr)
@@ -1010,11 +1148,22 @@ fn table_rows(element: &ElementRef<'_>, source: &pb::CollectorSource) -> Vec<pb:
                     .filter(|span| *span >= 1)
                     .unwrap_or(1)
             };
-            let column_span = span("colspan");
-            let row_span = span("rowspan");
-            for r in row_index..row_index.saturating_add(row_span) {
-                for c in column..column.saturating_add(column_span) {
-                    occupied.insert((r, c));
+            // The HTML table model's own limits: `colspan` at most 1000,
+            // `rowspan` at most 65534 and never past the table's last row.
+            let column_span = span("colspan").min(MAX_COLSPAN);
+            let mut row_span = span("rowspan").min(MAX_ROWSPAN).min(row_count - row_index);
+            if row_span > 1 {
+                if carried.len() + started_here.len() < MAX_CARRIED_SPANS {
+                    started_here.push((
+                        column,
+                        column.saturating_add(column_span),
+                        row_index + row_span,
+                    ));
+                } else {
+                    // Past this many cells spanning down at once the table
+                    // is not a table anyone wrote; the span is dropped so
+                    // every later row stays cheap to place.
+                    row_span = 1;
                 }
             }
             let is_header = cell_name == "th" || in_head;
@@ -1040,6 +1189,8 @@ fn table_rows(element: &ElementRef<'_>, source: &pb::CollectorSource) -> Vec<pb:
             });
             column = column.saturating_add(column_span);
         }
+        carried.extend(started_here);
+        carried.sort_unstable_by_key(|&(start, _, _)| start);
         if cells.is_empty() {
             continue;
         }

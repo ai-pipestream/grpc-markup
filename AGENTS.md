@@ -44,8 +44,9 @@ Document data plane.
   local one, and the vendored `document.proto` is never edited here.
 - Error taxonomy: `INVALID_ARGUMENT` for input the format's own rules
   cannot repair, `UNIMPLEMENTED` for formats outside the build and failed
-  sniffs, `RESOURCE_EXHAUSTED` for the byte cap and the admission limit,
-  `INTERNAL` for our own faults. The mapping lives in `service::status_for`
+  sniffs, `RESOURCE_EXHAUSTED` for the byte cap, the admission limit and
+  the memory budget, `DEADLINE_EXCEEDED` for stalled uploads and parses
+  past their deadline, `INTERNAL` for our own faults. The mapping lives in `service::status_for`
   and nowhere else.
 - Warnings aggregate per (code, message) and never fail a parse.
 - The sniff never guesses between two candidates. An explicit request wins

@@ -41,8 +41,8 @@
 //!   `anchor_id`.
 //! - Display math is `BLOCK_LABEL_FORMULA`, verbatim.
 //! - Raw HTML — block or inline — is flattened to its text with
-//!   `WARNING_CODE_EMBEDDED_HTML_FLATTENED`; this collector never parses
-//!   HTML (that is the HTML fold's job, in a later build).
+//!   `WARNING_CODE_EMBEDDED_HTML_FLATTENED`; this fold does not hand it to
+//!   the HTML fold, so an HTML table inside Markdown loses its structure.
 //!
 //! `source_line` on every block comes from pulldown-cmark's offset iterator,
 //! mapped to 1-based lines of the original text, front matter included.
@@ -122,6 +122,16 @@ fn front_matter(
     let Some((raw, body_start, dialect)) = front_matter_span(text) else {
         return (HashMap::new(), None, 0);
     };
+    if dialect == Dialect::Yaml && !yaml_aliases_within_budget(raw) {
+        emitter.warn(
+            pb::WarningCode::Metadata,
+            &format!(
+                "YAML front matter aliases expand past {MAX_ALIAS_EXPANSION} nodes and bytes; \
+                 the block was skipped"
+            ),
+        );
+        return (HashMap::new(), None, body_start);
+    }
     let Some(metadata) = (match dialect {
         Dialect::Yaml => yaml_mapping(raw),
         Dialect::Toml => crate::toml::parse(raw),
@@ -164,6 +174,65 @@ impl std::fmt::Display for Dialect {
             Self::Yaml => "YAML",
             Self::Toml => "TOML",
         })
+    }
+}
+
+/// How much YAML aliases may add to the front-matter tree, counted as one
+/// per node plus the bytes of every scalar.
+///
+/// yaml-rust2's loader copies the anchored node for every alias, so ten
+/// aliases of ten aliases of ... is a few hundred bytes of source and
+/// gigabytes of tree (a billion-laughs bomb). Front matter that uses
+/// aliases at all uses a handful.
+const MAX_ALIAS_EXPANSION: u64 = 1 << 20;
+
+/// Whether the aliases in a YAML block stay inside
+/// [`MAX_ALIAS_EXPANSION`], measured on the parser's event stream before
+/// the loader expands anything. Malformed YAML passes, so the loader
+/// reports it the usual way.
+fn yaml_aliases_within_budget(raw: &str) -> bool {
+    use yaml_rust2::parser::{Event, Parser as YamlParser};
+    let mut parser = YamlParser::new_from_str(raw);
+    // The size of every anchored node, by anchor id.
+    let mut anchored: HashMap<usize, u64> = HashMap::new();
+    // Open collections: (anchor id, size of the tree before it opened).
+    let mut open: Vec<(usize, u64)> = Vec::new();
+    let mut size = 0u64;
+    let mut added_by_aliases = 0u64;
+    loop {
+        let Ok((event, _)) = parser.next_token() else {
+            return true;
+        };
+        match event {
+            Event::StreamEnd => return true,
+            Event::Scalar(value, _, anchor, _) => {
+                let weight = 1 + value.len() as u64;
+                size += weight;
+                if anchor > 0 {
+                    anchored.insert(anchor, weight);
+                }
+            }
+            Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => {
+                open.push((anchor, size));
+                size += 1;
+            }
+            Event::SequenceEnd | Event::MappingEnd => {
+                if let Some((anchor, before)) = open.pop()
+                    && anchor > 0
+                {
+                    anchored.insert(anchor, size - before);
+                }
+            }
+            Event::Alias(anchor) => {
+                let weight = anchored.get(&anchor).copied().unwrap_or(1);
+                size = size.saturating_add(weight);
+                added_by_aliases = added_by_aliases.saturating_add(weight);
+                if added_by_aliases > MAX_ALIAS_EXPANSION {
+                    return false;
+                }
+            }
+            _ => {}
+        }
     }
 }
 
