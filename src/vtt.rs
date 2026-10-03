@@ -177,7 +177,15 @@ fn timestamp_ms(text: &str) -> Option<u64> {
     if minutes > 59 || seconds > 59 {
         return None;
     }
-    Some(((hours * 60 + minutes) * 60 + seconds) * 1000 + millis)
+    // Hours have no upper bound in the grammar, so a hostile one would
+    // wrap; a time past u64 milliseconds is not a time, and the cue goes.
+    hours
+        .checked_mul(60)?
+        .checked_add(minutes)?
+        .checked_mul(60)?
+        .checked_add(seconds)?
+        .checked_mul(1000)?
+        .checked_add(millis)
 }
 
 /// Flatten a cue's payload lines into the cue the emitter sends, keeping
@@ -420,6 +428,16 @@ mod tests {
         assert_eq!(timestamp_ms("00:01.000"), Some(1_000));
         assert_eq!(timestamp_ms("01:02:03.456"), Some(3_723_456));
         assert_eq!(timestamp_ms("123:00:00.000"), Some(123 * 3_600_000));
+    }
+
+    #[test]
+    fn a_timestamp_past_u64_milliseconds_is_refused_not_wrapped() {
+        assert_eq!(timestamp_ms("18446744073709551:00:00.000"), None);
+        assert_eq!(timestamp_ms("5124095576031:00:00.000"), None);
+        assert_eq!(
+            timestamp_ms("5124095576:00:00.000"),
+            Some(5_124_095_576 * 3_600_000)
+        );
     }
 
     #[test]
