@@ -24,17 +24,27 @@
 //!   not.
 //!
 //! A document this cannot read returns `None`, and the caller warns rather
-//! than emitting the preamble as prose.
+//! than emitting the preamble as prose. That includes arrays and inline
+//! tables nested deeper than [`MAX_NESTING`]: the reader recurses once per
+//! level, so a few hundred kilobytes of `[` would otherwise overflow the
+//! parse thread's stack and abort the process.
 
 use std::collections::HashMap;
 
 use crate::proto::v1 as pb;
 
+/// The deepest an array or inline table may nest before the document is
+/// refused. Real front matter nests a handful of levels.
+pub const MAX_NESTING: usize = 128;
+
 /// Parse a TOML document into the metadata tree, or `None` when the text is
 /// not a TOML document this reader can complete.
 #[must_use]
 pub fn parse(text: &str) -> Option<HashMap<String, pb::MetaValue>> {
-    let mut reader = Reader { rest: text };
+    let mut reader = Reader {
+        rest: text,
+        depth: 0,
+    };
     let mut root = HashMap::new();
     // The table header in force, as the path its keys hang under.
     let mut table: Vec<String> = Vec::new();
@@ -66,6 +76,8 @@ pub fn parse(text: &str) -> Option<HashMap<String, pb::MetaValue>> {
 /// The cursor over the remaining text.
 struct Reader<'t> {
     rest: &'t str,
+    /// How many arrays and inline tables enclose the cursor.
+    depth: usize,
 }
 
 impl<'t> Reader<'t> {
@@ -126,15 +138,22 @@ impl<'t> Reader<'t> {
         if self.rest.starts_with(['"', '\'']) {
             return Some(scalar(self.quoted()?));
         }
-        if let Some(rest) = self.rest.strip_prefix('[') {
+        let collection = if let Some(rest) = self.rest.strip_prefix('[') {
             self.rest = rest;
-            return self.array();
-        }
-        if let Some(rest) = self.rest.strip_prefix('{') {
+            Self::array
+        } else if let Some(rest) = self.rest.strip_prefix('{') {
             self.rest = rest;
-            return self.inline_table();
+            Self::inline_table
+        } else {
+            return self.bare(stop);
+        };
+        if self.depth >= MAX_NESTING {
+            return None;
         }
-        self.bare(stop)
+        self.depth += 1;
+        let value = collection(self);
+        self.depth -= 1;
+        value
     }
 
     /// A one-line basic or literal string, escapes decoded in the first.
@@ -331,6 +350,23 @@ mod tests {
             Some(pb::meta_value::Kind::Map(map)) => &map.entries,
             other => panic!("expected a map, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn nesting_up_to_the_limit_reads_and_one_past_it_refuses() {
+        let nested = |depth: usize| format!("a = {}{}\n", "[".repeat(depth), "]".repeat(depth));
+        let parsed = parse(&nested(MAX_NESTING)).expect("nesting at the limit reads");
+        assert!(matches!(
+            parsed["a"].kind,
+            Some(pb::meta_value::Kind::List(_))
+        ));
+        assert!(parse(&nested(MAX_NESTING + 1)).is_none());
+        let tables = format!(
+            "a = {}1{}\n",
+            "{b=".repeat(MAX_NESTING + 1),
+            "}".repeat(MAX_NESTING + 1)
+        );
+        assert!(parse(&tables).is_none());
     }
 
     #[test]
