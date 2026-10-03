@@ -136,7 +136,7 @@ scope by construction.
 | `blockquote` | `BLOCK_LABEL_QUOTE` per paragraph, every block inside carrying its `quote_depth` |
 | `ul` / `ol` / `li` | `BLOCK_LABEL_LIST_ITEM` with nesting depth; `enumerated` for `ol`; a marker is written only when the source numbered the list (`ol start`) |
 | `dl` / `dt` / `dd` | list items with the proto's `definition-term` / `definition-description` roles, descriptions one level under their term |
-| `table` (+`thead`/`tbody`/`tfoot`, `caption`, `colspan`/`rowspan`, `colgroup`/`col`) | streamed table with the caption on `TableStart`, the `col` geometry as `columns` (a `span` repeated across the columns it covers), header cells and rows flagged, spans advancing the column index over an occupancy grid, each cell's own `align`/`valign` and its inline runs; a rich cell (nested table, list, heading, structured `pre`, `u`/`ins`/`sub`/`sup`) also carries its structure as `blocks`: list items stay list-item blocks, headings stay section headers, a nested table stays a `CellTable` |
+| `table` (+`thead`/`tbody`/`tfoot`, `caption`, `colspan`/`rowspan`, `colgroup`/`col`) | streamed table with the caption on `TableStart`, the `col` geometry as `columns` (a `span` repeated across the columns it covers), header cells and rows flagged, spans advancing the column index past the cells still spanning down from earlier rows (`colspan` clamped to 1000 and `rowspan` to 65534 and to the rows left, as the HTML table model does, and at most 1024 cells spanning down at once), each cell's own `align`/`valign` and its inline runs; a rich cell (nested table, list, heading, structured `pre`, `u`/`ins`/`sub`/`sup`) also carries its structure as `blocks`: list items stay list-item blocks, headings stay section headers, a nested table stays a `CellTable` |
 | `pre` (+`language-*` class) | `BLOCK_LABEL_CODE`, text verbatim |
 | `img`, `figure`/`figcaption` | `ImageBlock` (`src`/`alt`/`title` verbatim; a `srcset` with no `src` lends its first candidate; an `<a>` whose only content is the image lends it the `href` as `hyperlink`), the figcaption as a following `CAPTION` block carrying the first link it holds |
 | `picture` | exactly the one `ImageBlock` its `img` fallback names; `source` candidates are never pictures of their own |
@@ -147,6 +147,7 @@ scope by construction.
 | `br` | a `\n` in the enclosing block's text, cells included |
 | `hr` | nothing + `WARNING_CODE_UNMAPPED_CONSTRUCT` |
 | any element without a mapping | text flattened into the enclosing block + one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per element name |
+| elements nested deeper than 256 levels | the subtree below that depth flattened to its text before the walk + one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT`, so no input can exhaust the walk's stack |
 
 `WARNING_CODE_MALFORMED_STRUCTURE` comes only from html5ever's own
 tree-builder error list — repairs the parser actually made — with the

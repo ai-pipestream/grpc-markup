@@ -121,6 +121,97 @@ fn hostile_with(format: Format, document: String, cancel: Cancel) -> Outcome {
 
 const BOUND: Duration = Duration::from_secs(20);
 
+// -------------------------------------------------------------------- HTML
+
+#[test]
+fn ten_thousand_nested_divs_flatten_instead_of_overflowing() {
+    let outcome = hostile(Format::Html, format!("{}deep text", "<div>".repeat(10_000)));
+    outcome.within(BOUND);
+    assert!(outcome.text().contains("deep text"), "{}", outcome.text());
+    assert!(outcome.warned(pb::WarningCode::UnmappedConstruct, "nested deeper"));
+}
+
+#[test]
+fn deep_inline_list_and_table_nesting_all_survive_a_small_stack() {
+    for document in [
+        // html5ever's own scope checks are quadratic in nesting depth, so
+        // the list and quote cases stay at a depth (10k elements) that
+        // still overflowed before the cap without making the test slow.
+        format!("{}x", "<span>".repeat(50_000)),
+        format!("{}x", "<ul><li>".repeat(5_000)),
+        format!("{}x", "<table><tr><td>".repeat(2_000)),
+        format!("{}x", "<blockquote>".repeat(10_000)),
+    ] {
+        let outcome = hostile(Format::Html, document);
+        outcome.within(BOUND);
+        assert!(outcome.warned(pb::WarningCode::UnmappedConstruct, "nested deeper"));
+    }
+}
+
+#[test]
+fn a_parse_past_its_deadline_stops_inside_the_html_tree_builder() {
+    // Quadratic inside html5ever: the slice-by-slice feed is what lets the
+    // deadline interrupt it rather than waiting for the whole tree.
+    let cancel = Cancel::new(Some(Instant::now() + Duration::from_millis(200)), None);
+    let outcome = hostile_with(Format::Html, "<ul><li>".repeat(200_000), cancel);
+    assert!(
+        matches!(outcome.result, Err(ParseError::DeadlineExceeded(_))),
+        "{:?}",
+        outcome.result
+    );
+    outcome.within(Duration::from_secs(10));
+}
+
+#[test]
+fn a_huge_colspan_and_rowspan_are_clamped_to_the_table_model() {
+    let outcome = hostile(
+        Format::Html,
+        "<table><tr><td colspan=65534 rowspan=65534>x</td></tr></table>".to_owned(),
+    );
+    outcome.within(BOUND);
+    let rows = outcome.rows();
+    assert_eq!(rows.len(), 1);
+    let cell = &rows[0].cells[0];
+    assert_eq!(cell.column_span, 1000, "colspan clamps to 1000");
+    assert_eq!(cell.row_span, 1, "rowspan clamps to the rows that exist");
+}
+
+#[test]
+fn spans_still_place_later_cells_after_clamping() {
+    let outcome = hostile(
+        Format::Html,
+        "<table><tr><td colspan=4000 rowspan=4000>a</td><td>b</td></tr>\
+         <tr><td>c</td></tr></table>"
+            .to_owned(),
+    );
+    outcome.within(BOUND);
+    let rows = outcome.rows();
+    assert_eq!(rows[0].cells[0].row_span, 2);
+    assert_eq!(rows[0].cells[1].column_index, 1000);
+    assert_eq!(
+        rows[1].cells[0].column_index, 1000,
+        "the spanning cell still covers the next row"
+    );
+}
+
+#[test]
+fn many_spanning_cells_stay_linear() {
+    // A few thousand cells each claiming the whole table below them used
+    // to be area work; now each later row sweeps a bounded span list.
+    let mut document = String::from("<table><tr>");
+    for _ in 0..5_000 {
+        document.push_str("<td colspan=1000 rowspan=65534>x</td>");
+    }
+    document.push_str("</tr>");
+    for _ in 0..5_000 {
+        document.push_str("<tr><td>y</td></tr>");
+    }
+    document.push_str("</table>");
+    let outcome = hostile(Format::Html, document);
+    outcome.within(BOUND);
+    assert_eq!(outcome.rows().len(), 5_001);
+}
+
 // ------------------------------------------------------------ cancellation
 
 #[test]
