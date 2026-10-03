@@ -305,6 +305,44 @@ fn a_hundred_thousand_chained_groups_project_without_recursing() {
     assert!(outcome.text().contains("bottom"), "{}", outcome.text());
 }
 
+// ---------------------------------------------------------------- Markdown
+
+#[test]
+fn a_yaml_alias_bomb_in_front_matter_is_skipped_with_a_warning() {
+    // The review's 433-byte bomb peaked at 22.7 GB before emitting a byte.
+    let mut front = String::from(
+        "---\na: &a [\"lol\",\"lol\",\"lol\",\"lol\",\"lol\",\"lol\",\"lol\",\"lol\",\"lol\",\"lol\"]\n",
+    );
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+    for pair in names.windows(2) {
+        let (previous, name) = (pair[0], pair[1]);
+        let aliases = vec![format!("*{previous}"); 10].join(",");
+        front.push_str(&format!("{name}: &{name} [{aliases}]\n"));
+    }
+    front.push_str("---\n# Body\n");
+    assert!(front.len() < 600, "{}", front.len());
+    let outcome = hostile(Format::Markdown, front);
+    outcome.within(BOUND);
+    assert!(outcome.warned(pb::WarningCode::Metadata, "aliases"));
+    assert!(outcome.text().contains("Body"));
+}
+
+#[test]
+fn a_few_honest_aliases_still_load() {
+    let document = "---\nbase: &base\n  owner: ada\ncopy: *base\ntitle: Aliased\n---\n\nbody\n";
+    let outcome = hostile(Format::Markdown, document.to_owned());
+    let Some(pb::parse_markup_response::Event::Info(info)) = outcome
+        .events
+        .first()
+        .and_then(|event| event.event.as_ref())
+    else {
+        panic!("info first");
+    };
+    assert_eq!(info.title.as_deref(), Some("Aliased"));
+    assert!(info.metadata.contains_key("copy"));
+    assert!(outcome.status().warnings.is_empty());
+}
+
 // ------------------------------------------------------------ cancellation
 
 #[test]

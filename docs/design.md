@@ -93,7 +93,7 @@ tree branches on format.
 
 | Source construct | Wire |
 |---|---|
-| Front matter between leading `---` (YAML) or `+++` (TOML) fences | `MarkupInfo.metadata` as the tree the source declared: scalars verbatim, sequences as `MetaList`, nested mappings as `MetaMap`, keys the mapping's own; `title` also to `MarkupInfo.title` when it is a non-empty scalar. The fence picks the dialect, and both land on the same tree. Unparseable front matter: one `WARNING_CODE_METADATA` naming the dialect, raw text not emitted as content |
+| Front matter between leading `---` (YAML) or `+++` (TOML) fences | `MarkupInfo.metadata` as the tree the source declared: scalars verbatim, sequences as `MetaList`, nested mappings as `MetaMap`, keys the mapping's own; `title` also to `MarkupInfo.title` when it is a non-empty scalar. The fence picks the dialect, and both land on the same tree. Unparseable front matter: one `WARNING_CODE_METADATA` naming the dialect, raw text not emitted as content. YAML whose aliases would add more than 2^20 nodes plus scalar bytes (a billion-laughs bomb) is skipped the same way, measured on the event stream before anything expands |
 | First H1 | `BLOCK_LABEL_TITLE` |
 | Every other heading | `BLOCK_LABEL_SECTION_HEADER` with the Markdown level |
 | Paragraph | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; `hyperlink` when the whole paragraph is one link, and one `InlineSpan` per formatted, linked or referring run |
