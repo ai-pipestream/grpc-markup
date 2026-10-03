@@ -275,6 +275,36 @@ fn unclosed_end_and_begin_runs_are_linear() {
     }
 }
 
+// ------------------------------------------------------------ Docling JSON
+
+#[test]
+fn a_hundred_thousand_chained_groups_project_without_recursing() {
+    const DEPTH: usize = 100_000;
+    let mut groups = String::new();
+    for index in 0..DEPTH {
+        if index > 0 {
+            groups.push(',');
+        }
+        let child = if index + 1 < DEPTH {
+            format!("#/groups/{}", index + 1)
+        } else {
+            "#/texts/0".to_owned()
+        };
+        groups.push_str(&format!(
+            r##"{{"self_ref":"#/groups/{index}","children":[{{"$ref":"{child}"}}],"name":"g","label":"unspecified"}}"##
+        ));
+    }
+    let document = format!(
+        r##"{{"schema_name":"DoclingDocument","version":"1.3.0","name":"chain",
+"body":{{"self_ref":"#/body","children":[{{"$ref":"#/groups/0"}}],"name":"_root_","label":"unspecified"}},
+"groups":[{groups}],
+"texts":[{{"self_ref":"#/texts/0","children":[],"label":"text","prov":[],"orig":"bottom","text":"bottom"}}]}}"##
+    );
+    let outcome = hostile(Format::DoclingJson, document);
+    outcome.within(BOUND);
+    assert!(outcome.text().contains("bottom"), "{}", outcome.text());
+}
+
 // ------------------------------------------------------------ cancellation
 
 #[test]
