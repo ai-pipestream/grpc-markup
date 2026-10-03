@@ -18,6 +18,15 @@
 //!   for 0 (default 256).
 //! - `GRPC_MARKUP_MAX_DOCUMENT_MIB_CEILING` — hard cap a request cannot
 //!   exceed (default 1024).
+//! - `GRPC_MARKUP_MEMORY_BUDGET_MIB` — document bytes buffered across every
+//!   parse at once (default 2048). Past it a request is refused with
+//!   `RESOURCE_EXHAUSTED`.
+//! - `GRPC_MARKUP_UPLOAD_IDLE_SECS` — longest gap between request frames
+//!   before an upload is abandoned with `DEADLINE_EXCEEDED` (default 30).
+//! - `GRPC_MARKUP_UPLOAD_TOTAL_SECS` — longest a whole upload may take
+//!   (default 600).
+//! - `GRPC_MARKUP_MAX_PARSE_SECS` — wall-clock budget for one parse once
+//!   its bytes are in; a shorter client deadline wins (default 300).
 //! - `GRPC_MARKUP_METRICS_INTERVAL_SECS` — seconds between metrics lines
 //!   (default 60; 0 disables them).
 //! - `GRPC_MARKUP_WINDOW_BYTES` — HTTP/2 initial stream and connection
@@ -29,7 +38,9 @@ use grpc_markup::metrics::{self, Metrics};
 use grpc_markup::proto;
 use grpc_markup::proto::v1::markup_parse_service_server::MarkupParseServiceServer;
 use grpc_markup::service::{
-    CEILING_MAX_DOCUMENT_MIB, DEFAULT_MAX_CONCURRENT_PARSES, DEFAULT_MAX_DOCUMENT_MIB, MarkupGrpc,
+    CEILING_MAX_DOCUMENT_MIB, DEFAULT_MAX_CONCURRENT_PARSES, DEFAULT_MAX_DOCUMENT_MIB,
+    DEFAULT_MAX_PARSE, DEFAULT_MEMORY_BUDGET_MIB, DEFAULT_UPLOAD_IDLE, DEFAULT_UPLOAD_TOTAL,
+    MarkupGrpc,
 };
 use tonic::transport::Server;
 
@@ -54,6 +65,11 @@ fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+/// Read a whole-seconds environment variable, falling back to `default`.
+fn env_secs(name: &str, default: Duration) -> Duration {
+    Duration::from_secs(env_num(name, default.as_secs()))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -100,6 +116,19 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
             "GRPC_MARKUP_MAX_CONCURRENT_PARSES",
             DEFAULT_MAX_CONCURRENT_PARSES,
         ))
+        .with_memory_budget_mib(env_num(
+            "GRPC_MARKUP_MEMORY_BUDGET_MIB",
+            DEFAULT_MEMORY_BUDGET_MIB,
+        ))
+        .with_upload_idle_timeout(env_secs(
+            "GRPC_MARKUP_UPLOAD_IDLE_SECS",
+            DEFAULT_UPLOAD_IDLE,
+        ))
+        .with_upload_total_timeout(env_secs(
+            "GRPC_MARKUP_UPLOAD_TOTAL_SECS",
+            DEFAULT_UPLOAD_TOTAL,
+        ))
+        .with_max_parse_time(env_secs("GRPC_MARKUP_MAX_PARSE_SECS", DEFAULT_MAX_PARSE))
         .into_service();
 
     // Health lets an orchestrator gate traffic; reflection lets grpcurl and

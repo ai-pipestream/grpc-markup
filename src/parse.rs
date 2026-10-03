@@ -13,7 +13,9 @@
 //! fold module plus one [`REGISTRY`] entry; `GetServiceInfo.formats`, the
 //! dispatch and the `UNIMPLEMENTED` refusals all follow from the registry.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::document::v1 as doc;
@@ -104,15 +106,73 @@ pub enum ParseError {
     Internal(String),
     /// The client stopped reading. No status is sent.
     ConsumerGone,
+    /// The parse ran past its deadline: the client's own or the server's
+    /// per-parse wall-clock budget. `DEADLINE_EXCEEDED`.
+    DeadlineExceeded(String),
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Invalid(m) | Self::Unsupported(m) => f.write_str(m),
+            Self::Invalid(m) | Self::Unsupported(m) | Self::DeadlineExceeded(m) => f.write_str(m),
             Self::Internal(m) => write!(f, "parser fault: {m}"),
             Self::ConsumerGone => f.write_str("client stopped reading"),
         }
+    }
+}
+
+/// When a parse should stop early: the client went away, or its deadline
+/// passed.
+///
+/// Every event the emitter sends checks it, and a fold that does a long
+/// stretch of work before its first event (the LaTeX reader, say) checks it
+/// from inside that work through [`Emitter::cancel`]. The default never
+/// fires.
+#[derive(Clone, Default)]
+pub struct Cancel {
+    deadline: Option<Instant>,
+    gone: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+impl std::fmt::Debug for Cancel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cancel")
+            .field("deadline", &self.deadline)
+            .field("gone", &self.gone.is_some())
+            .finish()
+    }
+}
+
+impl Cancel {
+    /// A token that fires at `deadline`, or as soon as `gone` says the
+    /// client has stopped listening.
+    #[must_use]
+    pub fn new(
+        deadline: Option<Instant>,
+        gone: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Self {
+        Self { deadline, gone }
+    }
+
+    /// Whether the parse may continue.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::ConsumerGone`] when the client has gone,
+    /// [`ParseError::DeadlineExceeded`] when the deadline has passed.
+    pub fn check(&self) -> Result<(), ParseError> {
+        if self.gone.as_ref().is_some_and(|gone| gone()) {
+            return Err(ParseError::ConsumerGone);
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(ParseError::DeadlineExceeded(
+                "the parse ran past its deadline and was abandoned".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -131,6 +191,23 @@ pub fn run(
     started: Instant,
     emit: EmitFn<'_>,
 ) -> Result<Format, ParseError> {
+    run_with(bytes, config, &Cancel::default(), started, emit)
+}
+
+/// [`run`], stopping early when `cancel` fires.
+///
+/// # Errors
+///
+/// As [`run`], plus [`ParseError::DeadlineExceeded`] and
+/// [`ParseError::ConsumerGone`] from `cancel`.
+pub fn run_with(
+    bytes: &[u8],
+    config: &ParseConfig,
+    cancel: &Cancel,
+    started: Instant,
+    emit: EmitFn<'_>,
+) -> Result<Format, ParseError> {
+    cancel.check()?;
     let (text, lossy) = decode(bytes);
     let text = strip_bom(&text);
 
@@ -141,6 +218,7 @@ pub fn run(
     };
 
     let mut emitter = Emitter::new(format, evidence, bytes.len() as u64, started, config, emit);
+    emitter.cancel = cancel.clone();
     if lossy {
         emitter.warn(
             pb::WarningCode::EncodingSubstitution,
@@ -153,10 +231,14 @@ pub fn run(
 }
 
 /// The document bytes as text, and whether any byte had to be replaced.
-fn decode(bytes: &[u8]) -> (String, bool) {
-    match String::from_utf8(bytes.to_vec()) {
-        Ok(text) => (text, false),
-        Err(error) => (String::from_utf8_lossy(error.as_bytes()).into_owned(), true),
+///
+/// Valid UTF-8 is borrowed, not copied: the request buffer is already the
+/// largest allocation a parse makes, and doubling it before any fold runs
+/// doubled the server's worst case.
+fn decode(bytes: &[u8]) -> (Cow<'_, str>, bool) {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => (Cow::Borrowed(text), false),
+        Err(_) => (String::from_utf8_lossy(bytes), true),
     }
 }
 
@@ -343,6 +425,8 @@ pub struct Emitter<'a> {
     document: Option<doc::Document>,
     /// Whether the inline runs the folds compute reach the wire.
     emit_inline_spans: bool,
+    /// When to stop early.
+    cancel: Cancel,
 }
 
 impl<'a> Emitter<'a> {
@@ -376,7 +460,15 @@ impl<'a> Emitter<'a> {
             fold: config.emit_document.then(DocumentFold::new),
             document: None,
             emit_inline_spans: config.emit_inline_spans,
+            cancel: Cancel::default(),
         }
+    }
+
+    /// This parse's cancellation token, for a fold that works a long time
+    /// between events and has to check it from inside that work.
+    #[must_use]
+    pub const fn cancel(&self) -> &Cancel {
+        &self.cancel
     }
 
     /// The format this parse resolved to, for fold-side decisions.
@@ -662,6 +754,7 @@ impl<'a> Emitter<'a> {
 
     /// Put one event on the wire, feeding the Document fold on the way out.
     fn send(&mut self, event: pb::parse_markup_response::Event) -> Result<(), ParseError> {
+        self.cancel.check()?;
         if let Some(fold) = self.fold.as_mut() {
             fold.consume(&event);
         }
