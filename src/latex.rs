@@ -56,9 +56,10 @@
 //! Zero-argument `\newcommand` macros are expanded, one level;
 //! parameterized custom macros are not (see `docs/design.md`).
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
-use crate::parse::{Block, Emitter, Image, ParseError, Table};
+use crate::parse::{Block, Cancel, Emitter, Image, ParseError, Table};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 
@@ -273,11 +274,21 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
             "empty LaTeX input; a LaTeX document has at least some text".to_owned(),
         ));
     }
-    let nodes = Parser::new(text).nodes(None);
+    let mut parser = Parser::with_cancel(text, emitter.cancel().clone());
+    let nodes = parser.nodes(None);
+    if let Some(error) = parser.cancelled.take() {
+        return Err(error);
+    }
+    emitter.warn_n(
+        pb::WarningCode::UnmappedConstruct,
+        &format!("groups nested deeper than {MAX_NESTING} levels read as plain text"),
+        parser.flattened,
+    );
 
     // Zero-argument custom macros, expanded the way docling expands them.
-    let mut macros = HashMap::new();
-    collect_newcommands(text, &mut macros);
+    let mut definitions = HashMap::new();
+    collect_newcommands(text, &mut definitions);
+    let macros = Macros::new(definitions, text.len());
 
     // Preamble metadata surfaces even though the preamble is skipped.
     let mut title = None;
@@ -319,6 +330,12 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         Some(body) => walk.nodes(body, &ctx)?,
         None => walk.nodes(&nodes, &ctx)?,
     }
+    let starved = walk.macros.starved.get();
+    walk.emitter.warn_n(
+        pb::WarningCode::UnmappedConstruct,
+        "\\newcommand expansion budget exhausted; later uses were left unexpanded",
+        starved,
+    );
     Ok(())
 }
 
@@ -397,15 +414,75 @@ fn signature(name: &str) -> Sig {
     if fixed_one { Sig::Fixed(1) } else { Sig::None }
 }
 
+/// How deep `{..}` groups and environments may nest before the reader
+/// stops building structure and keeps the rest of a group as text.
+///
+/// The reader, the flatteners and the drop of the node tree all recurse
+/// once per level, so a few kilobytes of `{` would overflow the blocking
+/// pool's 2 MiB stack and abort the process. Real documents nest a handful
+/// of levels.
+pub const MAX_NESTING: usize = 128;
+
+/// The longest environment name [`Parser::peek_end_name`] looks for.
+const MAX_ENV_NAME: usize = 128;
+
+/// How many reader steps pass between cancellation checks.
+const CANCEL_STRIDE: u32 = 4096;
+
 /// A recursive-descent reader over the source bytes.
 struct Parser<'t> {
     text: &'t str,
     at: usize,
+    /// Groups and environments currently open.
+    depth: usize,
+    /// Groups and environments read as flat text because they sat deeper
+    /// than [`MAX_NESTING`].
+    flattened: u64,
+    /// The first offset after which no `}` occurs, once a search has
+    /// proved it, so a run of unclosed openers costs one scan, not one
+    /// scan each.
+    no_brace_from: usize,
+    /// The same for `]`.
+    no_bracket_from: usize,
+    /// When to stop reading.
+    cancel: Cancel,
+    /// Steps since the last cancellation check.
+    ticks: u32,
+    /// Set when `cancel` fired; the reader then runs to EOF at once.
+    cancelled: Option<ParseError>,
 }
 
 impl<'t> Parser<'t> {
     fn new(text: &'t str) -> Self {
-        Self { text, at: 0 }
+        Self::with_cancel(text, Cancel::default())
+    }
+
+    fn with_cancel(text: &'t str, cancel: Cancel) -> Self {
+        Self {
+            text,
+            at: 0,
+            depth: 0,
+            flattened: 0,
+            no_brace_from: usize::MAX,
+            no_bracket_from: usize::MAX,
+            cancel,
+            ticks: 0,
+            cancelled: None,
+        }
+    }
+
+    /// Check for cancellation every [`CANCEL_STRIDE`] steps; once it fires
+    /// the cursor jumps to EOF so every open level unwinds at once.
+    fn tick(&mut self) {
+        self.ticks += 1;
+        if self.ticks < CANCEL_STRIDE {
+            return;
+        }
+        self.ticks = 0;
+        if let Err(error) = self.cancel.check() {
+            self.cancelled = Some(error);
+            self.at = self.text.len();
+        }
     }
 
     /// Parse nodes until end of input, a closing `}` (when `until_brace`),
@@ -414,6 +491,10 @@ impl<'t> Parser<'t> {
         let mut nodes = Vec::new();
         let mut run = String::new();
         while self.at < self.text.len() {
+            self.tick();
+            if self.at >= self.text.len() {
+                break;
+            }
             let rest = &self.text[self.at..];
             let c = rest.chars().next().expect("at is on a char boundary");
             match c {
@@ -470,13 +551,54 @@ impl<'t> Parser<'t> {
 
     /// A `{...}` group whose opening brace is already consumed.
     fn group(&mut self) -> Vec<Node> {
+        if self.depth >= MAX_NESTING {
+            return self.flat_group();
+        }
+        self.depth += 1;
         let inner = self.nodes(Some(""));
+        self.depth -= 1;
         // Consume the closing brace when it is there; a truncated group
         // just ends at EOF.
         if self.text[self.at..].starts_with('}') {
             self.at += 1;
         }
         inner
+    }
+
+    /// A group past [`MAX_NESTING`], read without recursing: its source
+    /// text to the matching `}` (or EOF) as one text node, braces dropped.
+    fn flat_group(&mut self) -> Vec<Node> {
+        self.flattened += 1;
+        let mut depth = 1usize;
+        let mut text = String::new();
+        let mut chars = self.text[self.at..].char_indices();
+        let mut end = self.text.len();
+        while let Some((offset, c)) = chars.next() {
+            match c {
+                '\\' => {
+                    // An escaped brace is text, not structure.
+                    text.push(c);
+                    if let Some((_, escaped)) = chars.next() {
+                        text.push(escaped);
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = self.at + offset + 1;
+                        break;
+                    }
+                }
+                _ => text.push(c),
+            }
+        }
+        self.at = end;
+        if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Node::Text(text)]
+        }
     }
 
     /// `$..$` or `$$..$$`, verbatim.
@@ -497,11 +619,19 @@ impl<'t> Parser<'t> {
     }
 
     /// The name of a `\end{...}` at the cursor, without consuming it.
+    ///
+    /// The search for the closing brace is bounded: this runs at every
+    /// backslash, and an unbounded one made a run of unclosed `\end{`
+    /// quadratic.
     fn peek_end_name(&self) -> Option<String> {
         let rest = self.text[self.at..].strip_prefix("\\end")?;
         let rest = rest.trim_start();
         let inner = rest.strip_prefix('{')?;
-        let close = inner.find('}')?;
+        let window = inner
+            .char_indices()
+            .nth(MAX_ENV_NAME)
+            .map_or(inner.len(), |(offset, _)| offset);
+        let close = inner[..window].find('}')?;
         Some(inner[..close].trim().to_owned())
     }
 
@@ -618,6 +748,12 @@ impl<'t> Parser<'t> {
         let opt = self.take_opt();
 
         let base = name.trim_end_matches('*');
+        if self.depth >= MAX_NESTING {
+            // Too deep to give structure to: the body is read into the
+            // enclosing level and its `\end` is dropped as a stray one.
+            self.flattened += 1;
+            return None;
+        }
         if VERBATIM_ENVS.contains(&base) || MATH_ENVS.contains(&base) || base == "tikzpicture" {
             // Raw capture to the matching \end{name}; these bodies are
             // text, not TeX to interpret.
@@ -636,7 +772,9 @@ impl<'t> Parser<'t> {
             });
         }
 
+        self.depth += 1;
         let body = self.nodes(Some(&name));
+        self.depth -= 1;
         // Consume the terminator the recursive call stopped at.
         if self.text[self.at..].starts_with("\\end") {
             self.at += 4;
@@ -669,7 +807,29 @@ impl<'t> Parser<'t> {
     }
 
     /// Text up to (and consuming) `close`; `None` at EOF.
+    ///
+    /// A miss is remembered: no `close` after this offset means none after
+    /// any later one, so a run of unclosed openers is scanned once.
     fn take_until(&mut self, close: char) -> Option<String> {
+        let absent_from = match close {
+            '}' => &mut self.no_brace_from,
+            ']' => &mut self.no_bracket_from,
+            _ => return self.scan_until(close),
+        };
+        if self.at >= *absent_from {
+            return None;
+        }
+        let Some(end) = self.text[self.at..].find(close) else {
+            *absent_from = self.at;
+            return None;
+        };
+        let inner = self.text[self.at..self.at + end].to_owned();
+        self.at += end + close.len_utf8();
+        Some(inner)
+    }
+
+    /// [`Self::take_until`] for a closer with no remembered miss.
+    fn scan_until(&mut self, close: char) -> Option<String> {
         let end = self.text[self.at..].find(close)?;
         let inner = self.text[self.at..self.at + end].to_owned();
         self.at += end + close.len_utf8();
@@ -735,7 +895,7 @@ fn scan_metadata(
                 if slot.is_none()
                     && let Some(arg) = args.first()
                 {
-                    let text = flatten_nodes(arg, &HashMap::new());
+                    let text = flatten_nodes(arg, &Macros::default());
                     if !text.is_empty() {
                         *slot = Some(text);
                     }
@@ -761,7 +921,13 @@ fn collect_newcommands(text: &str, macros: &mut HashMap<String, String>) {
             let after = after.trim_start();
             // {\name} or \name
             let (name, after) = if let Some(braced) = after.strip_prefix('{') {
-                let Some(close) = braced.find('}') else {
+                // A macro name is short; an unbounded search here made a
+                // run of `\newcommand{` with no `}` quadratic.
+                let window = braced
+                    .char_indices()
+                    .nth(MAX_ENV_NAME)
+                    .map_or(braced.len(), |(offset, _)| offset);
+                let Some(close) = braced[..window].find('}') else {
                     continue;
                 };
                 (braced[..close].trim(), &braced[close + 1..])
@@ -803,23 +969,79 @@ fn collect_newcommands(text: &str, macros: &mut HashMap<String, String>) {
                     _ => {}
                 }
             }
-            if let Some(end) = end {
-                macros.insert(name.to_owned(), braced[..end].to_owned());
-            }
+            let Some(end) = end else {
+                // An unbalanced body runs to EOF, as it does in TeX, so
+                // nothing after it can be a definition: stop rather than
+                // rescan the rest once per later keyword.
+                break;
+            };
+            macros.insert(name.to_owned(), braced[..end].to_owned());
+            // Resume after the body: a definition nested inside another is
+            // not one TeX would make until the outer one expands, and
+            // rescanning every body made nested definitions quadratic.
+            rest = &braced[end + 1..];
         }
     }
 }
 
 // ----------------------------------------------------------- text flatten
 
+/// The smallest `\newcommand` expansion budget, in definition bytes.
+const MIN_EXPANSION_BUDGET: usize = 1 << 20;
+
+/// The expansion budget per input byte, past the minimum.
+const EXPANSION_BUDGET_PER_BYTE: usize = 4;
+
+/// Zero-argument `\newcommand` definitions, and the budget every expansion
+/// in one parse draws from.
+///
+/// One level of expansion is linear in the definition, but a 100-byte
+/// definition used a hundred thousand times is still ten megabytes of
+/// text from a few hundred kilobytes; the budget caps the total at a
+/// multiple of the input.
+#[derive(Default)]
+struct Macros {
+    defs: HashMap<String, String>,
+    /// Definition bytes still allowed to expand.
+    budget: Cell<usize>,
+    /// Uses left unexpanded because the budget ran out.
+    starved: Cell<u64>,
+}
+
+impl Macros {
+    fn new(defs: HashMap<String, String>, input_len: usize) -> Self {
+        Self {
+            defs,
+            budget: Cell::new(
+                input_len
+                    .saturating_mul(EXPANSION_BUDGET_PER_BYTE)
+                    .max(MIN_EXPANSION_BUDGET),
+            ),
+            starved: Cell::new(0),
+        }
+    }
+
+    /// Draw `cost` bytes from the budget; false (and counted) when it is
+    /// spent.
+    fn spend(&self, cost: usize) -> bool {
+        let left = self.budget.get();
+        if cost > left {
+            self.starved.set(self.starved.get() + 1);
+            return false;
+        }
+        self.budget.set(left - cost);
+        true
+    }
+}
+
 /// Nodes flattened to inline text, with the runs they carry recorded.
-fn flatten_nodes(nodes: &[Node], macros: &HashMap<String, String>) -> String {
+fn flatten_nodes(nodes: &[Node], macros: &Macros) -> String {
     let mut out = Inline::default();
     flatten_into(nodes, macros, 0, &mut out);
     out.take().0
 }
 
-fn flatten_into(nodes: &[Node], macros: &HashMap<String, String>, depth: usize, out: &mut Inline) {
+fn flatten_into(nodes: &[Node], macros: &Macros, depth: usize, out: &mut Inline) {
     for node in nodes {
         match node {
             Node::Text(text) => out.push(text),
@@ -842,7 +1064,7 @@ fn flatten_macro(
     name: &str,
     opt: Option<&str>,
     args: &[Vec<Node>],
-    macros: &HashMap<String, String>,
+    macros: &Macros,
     depth: usize,
     out: &mut Inline,
 ) {
@@ -919,8 +1141,11 @@ fn flatten_macro(
         "footnote" | "marginpar" | "caption" | "label" => {}
         _ if BARE_IGNORED.contains(&name) || GREEDY_IGNORED.contains(&name) => {}
         _ => {
-            if let Some(definition) = macros.get(name) {
-                if depth < 5 {
+            if let Some(definition) = macros.defs.get(name) {
+                // One level, as documented: a use inside an expansion is
+                // not expanded again, so a self-referencing or mutually
+                // recursive definition costs one pass, not branching^depth.
+                if depth == 0 && macros.spend(definition.len()) {
                     let expanded = Parser::new(definition).nodes(None);
                     flatten_into(&expanded, macros, depth + 1, out);
                 }
@@ -986,7 +1211,7 @@ struct Ctx {
 /// The mapping walk over parsed nodes.
 struct Walk<'w, 'e> {
     emitter: &'w mut Emitter<'e>,
-    macros: HashMap<String, String>,
+    macros: Macros,
     title_taken: bool,
     /// A `\label` seen inside running text, waiting for the block that
     /// text becomes.
@@ -1579,10 +1804,7 @@ impl Walk<'_, '_> {
 /// The label may sit anywhere in the body, and in practice sits after the
 /// caption, which is exactly why it cannot be left there: the caption would
 /// claim it and a `\ref` to the figure would point at its caption text.
-fn take_float_label(
-    body: &[Node],
-    macros: &HashMap<String, String>,
-) -> (Vec<Node>, Option<String>) {
+fn take_float_label(body: &[Node], macros: &Macros) -> (Vec<Node>, Option<String>) {
     let found = body.iter().position(|node| {
         matches!(node, Node::Macro { name, args, .. }
             if name == "label" && label_key(args, macros).is_some())
@@ -1616,7 +1838,7 @@ fn graphics_option(options: Option<&str>, key: &str) -> Option<String> {
 }
 
 /// The `\label` key of a label macro's argument.
-fn label_key(args: &[Vec<Node>], macros: &HashMap<String, String>) -> Option<String> {
+fn label_key(args: &[Vec<Node>], macros: &Macros) -> Option<String> {
     args.first()
         .map(|arg| flatten_nodes(arg, macros))
         .filter(|key| !key.is_empty())
@@ -1625,11 +1847,7 @@ fn label_key(args: &[Vec<Node>], macros: &HashMap<String, String>) -> Option<Str
 /// The `\label` that follows the node at `index`, skipping only
 /// whitespace: `\section{Intro}\label{sec:intro}` anchors the heading, not
 /// the text after it. Returns the key and the index it was found at.
-fn label_after(
-    nodes: &[Node],
-    index: usize,
-    macros: &HashMap<String, String>,
-) -> Option<(String, usize)> {
+fn label_after(nodes: &[Node], index: usize, macros: &Macros) -> Option<(String, usize)> {
     for (at, node) in nodes.iter().enumerate().skip(index + 1) {
         match node {
             Node::Text(text) if text.trim().is_empty() => {}
@@ -1793,7 +2011,7 @@ mod tests {
 
     fn flat(latex: &str) -> String {
         let nodes = Parser::new(latex).nodes(None);
-        flatten_nodes(&nodes, &HashMap::new())
+        flatten_nodes(&nodes, &Macros::default())
     }
 
     #[test]
@@ -1808,7 +2026,7 @@ mod tests {
     fn runs(latex: &str) -> (String, Vec<pb::InlineSpan>) {
         let nodes = Parser::new(latex).nodes(None);
         let mut out = Inline::default();
-        flatten_into(&nodes, &HashMap::new(), 0, &mut out);
+        flatten_into(&nodes, &Macros::default(), 0, &mut out);
         out.take()
     }
 
@@ -1936,7 +2154,10 @@ mod tests {
         );
 
         let nodes = Parser::new("Knuth \\etal shipped.").nodes(None);
-        assert_eq!(flatten_nodes(&nodes, &macros), "Knuth et al. shipped.");
+        assert_eq!(
+            flatten_nodes(&nodes, &Macros::new(macros, 0)),
+            "Knuth et al. shipped."
+        );
     }
 
     #[test]
@@ -1957,7 +2178,7 @@ mod tests {
     fn the_document_environment_is_found_wherever_it_sits() {
         let nodes = Parser::new("preamble \\begin{document}body\\end{document}").nodes(None);
         let body = find_document(&nodes).expect("found");
-        assert_eq!(flatten_nodes(body, &HashMap::new()), "body");
+        assert_eq!(flatten_nodes(body, &Macros::default()), "body");
         assert!(find_document(&Parser::new("no env").nodes(None)).is_none());
     }
 

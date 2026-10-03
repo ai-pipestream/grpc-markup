@@ -212,6 +212,69 @@ fn many_spanning_cells_stay_linear() {
     assert_eq!(outcome.rows().len(), 5_001);
 }
 
+// ------------------------------------------------------------------- LaTeX
+
+#[test]
+fn five_thousand_open_braces_read_as_text_instead_of_overflowing() {
+    let outcome = hostile(Format::Latex, format!("{}deep text", "{".repeat(5_000)));
+    outcome.within(BOUND);
+    assert!(outcome.text().contains("deep text"), "{}", outcome.text());
+    assert!(outcome.warned(pb::WarningCode::UnmappedConstruct, "nested deeper"));
+}
+
+#[test]
+fn fifty_thousand_nested_environments_survive_a_small_stack() {
+    let outcome = hostile(
+        Format::Latex,
+        format!("{}x", "\\begin{itemize}".repeat(50_000)),
+    );
+    outcome.within(BOUND);
+    assert!(outcome.warned(pb::WarningCode::UnmappedConstruct, "nested deeper"));
+}
+
+#[test]
+fn a_self_referencing_newcommand_expands_once_not_exponentially() {
+    // 137 bytes that took ten seconds of CPU at five levels of expansion.
+    let document = format!(
+        "\\newcommand{{\\a}}{{xyzw{}}}\n\\begin{{document}}\n\\a\n\\end{{document}}\n",
+        "\\a".repeat(40)
+    );
+    let outcome = hostile(Format::Latex, document);
+    outcome.within(Duration::from_secs(5));
+    assert!(outcome.text().contains("xyzw"), "{}", outcome.text());
+}
+
+#[test]
+fn newcommand_expansion_stops_at_its_budget() {
+    // A 1 KiB definition used a hundred thousand times is 100 MiB of text
+    // from 300 KiB of source; the budget stops it at a multiple of the
+    // input and says so.
+    let document = format!(
+        "\\newcommand{{\\big}}{{{}}}\n\\begin{{document}}\n{}\n\\end{{document}}\n",
+        "w ".repeat(512),
+        "\\big ".repeat(100_000)
+    );
+    let outcome = hostile(Format::Latex, document);
+    outcome.within(BOUND);
+    assert!(outcome.warned(pb::WarningCode::UnmappedConstruct, "expansion budget"));
+}
+
+#[test]
+fn unclosed_end_and_begin_runs_are_linear() {
+    // 1 MB of `\end{` took 7.6 s and 1.4 MB of `\begin{` 4.9 s in release.
+    for opener in [
+        "\\end{",
+        "\\begin{",
+        "\\item[",
+        "\\newcommand{",
+        "\\newcommand\\a{",
+    ] {
+        let outcome = hostile(Format::Latex, opener.repeat(1_000_000 / opener.len()));
+        outcome.within(Duration::from_secs(10));
+        assert!(outcome.result.is_ok(), "{opener}: {:?}", outcome.result);
+    }
+}
+
 // ------------------------------------------------------------ cancellation
 
 #[test]
@@ -226,3 +289,26 @@ fn a_passed_deadline_stops_the_parse_with_deadline_exceeded() {
     assert!(outcome.events.is_empty());
 }
 
+#[test]
+fn a_client_that_hangs_up_stops_the_latex_reader_before_its_first_event() {
+    // The reader works a long time before the fold emits anything, so it
+    // checks the token itself: the probe says "gone" from its second call
+    // on, which is from inside the reader.
+    let calls = Arc::new(AtomicU32::new(0));
+    let probe = Arc::clone(&calls);
+    let cancel = Cancel::new(
+        None,
+        Some(Arc::new(move || probe.fetch_add(1, Ordering::Relaxed) >= 1)),
+    );
+    let outcome = hostile_with(Format::Latex, "word ".repeat(200_000), cancel);
+    assert!(
+        matches!(outcome.result, Err(ParseError::ConsumerGone)),
+        "{:?}",
+        outcome.result
+    );
+    assert!(
+        outcome.events.is_empty(),
+        "stopped inside the reader, before info"
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}

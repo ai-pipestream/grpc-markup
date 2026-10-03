@@ -208,7 +208,13 @@ here, and the mapping covers the constructs below.
 | unknown environments | descended into, one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per environment name |
 | `\input`/`\include` | never read (diskless); one aggregated warning names the refusal |
 
-Zero-argument `\newcommand` macros expand one level; parameterized custom
+Zero-argument `\newcommand` macros expand one level: a use inside an
+expansion is not expanded again, so a self-referencing definition costs one
+pass. Every expansion in a parse draws on one budget of definition bytes
+(four times the input, at least 1 MiB); past it, later uses are left
+unexpanded with one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT`. Groups and
+environments nested deeper than 128 levels are read as plain text with the
+same warning, so no input can exhaust the reader's stack. Parameterized custom
 macros are deliberately not expanded (textual `#N` substitution would be
 guessing at the author's intent). Also
 deliberate: theorem lead-ins are plain text with a `role`, never
