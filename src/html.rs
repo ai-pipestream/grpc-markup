@@ -175,7 +175,11 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
 }
 
 /// How many bytes the tree builder is fed between cancellation checks.
-const PARSE_SLICE: usize = 64 * 1024;
+/// The cost of a slice grows with the nesting it opens, so this is what
+/// bounds how far past its deadline a hostile parse can run: at 64 KiB a
+/// `<ul><li>` ladder overran a 200 ms deadline by a second in release and
+/// by half a minute in debug.
+const PARSE_SLICE: usize = 4 * 1024;
 
 /// `Html::parse_document`, fed in slices with a cancellation check
 /// between them.
