@@ -160,6 +160,9 @@ pub struct Inline {
     open_links: usize,
     /// Non-whitespace text seen outside any link.
     outside: bool,
+    /// Non-whitespace text seen at all. A buffer of line breaks and spaces
+    /// alone (`<p><br/><br/></p>`, a spacer cell) is no text.
+    visible: bool,
 }
 
 impl Inline {
@@ -177,6 +180,7 @@ impl Inline {
                     self.chars += 1;
                     self.pending_space = false;
                 }
+                self.visible = true;
                 self.start_open();
                 self.buf.push(c);
                 self.chars += 1;
@@ -195,6 +199,9 @@ impl Inline {
         if self.open_links == 0 && !text.trim().is_empty() {
             self.outside = true;
         }
+        if !text.trim().is_empty() {
+            self.visible = true;
+        }
         if self.pending_space && !text.is_empty() {
             self.buf.push(' ');
             self.chars += 1;
@@ -212,10 +219,11 @@ impl Inline {
         self.pending_space = !self.buf.is_empty();
     }
 
-    /// True when nothing visible has been pushed yet.
+    /// True when nothing visible has been pushed yet: whitespace and line
+    /// breaks alone do not count.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.buf.is_empty()
+    pub const fn is_empty(&self) -> bool {
+        !self.visible
     }
 
     /// The code points appended so far, which is where the next character
@@ -342,12 +350,18 @@ impl Inline {
         self.pending_space = false;
         self.chars = 0;
         self.open.clear();
+        let visible = std::mem::take(&mut self.visible);
         let mut spans = std::mem::take(&mut self.spans);
+        let buf = std::mem::take(&mut self.buf);
+        if !visible {
+            // Only whitespace landed: no text, and no run over it.
+            return (String::new(), Vec::new());
+        }
         spans.sort_by_key(|span| {
             let range = span.range.unwrap_or_default();
             (range.start, u32::MAX - range.end)
         });
-        (std::mem::take(&mut self.buf), spans)
+        (buf, spans)
     }
 
     /// Fix the start offset of every open run that has not seen a character

@@ -598,6 +598,26 @@ async fn a_br_is_a_line_break_and_not_a_swallowed_word_boundary() {
     );
 }
 
+/// Project Gutenberg EPUBs space their pages with `<p><br/><br/></p>`: line
+/// breaks and nothing else. Such a paragraph, or a cell like it, is no text,
+/// not a block of newlines.
+#[tokio::test]
+async fn a_paragraph_of_line_breaks_alone_is_not_a_block() {
+    let client = client().await;
+    let html = "<body><p><br/>\n<br/></p><div class=\"c3\"><br/>\n<br/>\n<br/></div>\
+<p>Kept</p><table><tr><td><br/></td><td>x</td></tr></table></body>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    assert_eq!(
+        texts(&blocks_labelled(&events, pb::BlockLabel::Paragraph)),
+        ["Kept"]
+    );
+    assert_eq!(
+        table_rows(&events)[0].cells[0].text,
+        "",
+        "a spacer cell is empty"
+    );
+}
+
 /// The cover page real EPUBs ship: an XHTML 1.1 document, the XLink
 /// namespace declared, the image wrapped in an inline `<svg>` inside a
 /// cover `div`, and the reference spelled `xlink:href` only.
