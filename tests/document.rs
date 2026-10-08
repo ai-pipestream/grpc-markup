@@ -599,6 +599,20 @@ async fn html_meta_tags_land_in_the_typed_list_not_in_a_free_form_map() {
             ("og:title", "The Engine"),
         ]
     );
+    let fields = &document
+        .body
+        .as_ref()
+        .unwrap()
+        .meta
+        .as_ref()
+        .unwrap()
+        .custom_fields;
+    assert!(
+        fields.keys().all(|key| !key.contains(':')),
+        "a namespaced meta tag keeps no colon-keyed custom field: {:?}",
+        fields.keys().collect::<Vec<_>>()
+    );
+    assert!(fields.contains_key("html.meta.author"));
     let meta = document.source_meta.as_ref().expect("declared metadata");
     assert_eq!(meta.title.as_deref(), Some("The Engine"));
     assert_eq!(meta.authors, vec!["Ada Lovelace"]);
