@@ -1143,3 +1143,20 @@ async fn a_flat_stream_request_strips_the_cell_block_runs_too() {
         "the runs inside a cell block follow the same option"
     );
 }
+
+#[tokio::test]
+async fn a_block_container_inside_a_heading_is_part_of_its_text() {
+    // A page builder's heading: counters in a `div`, the name in a `span`,
+    // a `p` at the end. html5ever keeps them inside the heading, and the
+    // heading reads as everything between its tags.
+    let client = client().await;
+    let html = "<h2>\n<div>\n<span>+ 1</span>\n<span>- 1</span>\n</div>\n<span>icon.svg</span>\n<p>View File</p>\n</h2><p>after</p>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let headers = blocks_labelled(&events, pb::BlockLabel::SectionHeader);
+    assert_eq!(texts(&headers), ["+ 1 - 1 icon.svg View File"]);
+    assert_eq!(
+        texts(&blocks_labelled(&events, pb::BlockLabel::Paragraph)),
+        ["after"],
+        "nothing inside the heading became a paragraph of its own"
+    );
+}

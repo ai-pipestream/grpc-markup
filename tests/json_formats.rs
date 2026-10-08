@@ -453,3 +453,66 @@ async fn a_leading_bom_does_not_break_the_docling_json() {
         "a kept BOM would fail the JSON parse outright"
     );
 }
+
+/// A serialized document whose grid is dense the way docling writes one:
+/// the spanning cell `A` repeated at every position it covers.
+const DOCLING_DENSE_GRID: &str = r##"{
+  "schema_name": "DoclingDocument",
+  "version": "1.3.0",
+  "name": "Dense",
+  "furniture": {"self_ref": "#/furniture", "children": [], "content_layer": "furniture",
+                "name": "_root_", "label": "unspecified"},
+  "body": {"self_ref": "#/body", "children": [{"$ref": "#/tables/0"}],
+           "content_layer": "body", "name": "_root_", "label": "unspecified"},
+  "groups": [],
+  "texts": [],
+  "tables": [
+    {"self_ref": "#/tables/0", "parent": {"$ref": "#/body"}, "children": [],
+     "content_layer": "body", "label": "table", "prov": [],
+     "captions": [], "references": [], "footnotes": [],
+     "data": {"num_rows": 2, "num_cols": 3, "table_cells": [],
+       "grid": [
+         [{"row_span": 2, "col_span": 2, "start_row_offset_idx": 0, "end_row_offset_idx": 2,
+           "start_col_offset_idx": 0, "end_col_offset_idx": 2, "text": "A"},
+          {"row_span": 2, "col_span": 2, "start_row_offset_idx": 0, "end_row_offset_idx": 2,
+           "start_col_offset_idx": 0, "end_col_offset_idx": 2, "text": "A"},
+          {"row_span": 1, "col_span": 1, "start_row_offset_idx": 0, "end_row_offset_idx": 1,
+           "start_col_offset_idx": 2, "end_col_offset_idx": 3, "text": "B"}],
+         [{"row_span": 2, "col_span": 2, "start_row_offset_idx": 0, "end_row_offset_idx": 2,
+           "start_col_offset_idx": 0, "end_col_offset_idx": 2, "text": "A"},
+          {"row_span": 2, "col_span": 2, "start_row_offset_idx": 0, "end_row_offset_idx": 2,
+           "start_col_offset_idx": 0, "end_col_offset_idx": 2, "text": "A"},
+          {"row_span": 1, "col_span": 1, "start_row_offset_idx": 1, "end_row_offset_idx": 2,
+           "start_col_offset_idx": 2, "end_col_offset_idx": 3, "text": "C"}]
+       ]}}
+  ],
+  "pages": {}
+}"##;
+
+#[tokio::test]
+async fn a_dense_grid_states_each_spanning_cell_once_on_the_wire() {
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        DOCLING_DENSE_GRID,
+        options(pb::MarkupFormat::DoclingJson),
+    )
+    .await;
+    let rows = table_rows(&events);
+    let texts: Vec<Vec<(u32, &str)>> = rows
+        .iter()
+        .map(|row| {
+            row.cells
+                .iter()
+                .map(|cell| (cell.column_index, cell.text.as_str()))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [vec![(0, "A"), (2, "B")], vec![(2, "C")]],
+        "the copies of A are the one cell, placed where it starts"
+    );
+    assert_eq!(rows[0].cells[0].column_span, 2);
+    assert_eq!(rows[0].cells[0].row_span, 2);
+}

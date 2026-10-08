@@ -96,6 +96,11 @@ const CONTAINERS: &[&str] = &[
     "form", "fieldset", "center", "hgroup", "picture", "figure",
 ];
 
+/// Block elements that, inside a heading, flatten into the heading's text
+/// alongside the containers: the paragraph-like elements with an item of
+/// their own elsewhere.
+const HEADING_FLATTENED: &[&str] = &["p", "address", "summary", "details"];
+
 /// How deep elements may nest before the rest of a subtree is flattened.
 ///
 /// html5ever builds trees of any depth, and the walk below recurses once or
@@ -166,6 +171,7 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         emitter,
         title_taken: false,
         quote_depth: 0,
+        in_heading: false,
         buffer: None,
     };
     if let Some(body) = child_element(&root, "body") {
@@ -349,6 +355,9 @@ struct Walk<'w, 'e> {
     emitter: &'w mut Emitter<'e>,
     title_taken: bool,
     quote_depth: u32,
+    /// Whether a heading's subtree is being flattened: a block container
+    /// met there is part of the heading's text, not a block of its own.
+    in_heading: bool,
     /// Inline text collected since the last block boundary.
     buffer: Option<Inline>,
 }
@@ -381,6 +390,18 @@ impl Walk<'_, '_> {
         }
         if INLINE.contains(&name) {
             return self.inline(element, name);
+        }
+        if self.in_heading && (CONTAINERS.contains(&name) || HEADING_FLATTENED.contains(&name)) {
+            // Inside a heading a container is a word boundary around its
+            // text, nothing more.
+            if let Some(buffer) = self.buffer.as_mut() {
+                buffer.space();
+            }
+            self.inline(element, name)?;
+            if let Some(buffer) = self.buffer.as_mut() {
+                buffer.space();
+            }
+            return Ok(());
         }
         match name {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
@@ -558,7 +579,14 @@ impl Walk<'_, '_> {
     }
 
     fn heading(&mut self, element: &ElementRef<'_>, name: &str) -> Result<(), ParseError> {
-        let (text, spans, hyperlink) = self.flatten(element)?;
+        // A heading's text is everything written between its tags, the
+        // way a reader sees it: the `<div>`s and `<p>`s a page builder
+        // nests inside one (html5ever keeps them there) flatten into the
+        // heading rather than splitting off as paragraphs of their own.
+        let outer = std::mem::replace(&mut self.in_heading, true);
+        let flattened = self.flatten(element);
+        self.in_heading = outer;
+        let (text, spans, hyperlink) = flattened?;
         if text.is_empty() {
             return Ok(());
         }
