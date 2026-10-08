@@ -44,6 +44,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
+use prost::Message;
 use prost_types::Value;
 use prost_types::value::Kind;
 
@@ -1634,6 +1635,22 @@ const GRID_POSITIONS_PER_CELL: usize = 8;
 /// only matters once a table is large enough for the copies to cost.
 const MIN_GRID_POSITIONS: usize = 65_536;
 
+/// The grid is also materialised only while its encoded size stays within
+/// this many times the encoded size of the real cells. Positions alone do
+/// not bound it: one cell of a few megabytes spanning a thousand columns
+/// and sixty rows is well under the position floor and would be copied
+/// sixty thousand times.
+const GRID_BYTES_PER_CELL_BYTE: usize = 4;
+
+/// Below this many encoded bytes the grid is always materialised, so a
+/// small table with one wide header is not denied its grid by the ratio.
+const GRID_BYTES_FLOOR: usize = 1 << 20;
+
+/// Above this many encoded bytes the grid is never materialised, whatever
+/// the ratio says: the document cap is 256 MiB and the grid of a table
+/// that large is a second copy of it nobody can afford.
+const GRID_BYTES_CEILING: usize = 64 << 20;
+
 /// One placed cell as the rows under its own see it: the columns it holds,
 /// the first row it no longer covers, and its index in `table_cells`.
 #[derive(Debug, Clone, Copy)]
@@ -1713,10 +1730,7 @@ fn dense_table_data(rows: Vec<Vec<doc::TableCell>>) -> doc::TableData {
         .map(|cell| cell_footprint(cell).1.end)
         .max()
         .unwrap_or(0);
-    let positions = num_rows.saturating_mul(num_cols);
-    let affordable =
-        positions <= MIN_GRID_POSITIONS.max(cells.len().saturating_mul(GRID_POSITIONS_PER_CELL));
-    let grid = if affordable {
+    let grid = if grid_affordable(&cells, num_rows, num_cols) {
         dense_grid(&cells, num_rows, num_cols)
     } else {
         Vec::new()
@@ -1728,6 +1742,32 @@ fn dense_table_data(rows: Vec<Vec<doc::TableCell>>) -> doc::TableData {
         grid,
         ..doc::TableData::default()
     }
+}
+
+/// Whether the dense grid of these placed cells is worth sending: within
+/// the position budget and within the byte budget, both stated against
+/// the real cells so that a table costs at most a small multiple of
+/// itself, never a multiple of what its spans claim.
+fn grid_affordable(cells: &[doc::TableCell], num_rows: usize, num_cols: usize) -> bool {
+    let positions = num_rows.saturating_mul(num_cols);
+    if positions > MIN_GRID_POSITIONS.max(cells.len().saturating_mul(GRID_POSITIONS_PER_CELL)) {
+        return false;
+    }
+    let mut real_bytes = 0usize;
+    let mut covered = 0usize;
+    let mut grid_bytes = 0usize;
+    for cell in cells {
+        let (rows, cols) = cell_footprint(cell);
+        let area = rows.len().saturating_mul(cols.len());
+        let bytes = cell.encoded_len();
+        real_bytes = real_bytes.saturating_add(bytes);
+        covered = covered.saturating_add(area);
+        grid_bytes = grid_bytes.saturating_add(bytes.saturating_mul(area));
+    }
+    let fillers = positions.saturating_sub(covered);
+    grid_bytes = grid_bytes.saturating_add(fillers.saturating_mul(filler_cell(0, 0).encoded_len()));
+    grid_bytes <= GRID_BYTES_CEILING
+        && grid_bytes <= GRID_BYTES_FLOOR.max(real_bytes.saturating_mul(GRID_BYTES_PER_CELL_BYTE))
 }
 
 /// The dense grid over cells already placed without overlap, in row-major
@@ -3896,6 +3936,42 @@ mod tests {
             (z.start_col_offset_idx, z.end_col_offset_idx, z.col_span),
             (1, 2, 1)
         );
+    }
+
+    #[test]
+    fn a_big_cell_spanning_many_positions_keeps_its_cells_and_no_grid() {
+        // Under the position floor (65 x 1001), so only the byte budget
+        // stands between one 2 MiB cell and sixty-five thousand copies of
+        // it.
+        let text = "x".repeat(2 << 20);
+        let mut rows = vec![vec![
+            wire_cell(0, &text, 1000, 65),
+            wire_cell(1000, "y", 1, 1),
+        ]];
+        rows.extend((1..65).map(|_| vec![wire_cell(1000, "y", 1, 1)]));
+        let document = fold(&table_events(rows));
+        let data = table_data(&document);
+        assert_eq!((data.num_rows, data.num_cols), (65, 1001));
+        assert_eq!(data.table_cells.len(), 66, "every real cell is kept");
+        assert_eq!(data.table_cells[0].text.len(), 2 << 20);
+        assert!(
+            data.grid.is_empty(),
+            "the grid would be a hundred gigabytes of one cell"
+        );
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_wide_header_over_a_small_table_still_gets_its_grid() {
+        // Five copies of the header exceed four times the real bytes, but
+        // the whole grid is far under the byte floor.
+        let document = fold(&table_events(vec![
+            vec![wire_cell(0, &"h".repeat(10_000), 5, 1)],
+            vec![wire_cell(0, "a", 1, 1)],
+        ]));
+        let data = table_data(&document);
+        assert_eq!(data.grid.len(), 2);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
     }
 
     #[test]
