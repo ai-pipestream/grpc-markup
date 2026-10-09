@@ -998,13 +998,31 @@ impl Project<'_, '_> {
             ..Table::default()
         })?;
         if let Some(data) = table.data.as_ref() {
-            for row in &data.grid {
+            for (row_index, row) in data.grid.iter().enumerate() {
                 if row.cells.is_empty() {
                     continue;
                 }
+                // A dense grid shows a spanning cell at every position it
+                // covers; the wire states each cell once, at the position
+                // it starts. A copy is a cell whose span reaches down from
+                // an earlier row, or one that repeats the entry before it
+                // across a column span.
+                let row_offset = i32::try_from(row_index).unwrap_or(i32::MAX);
+                let mut previous: Option<&doc::TableCell> = None;
                 let cells: Vec<pb::TableCell> = row
                     .cells
                     .iter()
+                    .filter(|cell| {
+                        let from_above =
+                            cell.row_span > 1 && cell.start_row_offset_idx < row_offset;
+                        let repeat = cell.col_span > 1
+                            && previous.is_some_and(|before| {
+                                before.start_row_offset_idx == cell.start_row_offset_idx
+                                    && before.start_col_offset_idx == cell.start_col_offset_idx
+                            });
+                        previous = Some(cell);
+                        !from_above && !repeat
+                    })
                     .map(|cell| pb::TableCell {
                         column_index: u32::try_from(cell.start_col_offset_idx.max(0))
                             .unwrap_or_default(),

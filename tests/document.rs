@@ -1295,3 +1295,67 @@ async fn an_asciidoc_caption_binds_to_the_image_it_titles() {
     assert_eq!(folded.pictures.len(), 1);
     assert_eq!(caption_texts(folded, &folded.pictures[0]), ["The engine"]);
 }
+
+#[tokio::test]
+async fn html_spans_and_short_rows_fold_to_a_dense_grid() {
+    // docling's TableData convention: the grid is num_rows rows of
+    // num_cols entries, a spanning cell repeated at every position it
+    // covers and an empty cell where nothing reaches; table_cells is each
+    // real cell once. The nested table in the rich cell follows the same
+    // rule.
+    let client = client().await;
+    let html = r#"<table>
+<tr><td rowspan="2">a</td><td colspan="2">b</td></tr>
+<tr><td>c</td></tr>
+<tr><td><table><tr><td colspan="2">n</td></tr><tr><td>m</td></tr></table></td></tr>
+</table>"#;
+    let events = parse_ok(&client, html, with_document(pb::MarkupFormat::Html)).await;
+    let document = document(&events).expect("the fold was requested");
+    assert_eq!(integrity_errors(document), Vec::<String>::new());
+    // The nested table folds while its row streams, so it takes the
+    // first arena slot; the outer one waits for its end event.
+    for (table, expected, cells) in [
+        (&document.tables[0], vec![vec!["n", "n"], vec!["m", ""]], 2),
+        (
+            &document.tables[1],
+            vec![vec!["a", "b", "b"], vec!["a", "c", ""], vec!["n m", "", ""]],
+            4,
+        ),
+    ] {
+        let data = table.data.as_ref().expect("the table has data");
+        let grid: Vec<Vec<&str>> = data
+            .grid
+            .iter()
+            .map(|row| row.cells.iter().map(|cell| cell.text.as_str()).collect())
+            .collect();
+        assert_eq!(grid, expected, "{}", table.self_ref);
+        assert_eq!(data.num_rows, i32::try_from(expected.len()).unwrap());
+        assert_eq!(data.num_cols, i32::try_from(expected[0].len()).unwrap());
+        assert_eq!(
+            data.table_cells.len(),
+            cells,
+            "{}: each real cell once",
+            table.self_ref
+        );
+        for cell in &data.table_cells {
+            assert_eq!(
+                cell.end_row_offset_idx - cell.start_row_offset_idx,
+                cell.row_span
+            );
+            assert_eq!(
+                cell.end_col_offset_idx - cell.start_col_offset_idx,
+                cell.col_span
+            );
+            assert!(
+                cell.end_row_offset_idx <= data.num_rows
+                    && cell.end_col_offset_idx <= data.num_cols
+            );
+        }
+    }
+    let outer = document.tables[1].data.as_ref().unwrap();
+    assert_eq!(
+        outer.grid[1].cells[0].row_span, 2,
+        "the copy is the spanning cell itself"
+    );
+    assert!(outer.grid[1].cells[2].text.is_empty() && outer.grid[1].cells[2].r#ref.is_none());
+}

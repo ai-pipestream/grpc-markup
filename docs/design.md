@@ -126,7 +126,7 @@ scope by construction.
 | Source construct | Wire |
 |---|---|
 | `<title>`, `<meta name content>` or `<meta property content>` | `MarkupInfo.title`, scalar `MarkupInfo.metadata` values under `meta.*` keys |
-| `h1`..`h6` | first `h1` is `BLOCK_LABEL_TITLE` (the Markdown fold's rule); every other heading `BLOCK_LABEL_SECTION_HEADER` at its own level |
+| `h1`..`h6` | first `h1` is `BLOCK_LABEL_TITLE` (the Markdown fold's rule); every other heading `BLOCK_LABEL_SECTION_HEADER` at its own level. The text is everything between the tags: a `div` or `p` a page builder nests inside a heading flattens into it as a word boundary rather than splitting off as a paragraph |
 | `p`, loose inline text between blocks | `BLOCK_LABEL_PARAGRAPH`, inline markup flattened, whitespace collapsed; a block that is entirely one `<a>` carries `hyperlink`, and every inline element leaves a run |
 | `b`/`strong`, `i`/`em`/`cite`/`dfn`/`var`, `u`, `ins`, `s`/`del`, `code`/`kbd`/`samp`, `mark`, `small`, `sub`, `sup`, `q` | span styles over the run they cover |
 | `a href` | a span with the URL and `<a title>`; a `#fragment` also carries `reference_kind = CROSS_REF` |
@@ -275,7 +275,9 @@ The vendored `document.proto` mirrors the DoclingDocument v2
 schema, so ingestion is a mapping, not an interpretation: `schema_name`,
 `version`, `name`, `origin`, `body`, `furniture`, `groups`, `texts`
 (variant chosen by the item's `label`), `tables` (cells with span
-offsets, their own `align` / `valign`, both `grid` and `table_cells`),
+offsets, their own `align` / `valign`, both `grid` and `table_cells`; on
+the typed wire a spanning cell is stated once, at the position it starts,
+not at every grid position docling repeats it),
 `pictures` (with `ImageRef`), `pages`, plus `prov` (page, bbox, charspan),
 `formatting`, `hyperlink`, the `spans` an item and a cell declare, the
 `admonition_kind` an item is marked with, and the whole `self_ref` /
@@ -361,8 +363,9 @@ Carried across from the typed wire, into slots the schema already had:
   while the table is streaming — the item has no arena position until it is
   appended — so each cell records where its runs sit inside the table and
   the append turns those into sites once the index is known. Both shapes are
-  patched, `grid` and `table_cells`, because they are the same run and a
-  consumer that reads either must see the same pointer. An anchor a cell run
+  patched, `table_cells` and every `grid` position the cell covers, because
+  they are the same run and a consumer that reads any of them must see the
+  same pointer. An anchor a cell run
   declares points at the table and states no range: this plane addresses
   items, and a range into a table's text would name nothing.
 - The heading ladder becomes `Document.outline`.

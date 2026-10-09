@@ -42,7 +42,9 @@
 //! group, nested lists as nested groups.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Range;
 
+use prost::Message;
 use prost_types::Value;
 use prost_types::value::Kind;
 
@@ -141,13 +143,11 @@ enum Adjacent {
 enum Site {
     /// Run `span` of the text item at arena index `item`.
     Text { item: usize, span: usize },
-    /// Run `span` of one cell of the table at arena index `table`. The cell
-    /// is named twice because the fold populates both shapes: `row` and
-    /// `cell` index it in `grid`, `flat` in `table_cells`.
+    /// Run `span` of the cell at index `flat` in `table_cells` of the table
+    /// at arena index `table`. The same cell sits at every `grid` position
+    /// its span covers, and the run is patched in all of them.
     Cell {
         table: usize,
-        row: usize,
-        cell: usize,
         flat: usize,
         span: usize,
     },
@@ -160,22 +160,27 @@ struct PendingTable {
     /// Everything about the item except its arena position, which is only
     /// known when it is appended at `table_end`.
     item: doc::TableItem,
-    grid: Vec<doc::TableRow>,
-    cells: Vec<doc::TableCell>,
-    num_cols: i32,
+    /// The rows as the source wrote them: one entry per cell the row
+    /// declares, with the column the wire placed it at. Short rows, spans
+    /// and overlaps are settled by [`dense_table_data`] once the table's
+    /// whole shape is known.
+    rows: Vec<Vec<doc::TableCell>>,
     /// The column geometry the source declared, empty when it declared
     /// none.
     columns: Vec<doc::TableColumnSchema>,
     /// Cross references the cells' runs carry, positioned inside this table
-    /// and waiting for the table's own arena index: (row, cell in that row,
-    /// index in the flat cell list, span, the key it points at).
-    cell_refs: Vec<(usize, usize, usize, usize, String)>,
+    /// and waiting for the table's own arena index: (index in the flat cell
+    /// list, span, the key it points at).
+    cell_refs: Vec<(usize, usize, String)>,
     /// Anchors the cells' runs declare, in first-declaration order.
     cell_anchors: Vec<String>,
     /// Arena indexes of the rich-cell groups the rows created, waiting for
     /// the table's own arena index to become their parent, the way the
     /// cells' references wait for it.
     cell_groups: Vec<usize>,
+    /// How many cells the rows so far hold: the flat index of the next
+    /// row's first cell.
+    cell_count: usize,
 }
 
 impl Default for DocumentFold {
@@ -279,9 +284,10 @@ impl DocumentFold {
         }
     }
 
-    /// The run one site names. A cell run is two runs on this plane, one in
-    /// `grid` and one in `table_cells`, and both are the same run: a
-    /// consumer that reads either must see the same pointer.
+    /// The run one site names. A cell run is several runs on this plane,
+    /// one in `table_cells` and one at every `grid` position the cell's
+    /// span covers, and all of them are the same run: a consumer that reads
+    /// any of them must see the same pointer.
     fn spans_at(&mut self, site: Site) -> Vec<&mut doc::InlineSpan> {
         match site {
             Site::Text { item, span } => self
@@ -293,13 +299,7 @@ impl DocumentFold {
                 .and_then(|base| base.spans.get_mut(span))
                 .into_iter()
                 .collect(),
-            Site::Cell {
-                table,
-                row,
-                cell,
-                flat,
-                span,
-            } => {
+            Site::Cell { table, flat, span } => {
                 let Some(data) = self
                     .document
                     .tables
@@ -308,18 +308,29 @@ impl DocumentFold {
                 else {
                     return Vec::new();
                 };
+                let Some(footprint) = data.table_cells.get(flat).map(cell_footprint) else {
+                    return Vec::new();
+                };
+                let (rows, cols) = footprint;
                 let (cells, grid) = (&mut data.table_cells, &mut data.grid);
-                [
-                    cells
-                        .get_mut(flat)
-                        .and_then(|cell| cell.spans.get_mut(span)),
-                    grid.get_mut(row)
-                        .and_then(|row| row.cells.get_mut(cell))
-                        .and_then(|cell| cell.spans.get_mut(span)),
-                ]
-                .into_iter()
-                .flatten()
-                .collect()
+                let mut runs: Vec<&mut doc::InlineSpan> = cells
+                    .get_mut(flat)
+                    .and_then(|cell| cell.spans.get_mut(span))
+                    .into_iter()
+                    .collect();
+                // Every grid position inside the footprint holds a copy of
+                // this cell; a filler never does, because a filler sits only
+                // where no cell's span reaches.
+                for row in grid.iter_mut().take(rows.end).skip(rows.start) {
+                    runs.extend(
+                        row.cells
+                            .iter_mut()
+                            .take(cols.end)
+                            .skip(cols.start)
+                            .filter_map(|cell| cell.spans.get_mut(span)),
+                    );
+                }
+                runs
             }
         }
     }
@@ -792,9 +803,7 @@ impl DocumentFold {
                 source: vec![self.collector_source()],
                 ..doc::TableItem::default()
             },
-            grid: Vec::new(),
-            cells: Vec::new(),
-            num_cols: 0,
+            rows: Vec::new(),
             columns: start.columns.iter().map(column_schema).collect(),
             cell_refs: Vec::new(),
             cell_anchors: start
@@ -804,12 +813,14 @@ impl DocumentFold {
                 .cloned()
                 .collect(),
             cell_groups: Vec::new(),
+            cell_count: 0,
         });
     }
 
-    /// Lay one wire row into the grid. The wire's `column_index` already
-    /// accounts for the spans before each cell, so it is trusted rather
-    /// than recomputed.
+    /// Keep one wire row as the source wrote it. The wire's `column_index`
+    /// already accounts for the spans before each cell, so it is the
+    /// column the cell asks for; [`dense_table_data`] settles the asks
+    /// against each other once the whole table is known.
     fn on_table_row(&mut self, row: &pb::TableRow) {
         if !self
             .table
@@ -829,11 +840,13 @@ impl DocumentFold {
         let Some(table) = self.table.as_mut() else {
             return;
         };
-        let row_index = int(row.row_index);
-        // Where this row lands in both shapes, so a cell run can name its
-        // own position before the table has an arena index.
-        let grid_row = table.grid.len();
-        let flat_base = table.cells.len();
+        // The row's position among the rows kept, which is the row offset
+        // the dense grid gives its cells; and where its cells land in the
+        // flat list, which densification keeps in source order, so a cell
+        // run can name its own position before the table has an arena
+        // index.
+        let row_index = table.rows.len();
+        let flat_base = table.cell_count;
         let mut cells = Vec::with_capacity(row.cells.len());
         for (position, cell) in row.cells.iter().enumerate() {
             for (span, run) in cell.spans.iter().enumerate() {
@@ -841,44 +854,20 @@ impl DocumentFold {
                     table.cell_anchors.push(anchor.clone());
                 }
                 if let Some(key) = run.reference.as_ref().filter(|key| !key.is_empty()) {
-                    table.cell_refs.push((
-                        grid_row,
-                        position,
-                        flat_base + position,
-                        span,
-                        key.clone(),
-                    ));
+                    table
+                        .cell_refs
+                        .push((flat_base + position, span, key.clone()));
                 }
             }
-            let start_col = int(cell.column_index);
-            let col_span = int(cell.column_span.max(1));
-            let row_span = int(cell.row_span.max(1));
-            let end_col = start_col.saturating_add(col_span);
-            let mut doc_cell = doc::TableCell {
-                row_span,
-                col_span,
-                start_row_offset_idx: row_index,
-                end_row_offset_idx: row_index.saturating_add(row_span),
-                start_col_offset_idx: start_col,
-                end_col_offset_idx: end_col,
-                text: cell.text.clone(),
-                // A cell is a header when its row is one or when the source
-                // marked the cell itself.
-                column_header: row.is_header || cell.is_header,
-                spans: doc_spans(&cell.spans),
-                align: horizontal(cell.align).map(|align| align as i32),
-                valign: vertical(cell.valign).map(|valign| valign as i32),
-                ..doc::TableCell::default()
-            };
+            let mut doc_cell = source_cell(cell, row_index, row.is_header || cell.is_header);
             if let Some(group) = rich[position] {
                 table.cell_groups.push(group);
                 doc_cell.r#ref = Some(reference(&format!("#/groups/{group}")));
             }
             cells.push(doc_cell);
-            table.num_cols = table.num_cols.max(end_col);
         }
-        table.cells.extend(cells.iter().cloned());
-        table.grid.push(doc::TableRow { cells });
+        table.cell_count += cells.len();
+        table.rows.push(cells);
     }
 
     fn on_table_end(&mut self, end: &pb::TableEnd) {
@@ -907,29 +896,19 @@ impl DocumentFold {
                 range: None,
             });
         }
-        for (row, cell, flat, span, key) in pending.cell_refs {
+        for (flat, span, key) in pending.cell_refs {
             self.pending_refs.push((
                 Site::Cell {
                     table: index,
-                    row,
-                    cell,
                     flat,
                     span,
                 },
                 key,
             ));
         }
-        item.data = Some(doc::TableData {
-            num_rows: int_from_usize(pending.grid.len()),
-            num_cols: pending.num_cols,
-            // Both shapes are populated: `grid` is the row structure the
-            // renderers walk, `table_cells` the flat list the analyzers
-            // read.
-            table_cells: pending.cells,
-            grid: pending.grid,
-            columns: pending.columns,
-            ..doc::TableData::default()
-        });
+        let mut data = dense_table_data(pending.rows);
+        data.columns = pending.columns;
+        item.data = Some(data);
         let self_ref = item.self_ref.clone();
         // The rich-cell groups were minted while the table streamed; now
         // that the table has its arena slot, both halves of the link land:
@@ -1059,13 +1038,13 @@ impl DocumentFold {
             item.children.push(reference(&caption_ref));
             item.captions.push(reference(&caption_ref));
         }
-        let mut grid = Vec::new();
-        let mut cells = Vec::new();
-        let mut num_cols = 0;
+        let mut rows: Vec<Vec<doc::TableCell>> = Vec::with_capacity(table.rows.len());
+        let mut flat_base = 0usize;
         for row in &table.rows {
-            let row_index = int(row.row_index);
-            let grid_row = grid.len();
-            let flat_base = cells.len();
+            // The same positions the streamed table hands its cells: the
+            // row's place among the rows kept, and the cell's place in the
+            // flat list, which densification keeps in source order.
+            let row_index = rows.len();
             let mut row_cells = Vec::with_capacity(row.cells.len());
             for (position, cell) in row.cells.iter().enumerate() {
                 // The same run bookkeeping the streamed table does, except
@@ -1081,8 +1060,6 @@ impl DocumentFold {
                         self.pending_refs.push((
                             Site::Cell {
                                 table: index,
-                                row: grid_row,
-                                cell: position,
                                 flat: flat_base + position,
                                 span,
                             },
@@ -1090,24 +1067,7 @@ impl DocumentFold {
                         ));
                     }
                 }
-                let start_col = int(cell.column_index);
-                let col_span = int(cell.column_span.max(1));
-                let row_span = int(cell.row_span.max(1));
-                let end_col = start_col.saturating_add(col_span);
-                let mut doc_cell = doc::TableCell {
-                    row_span,
-                    col_span,
-                    start_row_offset_idx: row_index,
-                    end_row_offset_idx: row_index.saturating_add(row_span),
-                    start_col_offset_idx: start_col,
-                    end_col_offset_idx: end_col,
-                    text: cell.text.clone(),
-                    column_header: row.is_header || cell.is_header,
-                    spans: doc_spans(&cell.spans),
-                    align: horizontal(cell.align).map(|align| align as i32),
-                    valign: vertical(cell.valign).map(|valign| valign as i32),
-                    ..doc::TableCell::default()
-                };
+                let mut doc_cell = source_cell(cell, row_index, row.is_header || cell.is_header);
                 if !cell.blocks.is_empty() {
                     let group = self.rich_cell_group(&cell.blocks);
                     let group_ref = format!("#/groups/{group}");
@@ -1115,19 +1075,12 @@ impl DocumentFold {
                     item.children.push(reference(&group_ref));
                     doc_cell.r#ref = Some(reference(&group_ref));
                 }
-                num_cols = num_cols.max(end_col);
                 row_cells.push(doc_cell);
             }
-            cells.extend(row_cells.iter().cloned());
-            grid.push(doc::TableRow { cells: row_cells });
+            flat_base += row_cells.len();
+            rows.push(row_cells);
         }
-        item.data = Some(doc::TableData {
-            num_rows: int_from_usize(grid.len()),
-            num_cols,
-            table_cells: cells,
-            grid,
-            ..doc::TableData::default()
-        });
+        item.data = Some(dense_table_data(rows));
         self.document.tables[index] = item;
         self.link_child(parent, &self_ref);
     }
@@ -1633,6 +1586,246 @@ fn bare(declared: Option<&str>) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .filter(|value| value.is_finite())
+}
+
+/// A wire cell as the Document cell the source asked for: its row is the
+/// row's place among the rows kept, its column the one the wire placed it
+/// at, its spans as declared. [`dense_table_data`] settles the ask against
+/// the other cells once the table's shape is known.
+fn source_cell(cell: &pb::TableCell, row: usize, header: bool) -> doc::TableCell {
+    let row_span = int(cell.row_span.max(1));
+    let col_span = int(cell.column_span.max(1));
+    let start_row = int_from_usize(row);
+    let start_col = int(cell.column_index);
+    doc::TableCell {
+        row_span,
+        col_span,
+        start_row_offset_idx: start_row,
+        end_row_offset_idx: start_row.saturating_add(row_span),
+        start_col_offset_idx: start_col,
+        end_col_offset_idx: start_col.saturating_add(col_span),
+        text: cell.text.clone(),
+        // A cell is a header when its row is one or when the source marked
+        // the cell itself.
+        column_header: header,
+        spans: doc_spans(&cell.spans),
+        align: horizontal(cell.align).map(|align| align as i32),
+        valign: vertical(cell.valign).map(|valign| valign as i32),
+        ..doc::TableCell::default()
+    }
+}
+
+/// The rows and the columns a cell's offsets cover, as half-open ranges.
+fn cell_footprint(cell: &doc::TableCell) -> (Range<usize>, Range<usize>) {
+    let at = |offset: i32| usize::try_from(offset).unwrap_or(0);
+    (
+        at(cell.start_row_offset_idx)..at(cell.end_row_offset_idx),
+        at(cell.start_col_offset_idx)..at(cell.end_col_offset_idx),
+    )
+}
+
+/// The grid is materialised while it holds at most this many positions
+/// per real cell, so a table of a few cells with enormous spans does not
+/// expand into millions of copies of them. `table_cells` is complete
+/// either way; a consumer that needs the grid of such a table derives it
+/// from the offsets, which is what the grid states.
+const GRID_POSITIONS_PER_CELL: usize = 8;
+
+/// Below this many positions the grid is always materialised: the ratio
+/// only matters once a table is large enough for the copies to cost.
+const MIN_GRID_POSITIONS: usize = 65_536;
+
+/// The grid is also materialised only while its encoded size stays within
+/// this many times the encoded size of the real cells. Positions alone do
+/// not bound it: one cell of a few megabytes spanning a thousand columns
+/// and sixty rows is well under the position floor and would be copied
+/// sixty thousand times.
+const GRID_BYTES_PER_CELL_BYTE: usize = 4;
+
+/// Below this many encoded bytes the grid is always materialised, so a
+/// small table with one wide header is not denied its grid by the ratio.
+const GRID_BYTES_FLOOR: usize = 1 << 20;
+
+/// Above this many encoded bytes the grid is never materialised, whatever
+/// the ratio says: the document cap is 256 MiB and the grid of a table
+/// that large is a second copy of it nobody can afford.
+const GRID_BYTES_CEILING: usize = 64 << 20;
+
+/// One placed cell as the rows under its own see it: the columns it holds,
+/// the first row it no longer covers, and its index in `table_cells`.
+#[derive(Debug, Clone, Copy)]
+struct Lane {
+    start: usize,
+    end: usize,
+    until: usize,
+    flat: usize,
+}
+
+/// Both shapes of a table's cells from the rows as the source wrote them.
+///
+/// `table_cells` is every source cell once, in source order, placed so
+/// that no two overlap: a cell lands at the first free column at or after
+/// the one it asked for, its column span is cut where the next cell on
+/// that row begins and its row span where the table ends. The earlier
+/// cell wins every contest, which is the HTML table model's own rule and
+/// what the per-format folds already apply to their own spans; this is
+/// the backstop for a source that states overlapping offsets outright, so
+/// that the two shapes agree with each other and with the offsets.
+///
+/// `grid` is docling's dense reading of those cells: `num_rows` rows of
+/// `num_cols` entries, each the cell whose span covers that position (the
+/// same cell repeated across every position it spans, rows included), or
+/// an empty single-position cell where no span reaches. A renderer walks
+/// it without knowing about spans; an analyzer reads `table_cells` and
+/// sees each cell once.
+///
+/// `num_rows` is the number of source rows and `num_cols` the furthest
+/// column any cell reaches, so a row span that ran past the last row is
+/// clamped rather than inventing rows the source never wrote.
+fn dense_table_data(rows: Vec<Vec<doc::TableCell>>) -> doc::TableData {
+    let num_rows = rows.len();
+    let mut cells: Vec<doc::TableCell> = Vec::with_capacity(rows.iter().map(Vec::len).sum());
+    // The cells still covering the row being placed, sorted by column and
+    // pairwise disjoint: every cell placed so far whose span reaches this
+    // far down, from this row or the ones above.
+    let mut open: Vec<Lane> = Vec::new();
+    for (row, source) in rows.into_iter().enumerate() {
+        open.retain(|lane| lane.until > row);
+        for mut cell in source {
+            let (asked_rows, asked_cols) = cell_footprint(&cell);
+            let height = asked_rows.len().clamp(1, num_rows - row);
+            let mut start = asked_cols.start;
+            let mut width = asked_cols.len().max(1);
+            // Slide right past every lane holding the asked column, then
+            // cut the width where the next lane begins.
+            let mut at = open.partition_point(|lane| lane.start <= start);
+            while at > 0 && open[at - 1].end > start {
+                start = open[at - 1].end;
+                at = open.partition_point(|lane| lane.start <= start);
+            }
+            if let Some(next) = open.get(at) {
+                width = width.min(next.start - start);
+            }
+            let end = start.saturating_add(width);
+            open.insert(
+                at,
+                Lane {
+                    start,
+                    end,
+                    until: row + height,
+                    flat: cells.len(),
+                },
+            );
+            cell.start_row_offset_idx = int_from_usize(row);
+            cell.end_row_offset_idx = int_from_usize(row + height);
+            cell.row_span = int_from_usize(height);
+            cell.start_col_offset_idx = int_from_usize(start);
+            cell.end_col_offset_idx = int_from_usize(end);
+            cell.col_span = int_from_usize(width);
+            cells.push(cell);
+        }
+    }
+    let num_cols = cells
+        .iter()
+        .map(|cell| cell_footprint(cell).1.end)
+        .max()
+        .unwrap_or(0);
+    let grid = if grid_affordable(&cells, num_rows, num_cols) {
+        dense_grid(&cells, num_rows, num_cols)
+    } else {
+        Vec::new()
+    };
+    doc::TableData {
+        num_rows: int_from_usize(num_rows),
+        num_cols: int_from_usize(num_cols),
+        table_cells: cells,
+        grid,
+        ..doc::TableData::default()
+    }
+}
+
+/// Whether the dense grid of these placed cells is worth sending: within
+/// the position budget and within the byte budget, both stated against
+/// the real cells so that a table costs at most a small multiple of
+/// itself, never a multiple of what its spans claim.
+fn grid_affordable(cells: &[doc::TableCell], num_rows: usize, num_cols: usize) -> bool {
+    let positions = num_rows.saturating_mul(num_cols);
+    if positions > MIN_GRID_POSITIONS.max(cells.len().saturating_mul(GRID_POSITIONS_PER_CELL)) {
+        return false;
+    }
+    let mut real_bytes = 0usize;
+    let mut covered = 0usize;
+    let mut grid_bytes = 0usize;
+    for cell in cells {
+        let (rows, cols) = cell_footprint(cell);
+        let area = rows.len().saturating_mul(cols.len());
+        let bytes = cell.encoded_len();
+        real_bytes = real_bytes.saturating_add(bytes);
+        covered = covered.saturating_add(area);
+        grid_bytes = grid_bytes.saturating_add(bytes.saturating_mul(area));
+    }
+    let fillers = positions.saturating_sub(covered);
+    grid_bytes = grid_bytes.saturating_add(fillers.saturating_mul(filler_cell(0, 0).encoded_len()));
+    grid_bytes <= GRID_BYTES_CEILING
+        && grid_bytes <= GRID_BYTES_FLOOR.max(real_bytes.saturating_mul(GRID_BYTES_PER_CELL_BYTE))
+}
+
+/// The dense grid over cells already placed without overlap, in row-major
+/// order: each cell at every position its footprint covers, fillers
+/// everywhere else.
+fn dense_grid(cells: &[doc::TableCell], num_rows: usize, num_cols: usize) -> Vec<doc::TableRow> {
+    let mut grid = Vec::with_capacity(num_rows);
+    let mut open: Vec<Lane> = Vec::new();
+    let mut next = 0;
+    for row in 0..num_rows {
+        open.retain(|lane| lane.until > row);
+        // The cells are in row-major order, so the ones starting on this
+        // row are the next run of them.
+        while let Some(cell) = cells.get(next) {
+            let (rows, cols) = cell_footprint(cell);
+            if rows.start != row {
+                break;
+            }
+            let lane = Lane {
+                start: cols.start,
+                end: cols.end,
+                until: rows.end,
+                flat: next,
+            };
+            let at = open.partition_point(|open| open.start < lane.start);
+            open.insert(at, lane);
+            next += 1;
+        }
+        let mut entries = Vec::with_capacity(num_cols);
+        for lane in &open {
+            while entries.len() < lane.start {
+                entries.push(filler_cell(row, entries.len()));
+            }
+            for _ in lane.start..lane.end {
+                entries.push(cells[lane.flat].clone());
+            }
+        }
+        while entries.len() < num_cols {
+            entries.push(filler_cell(row, entries.len()));
+        }
+        grid.push(doc::TableRow { cells: entries });
+    }
+    grid
+}
+
+/// The empty cell a dense grid shows at a position no span reaches:
+/// docling's own filler, one row by one column, with nothing in it.
+fn filler_cell(row: usize, col: usize) -> doc::TableCell {
+    let (row, col) = (int_from_usize(row), int_from_usize(col));
+    doc::TableCell {
+        row_span: 1,
+        col_span: 1,
+        start_row_offset_idx: row,
+        end_row_offset_idx: row.saturating_add(1),
+        start_col_offset_idx: col,
+        end_col_offset_idx: col.saturating_add(1),
+        ..doc::TableCell::default()
+    }
 }
 
 /// A wire `uint32` as the schema's `int32`, saturating rather than
@@ -3424,5 +3617,373 @@ mod tests {
         );
         assert_eq!(code_language_label("c++"), None, "not an enum name");
         assert_eq!(code_language_label(""), None);
+    }
+
+    // ------------------------------------------------------- dense grids
+
+    fn wire_cell(column_index: u32, text: &str, column_span: u32, row_span: u32) -> pb::TableCell {
+        pb::TableCell {
+            column_index,
+            text: text.to_owned(),
+            column_span,
+            row_span,
+            ..pb::TableCell::default()
+        }
+    }
+
+    /// One streamed table, `rows` being each row's cells in source order
+    /// with the columns the wire placed them at.
+    fn table_events(rows: Vec<Vec<pb::TableCell>>) -> Vec<pb::parse_markup_response::Event> {
+        use pb::parse_markup_response::Event;
+        let mut events = vec![Event::TableStart(pb::TableStart {
+            table_ref: "t0".to_owned(),
+            ..pb::TableStart::default()
+        })];
+        for (row_index, cells) in rows.into_iter().enumerate() {
+            events.push(Event::TableRow(pb::TableRow {
+                table_ref: "t0".to_owned(),
+                row_index: u32::try_from(row_index).unwrap(),
+                is_header: false,
+                cells,
+            }));
+        }
+        events.push(Event::TableEnd(pb::TableEnd {
+            table_ref: "t0".to_owned(),
+            row_count: 0,
+            column_count: 0,
+        }));
+        events
+    }
+
+    /// The dense-grid contract as the real-data battery checks it: every
+    /// cell inside `num_rows` x `num_cols` with spans equal to its offsets,
+    /// no two cells overlapping, and a materialised grid of exactly
+    /// `num_rows` rows of `num_cols` entries.
+    fn grid_problems(data: &doc::TableData) -> Vec<String> {
+        let (num_rows, num_cols) = (
+            usize::try_from(data.num_rows).unwrap(),
+            usize::try_from(data.num_cols).unwrap(),
+        );
+        let mut problems = Vec::new();
+        let mut occupied = BTreeSet::new();
+        for cell in &data.table_cells {
+            let (rows, cols) = cell_footprint(cell);
+            let at = format!("({},{})", rows.start, cols.start);
+            if rows.is_empty() || cols.is_empty() {
+                problems.push(format!("cell {at} has an empty span"));
+                continue;
+            }
+            if rows.end > num_rows || cols.end > num_cols {
+                problems.push(format!("cell {at} outside {num_rows}x{num_cols}"));
+                continue;
+            }
+            if int_from_usize(rows.len()) != cell.row_span
+                || int_from_usize(cols.len()) != cell.col_span
+            {
+                problems.push(format!("cell {at} spans differ from its offsets"));
+            }
+            for row in rows {
+                for col in cols.clone() {
+                    if !occupied.insert((row, col)) {
+                        problems.push(format!(
+                            "cell {at} overlaps an earlier cell at ({row},{col})"
+                        ));
+                    }
+                }
+            }
+        }
+        // A grid is checked only where it is materialised, as the check
+        // does; the offsets alone are the shape then.
+        if !data.grid.is_empty() && data.grid.len() != num_rows {
+            problems.push(format!(
+                "grid has {} rows, num_rows says {num_rows}",
+                data.grid.len()
+            ));
+        }
+        for (index, row) in data.grid.iter().enumerate() {
+            if row.cells.len() != num_cols {
+                problems.push(format!(
+                    "grid row {index} has {} cells, num_cols says {num_cols}",
+                    row.cells.len()
+                ));
+            }
+        }
+        problems
+    }
+
+    fn texts_of(data: &doc::TableData) -> Vec<Vec<&str>> {
+        data.grid
+            .iter()
+            .map(|row| row.cells.iter().map(|cell| cell.text.as_str()).collect())
+            .collect()
+    }
+
+    fn table_data(document: &doc::Document) -> &doc::TableData {
+        document.tables[0]
+            .data
+            .as_ref()
+            .expect("the table has data")
+    }
+
+    #[test]
+    fn a_short_row_is_padded_with_empty_cells_to_the_table_width() {
+        let document = fold(&table_events(vec![
+            vec![
+                wire_cell(0, "a", 1, 1),
+                wire_cell(1, "b", 1, 1),
+                wire_cell(2, "c", 1, 1),
+            ],
+            vec![wire_cell(0, "d", 1, 1)],
+        ]));
+        let data = table_data(&document);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+        assert_eq!(texts_of(data), [["a", "b", "c"], ["d", "", ""]]);
+        assert_eq!(data.table_cells.len(), 4, "fillers are not cells");
+        let filler = &data.grid[1].cells[2];
+        assert_eq!(
+            (
+                filler.start_row_offset_idx,
+                filler.end_row_offset_idx,
+                filler.start_col_offset_idx,
+                filler.end_col_offset_idx,
+            ),
+            (1, 2, 2, 3),
+            "a filler states the one position it holds"
+        );
+    }
+
+    #[test]
+    fn a_colspan_repeats_its_cell_across_the_columns_it_covers() {
+        let document = fold(&table_events(vec![vec![
+            wire_cell(0, "a", 2, 1),
+            wire_cell(2, "b", 1, 1),
+        ]]));
+        let data = table_data(&document);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+        assert_eq!(texts_of(data), [["a", "a", "b"]]);
+        assert_eq!(data.table_cells.len(), 2);
+        assert_eq!(
+            data.grid[0].cells[1].start_col_offset_idx, 0,
+            "the copy is the same cell"
+        );
+        assert_eq!(data.grid[0].cells[1].col_span, 2);
+    }
+
+    #[test]
+    fn a_rowspan_fills_the_rows_beneath_it() {
+        let document = fold(&table_events(vec![
+            vec![wire_cell(0, "a", 1, 2), wire_cell(1, "b", 1, 1)],
+            vec![wire_cell(1, "c", 1, 1)],
+        ]));
+        let data = table_data(&document);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+        assert_eq!(texts_of(data), [["a", "b"], ["a", "c"]]);
+        assert_eq!(data.table_cells.len(), 3);
+        assert_eq!(data.grid[1].cells[0].start_row_offset_idx, 0);
+        assert_eq!(data.grid[1].cells[0].end_row_offset_idx, 2);
+    }
+
+    #[test]
+    fn a_rowspan_past_the_last_row_is_clamped_in_both_shapes() {
+        let document = fold(&table_events(vec![
+            vec![wire_cell(0, "a", 1, 5), wire_cell(1, "b", 1, 1)],
+            vec![wire_cell(1, "c", 1, 1)],
+        ]));
+        let data = table_data(&document);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+        assert_eq!(data.num_rows, 2, "no rows the source never wrote");
+        for (where_, cell) in [
+            ("table_cells", &data.table_cells[0]),
+            ("grid row 0", &data.grid[0].cells[0]),
+            ("grid row 1", &data.grid[1].cells[0]),
+        ] {
+            assert_eq!(cell.row_span, 2, "{where_}");
+            assert_eq!(cell.end_row_offset_idx, 2, "{where_}");
+        }
+    }
+
+    #[test]
+    fn a_rich_cell_in_a_spanned_position_links_its_group_once() {
+        let rich = pb::TableCell {
+            blocks: vec![pb::CellBlock {
+                kind: Some(pb::cell_block::Kind::Text(pb::TextBlock {
+                    label: pb::BlockLabel::Paragraph as i32,
+                    text: "inside".to_owned(),
+                    ..pb::TextBlock::default()
+                })),
+            }],
+            ..wire_cell(0, "inside", 2, 2)
+        };
+        let document = fold(&table_events(vec![
+            vec![rich, wire_cell(2, "b", 1, 1)],
+            vec![wire_cell(2, "c", 1, 1)],
+        ]));
+        let data = table_data(&document);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+        assert_eq!(
+            texts_of(data),
+            [["inside", "inside", "b"], ["inside", "inside", "c"]]
+        );
+        assert_eq!(document.groups.len(), 1, "one group for the one rich cell");
+        assert_eq!(
+            document.tables[0]
+                .children
+                .iter()
+                .map(|child| child.r#ref.as_str())
+                .collect::<Vec<_>>(),
+            ["#/groups/0"],
+            "the group is linked once, however many positions the cell covers"
+        );
+        assert_eq!(
+            document.groups[0].parent.as_ref().unwrap().r#ref,
+            "#/tables/0"
+        );
+        for row in &data.grid {
+            for cell in &row.cells[..2] {
+                assert_eq!(
+                    cell.r#ref.as_ref().map(|r| r.r#ref.as_str()),
+                    Some("#/groups/0"),
+                    "every copy of the cell points at the same group"
+                );
+            }
+            assert!(row.cells[2].r#ref.is_none());
+        }
+        assert_eq!(
+            data.table_cells[0].r#ref.as_ref().unwrap().r#ref,
+            "#/groups/0"
+        );
+    }
+
+    #[test]
+    fn a_reference_in_a_densified_row_resolves_in_every_copy_of_its_cell() {
+        let anchor = pb::parse_markup_response::Event::TextBlock(pb::TextBlock {
+            label: pb::BlockLabel::SectionHeader as i32,
+            text: "Target".to_owned(),
+            anchor_id: Some("sec".to_owned()),
+            ..pb::TextBlock::default()
+        });
+        let referring = pb::TableCell {
+            spans: vec![pb::InlineSpan {
+                range: Some(pb::IntRange { start: 0, end: 3 }),
+                reference: Some("sec".to_owned()),
+                ..pb::InlineSpan::default()
+            }],
+            ..wire_cell(0, "see", 2, 1)
+        };
+        let mut events = vec![anchor];
+        events.extend(table_events(vec![
+            vec![
+                wire_cell(0, "a", 1, 1),
+                wire_cell(1, "b", 1, 1),
+                wire_cell(2, "c", 1, 1),
+            ],
+            vec![referring],
+        ]));
+        let document = fold(&events);
+        let data = table_data(&document);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+        assert_eq!(texts_of(data), [["a", "b", "c"], ["see", "see", ""]]);
+        for (where_, cell) in [
+            ("table_cells", &data.table_cells[3]),
+            ("grid copy 0", &data.grid[1].cells[0]),
+            ("grid copy 1", &data.grid[1].cells[1]),
+        ] {
+            assert_eq!(cell.text, "see", "{where_}: the cell the run belongs to");
+            assert_eq!(
+                cell.spans[0]
+                    .target
+                    .as_ref()
+                    .map(|target| target.r#ref.as_str()),
+                Some("#/texts/0"),
+                "{where_}: the run points at the heading that declares the anchor"
+            );
+        }
+        assert!(
+            data.grid[0].cells.iter().all(|cell| cell.spans.is_empty()),
+            "no other cell gained a run"
+        );
+    }
+
+    #[test]
+    fn overlapping_spans_are_settled_in_favour_of_the_earlier_cell() {
+        // `b` asks for column 1, which `a` already holds; `c` asks for
+        // column 0 on the row `a` still covers. Both move right.
+        let document = fold(&table_events(vec![
+            vec![wire_cell(0, "a", 2, 2), wire_cell(1, "b", 1, 1)],
+            vec![wire_cell(0, "c", 1, 1)],
+        ]));
+        let data = table_data(&document);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+        assert_eq!(texts_of(data), [["a", "a", "b"], ["a", "a", "c"]]);
+        assert_eq!(data.table_cells.len(), 3, "no cell is dropped");
+        assert_eq!(data.table_cells[1].start_col_offset_idx, 2);
+        assert_eq!(data.table_cells[2].start_col_offset_idx, 2);
+    }
+
+    #[test]
+    fn an_overlapping_span_is_cut_where_the_next_cell_begins() {
+        // `z` asks for five columns from 0; `x` holds column 0 and `y`
+        // column 2 on its row, so it gets column 1 alone.
+        let document = fold(&table_events(vec![
+            vec![wire_cell(0, "x", 1, 2), wire_cell(2, "y", 1, 2)],
+            vec![wire_cell(0, "z", 5, 1)],
+        ]));
+        let data = table_data(&document);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+        assert_eq!(texts_of(data), [["x", "", "y"], ["x", "z", "y"]]);
+        let z = &data.table_cells[2];
+        assert_eq!(
+            (z.start_col_offset_idx, z.end_col_offset_idx, z.col_span),
+            (1, 2, 1)
+        );
+    }
+
+    #[test]
+    fn a_big_cell_spanning_many_positions_keeps_its_cells_and_no_grid() {
+        // Under the position floor (65 x 1001), so only the byte budget
+        // stands between one 2 MiB cell and sixty-five thousand copies of
+        // it.
+        let text = "x".repeat(2 << 20);
+        let mut rows = vec![vec![
+            wire_cell(0, &text, 1000, 65),
+            wire_cell(1000, "y", 1, 1),
+        ]];
+        rows.extend((1..65).map(|_| vec![wire_cell(1000, "y", 1, 1)]));
+        let document = fold(&table_events(rows));
+        let data = table_data(&document);
+        assert_eq!((data.num_rows, data.num_cols), (65, 1001));
+        assert_eq!(data.table_cells.len(), 66, "every real cell is kept");
+        assert_eq!(data.table_cells[0].text.len(), 2 << 20);
+        assert!(
+            data.grid.is_empty(),
+            "the grid would be a hundred gigabytes of one cell"
+        );
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_wide_header_over_a_small_table_still_gets_its_grid() {
+        // Five copies of the header exceed four times the real bytes, but
+        // the whole grid is far under the byte floor.
+        let document = fold(&table_events(vec![
+            vec![wire_cell(0, &"h".repeat(10_000), 5, 1)],
+            vec![wire_cell(0, "a", 1, 1)],
+        ]));
+        let data = table_data(&document);
+        assert_eq!(data.grid.len(), 2);
+        assert_eq!(grid_problems(data), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_sparse_table_too_wide_to_materialise_keeps_its_cells_and_no_grid() {
+        let document = fold(&table_events(vec![vec![wire_cell(0, "wide", 100_000, 1)]]));
+        let data = table_data(&document);
+        assert_eq!(data.num_cols, 100_000);
+        assert_eq!(data.table_cells.len(), 1);
+        assert!(
+            data.grid.is_empty(),
+            "a hundred thousand copies of one cell is not a grid worth sending"
+        );
+        assert_eq!(grid_problems(data), Vec::<String>::new());
     }
 }

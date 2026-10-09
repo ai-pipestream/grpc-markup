@@ -207,6 +207,44 @@ fn spans_still_place_later_cells_after_clamping() {
 }
 
 #[test]
+fn a_big_cell_spanning_many_positions_is_not_copied_into_the_grid() {
+    // 65 x 1000 positions, under the grid's position floor, and a cell of
+    // a few megabytes at the top left: the dense grid would be a copy of
+    // that cell per position. The flat cells are complete and the grid is
+    // left out.
+    let mut document = format!(
+        "<table><tr><td colspan=1000 rowspan=65>{}</td><td>y</td></tr>",
+        "x".repeat(3 << 20)
+    );
+    for _ in 0..64 {
+        document.push_str("<tr><td>y</td></tr>");
+    }
+    document.push_str("</table>");
+    let outcome = hostile(Format::Html, document);
+    outcome.within(BOUND);
+    let fold = outcome
+        .events
+        .iter()
+        .find_map(|event| match event.event.as_ref() {
+            Some(pb::parse_markup_response::Event::Document(fold)) => Some(fold),
+            _ => None,
+        })
+        .expect("the fold was requested");
+    let data = fold.tables[0].data.as_ref().expect("the table has data");
+    assert_eq!((data.num_rows, data.num_cols), (65, 1001));
+    assert_eq!(data.table_cells.len(), 66);
+    assert!(
+        data.grid.is_empty(),
+        "no grid of sixty-five thousand copies"
+    );
+    let bytes: usize = data.table_cells.iter().map(|cell| cell.text.len()).sum();
+    assert!(
+        bytes < (3 << 20) + 1_000,
+        "the table is one copy of its cells"
+    );
+}
+
+#[test]
 fn many_spanning_cells_stay_linear() {
     // A few thousand cells each claiming the whole table below them used
     // to be area work; now each later row sweeps a bounded span list.
