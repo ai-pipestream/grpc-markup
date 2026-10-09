@@ -394,6 +394,13 @@ impl DocumentFold {
             let meta = body.meta.get_or_insert_default();
             // Deterministic order for a map the wire delivers unordered.
             for (key, value) in info.metadata.iter().collect::<BTreeMap<_, _>>() {
+                // A namespaced meta tag (og:title, twitter:card, dc:subject)
+                // is already in `meta_tags` under its own name, and a colon
+                // is not a custom field key the document allows (only the
+                // pinned `cell:?` escape is), so it stays in the typed list.
+                if key.starts_with("meta.") && key.contains(':') && scalar_of(value).is_some() {
+                    continue;
+                }
                 meta.custom_fields
                     .insert(format!("{}.{key}", self.prefix), meta_field(value));
             }

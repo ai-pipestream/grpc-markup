@@ -107,6 +107,27 @@ async fn the_first_h1_is_the_title_and_other_headings_carry_levels() {
 }
 
 #[tokio::test]
+async fn a_block_inside_a_heading_stays_part_of_the_heading() {
+    // Gitea's diff file header: a counter div inside an h4.
+    let client = client().await;
+    let events = parse_ok(
+        &client,
+        "<h1>T</h1><h4><a>x</a><div class=\"diff-counter\"><span>+ 1</span> <span>- 1</span></div>\
+         <span>icon_down.svg</span> <a>View File</a></h4><p>after</p>",
+        options(pb::MarkupFormat::Html),
+    )
+    .await;
+    let headers = blocks_labelled(&events, pb::BlockLabel::SectionHeader);
+    assert_eq!(texts(&headers), ["x + 1 - 1 icon_down.svg View File"]);
+    let paragraphs = blocks_labelled(&events, pb::BlockLabel::Paragraph);
+    assert_eq!(
+        texts(&paragraphs),
+        ["after"],
+        "no part of the heading became a paragraph"
+    );
+}
+
+#[tokio::test]
 async fn paragraphs_flatten_inline_markup_and_script_style_never_become_text() {
     let client = client().await;
     let events = parse_ok(&client, HTML, options(pb::MarkupFormat::Html)).await;
