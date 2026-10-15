@@ -1,0 +1,12 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "packageRules": [
+    {
+      "description": "html5ever must match the version scraper 0.27 resolves (0.39) so scraper::HtmlTreeSink implements html5ever::TreeSink.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["html5ever"],
+      "allowedVersions": "<=0.39"
+    }
+  ]
+}
