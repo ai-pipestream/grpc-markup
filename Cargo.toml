@@ -26,7 +26,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # Spec-compliant HTML parsing for the HTML fold: html5ever's tree builder
 # with a plain DOM on top. Fragments parse natively, and the tree builder's
 # own error list is what backs WARNING_CODE_MALFORMED_STRUCTURE.
-scraper = { version = "0.27", default-features = false, features = ["errors"] }
+scraper = { version = "0.29", default-features = false, features = ["errors"] }
 # The tree builder scraper drives, used directly only to feed it the
 # document in slices so a parse past its deadline stops between them. The
 # version is the one scraper itself resolves.
