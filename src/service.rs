@@ -444,11 +444,11 @@ const BATCH_WAIT: Duration = Duration::from_millis(2);
 /// The response stream: the parse's events, handed to the transport in
 /// batches.
 ///
-/// Events go out once a batch holds at least [`BATCH_BYTES`], after
-/// [`BATCH_WAIT`], or at once when the batch holds the trailer or an error or
+/// Events go out once a batch holds at least `BATCH_BYTES`, after
+/// `BATCH_WAIT`, or at once when the batch holds the trailer or an error or
 /// the channel has closed, so the transport writes a few full DATA frames
 /// rather than one per block. A batch stops taking events once it holds
-/// [`BATCH_BYTES`], so it adds at most one event to what the channel already
+/// `BATCH_BYTES`, so it adds at most one event to what the channel already
 /// buffers, and a client that stops reading still stops the parse. Dropping
 /// it drops the receiver, which is how the parse learns the client has gone.
 pub struct Batched {
