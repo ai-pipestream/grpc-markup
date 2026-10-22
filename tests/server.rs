@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::sync::atomic::Ordering;
+
 use common::{
     BOXNOTE, CALL_TIMEOUT, DOCLING, LiveUpload, client, client_with, info, options, parse,
     parse_ok, sniff_options, text_blocks,
@@ -525,4 +527,63 @@ async fn drain(
         events.push(event);
     }
     Ok(events)
+}
+
+// ------------------------------------------------------------ small events
+
+/// Many small blocks reach a client that reads nothing until the server has
+/// written the whole stream.
+///
+/// Each paragraph here is one small `text_block` event. h2 charges every DATA
+/// frame under 256 bytes against a per-connection budget that refills only
+/// as the application reads, and closes the connection with GOAWAY
+/// `too_many_data_frames` when it runs out, so a server that wrote one frame
+/// per event would cut this client off a hundred or so blocks in. The server
+/// parses only once the upload is complete, so the client is made to fall
+/// behind by not reading until the parse has finished. Every block has to
+/// arrive, in order, followed by the trailer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_small_blocks_reach_a_client_that_reads_late() {
+    const PARAGRAPHS: usize = 2000;
+    let service = MarkupGrpc::new();
+    let metrics = service.metrics();
+    let mut client = client_with(service).await;
+    let document: String = (0..PARAGRAPHS).map(|n| format!("p{n}\n\n")).collect();
+    let requests = common::frames(&document, options(pb::MarkupFormat::Markdown), 8 * 1024);
+    let mut stream = client
+        .parse_markup(tokio_stream::iter(requests))
+        .await
+        .expect("open the call")
+        .into_inner();
+    tokio::time::timeout(CALL_TIMEOUT, async {
+        while metrics.parses_ok.load(Ordering::Relaxed)
+            + metrics.parses_failed.load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the parse ends");
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.message().await.expect("stream is healthy") {
+        events.push(event);
+    }
+    assert_eq!(
+        events.len(),
+        PARAGRAPHS + 2,
+        "info, one block per paragraph, status"
+    );
+    info(&events);
+    let blocks = text_blocks(&events);
+    assert_eq!(blocks.len(), PARAGRAPHS);
+    for (n, block) in blocks.iter().enumerate() {
+        assert_eq!(block.text, format!("p{n}"));
+        assert_eq!(block.label, pb::BlockLabel::Paragraph as i32);
+    }
+    assert!(matches!(
+        events.last().and_then(|e| e.event.as_ref()),
+        Some(pb::parse_markup_response::Event::Status(_))
+    ));
 }
