@@ -329,9 +329,13 @@ impl CellSpec {
 /// stands alone as the last whitespace-separated token.
 fn split_cell_spec(text: &str) -> (&str, Option<CellSpec>) {
     let trimmed = text.trim_end();
+    // The token starts after the last whitespace character, which may be
+    // more than one byte long (a no-break space is two).
     let token_start = trimmed
-        .rfind(char::is_whitespace)
-        .map_or(0, |space| space + 1);
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(at, c)| at + c.len_utf8());
     let token = &trimmed[token_start..];
     match (!token.is_empty())
         .then(|| parse_cell_spec(token))
@@ -832,6 +836,20 @@ mod tests {
             let (text, spec) = split_cell_spec(prose);
             assert_eq!(text, prose, "{prose}");
             assert!(spec.is_none(), "{prose}");
+        }
+    }
+
+    #[test]
+    fn a_multi_byte_whitespace_before_the_last_word_is_a_boundary_not_a_crash() {
+        for text in ["Nom\u{a0}complet", "fin\u{2003}", "\u{3000}mot"] {
+            let (prose, spec) = split_cell_spec(text);
+            assert!(spec.is_none(), "{text:?}: {spec:?}");
+            assert_eq!(prose, text.trim_end());
+        }
+        for text in ["Nom\u{a0}complet\u{a0}2+", "Nom\u{a0}complet\u{3000}2+"] {
+            let (prose, spec) = split_cell_spec(text);
+            assert_eq!(prose, "Nom\u{a0}complet");
+            assert_eq!(spec.expect("a span factor after the space").column_span, 2);
         }
     }
 
