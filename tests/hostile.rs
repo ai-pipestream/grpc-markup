@@ -392,6 +392,37 @@ fn boxnote_cell_spans_are_clamped_to_the_table_model() {
         rows[0].cells[0].row_span, 1,
         "rowspan clamps to the rows that exist"
     );
+
+    // The area cases: the whole plane, and spans past u32 (the column
+    // arithmetic used to overflow on these).
+    for (colspan, rowspan) in [(65_534, 65_534), (u64::from(u32::MAX), u64::from(u32::MAX))] {
+        let outcome = hostile(Format::Boxnote, boxnote_table(colspan, rowspan));
+        outcome.within(Duration::from_secs(2));
+        let rows = outcome.rows();
+        assert_eq!(
+            (rows[0].cells[0].column_span, rows[0].cells[0].row_span),
+            (1000, 1)
+        );
+    }
+}
+
+#[test]
+fn boxnote_spans_still_place_later_cells_after_clamping() {
+    let document = r#"{"doc":{"type":"doc","content":[{"type":"table","content":[
+        {"type":"table_row","content":[
+            {"type":"table_cell","attrs":{"colspan":4000,"rowspan":4000},"content":[{"type":"paragraph","content":[{"type":"text","text":"a"}]}]},
+            {"type":"table_cell","content":[{"type":"paragraph","content":[{"type":"text","text":"b"}]}]}]},
+        {"type":"table_row","content":[
+            {"type":"table_cell","content":[{"type":"paragraph","content":[{"type":"text","text":"c"}]}]}]}]}]}}"#;
+    let outcome = hostile(Format::Boxnote, document.to_owned());
+    outcome.within(BOUND);
+    let rows = outcome.rows();
+    assert_eq!(rows[0].cells[0].row_span, 2);
+    assert_eq!(rows[0].cells[1].column_index, 1000);
+    assert_eq!(
+        rows[1].cells[0].column_index, 1000,
+        "the spanning cell still covers the next row"
+    );
 }
 
 // ---------------------------------------------------------------- Markdown
