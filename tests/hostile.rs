@@ -362,6 +362,38 @@ fn a_hundred_thousand_chained_groups_project_without_recursing() {
     assert!(outcome.text().contains("bottom"), "{}", outcome.text());
 }
 
+// ----------------------------------------------------------------- BoxNote
+
+/// A one-row BoxNote table whose only cell claims `colspan` and `rowspan`.
+fn boxnote_table(colspan: u64, rowspan: u64) -> String {
+    format!(
+        r#"{{"doc":{{"type":"doc","content":[{{"type":"table","content":[{{"type":"table_row","content":[{{"type":"table_cell","attrs":{{"colspan":{colspan},"rowspan":{rowspan}}},"content":[{{"type":"paragraph","content":[{{"type":"text","text":"x"}}]}}]}}]}}]}}]}}}}"#
+    )
+}
+
+#[test]
+fn boxnote_cell_spans_are_clamped_to_the_table_model() {
+    // The fold swept every (row, column) pair a cell's spans claimed into
+    // an occupancy set, so a cell claiming the whole plane was area work
+    // and area memory from a few hundred bytes. The spans are clamped the
+    // way the HTML fold clamps them: `colspan` to the table model's 1000,
+    // `rowspan` to the rows the table has.
+    let outcome = hostile(Format::Boxnote, boxnote_table(65_534, 1));
+    outcome.within(BOUND);
+    let rows = outcome.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].cells[0].column_span, 1000, "colspan clamps to 1000");
+
+    let outcome = hostile(Format::Boxnote, boxnote_table(1, 65_534));
+    outcome.within(BOUND);
+    let rows = outcome.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cells[0].row_span, 1,
+        "rowspan clamps to the rows that exist"
+    );
+}
+
 // ---------------------------------------------------------------- Markdown
 
 #[test]
