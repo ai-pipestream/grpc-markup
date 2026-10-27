@@ -239,9 +239,12 @@ fn flatten_payload(cue_id: Option<String>, lines: &[&str], start_ms: u64, end_ms
             } else if tag_name(tag) == "rt" {
                 reading = Some(String::new());
                 open.push("rt".to_owned());
-            } else {
+            } else if is_cue_span(&tag_name(tag)) {
                 open_span(&mut inline, &mut open, tag, &mut speaker);
             }
+            // Any other start tag (`<font>`, an upper-case `<B>`) is not a
+            // cue span: it is stripped and its text kept, as docling-core
+            // does (#896). Its end tag names nothing open and is ignored.
         }
         push_text(&mut inline, &mut reading, rest);
     }
@@ -277,6 +280,12 @@ fn push_text(inline: &mut Inline, reading: &mut Option<String>, text: &str) {
         Some(collected) => collected.push_str(&decoded(text)),
         None => push_decoded(inline, text),
     }
+}
+
+/// The WebVTT cue span tag names (W3C WebVTT 4.2.2, case-sensitive): the
+/// only start tags that open a run. `rt` is handled by the caller.
+fn is_cue_span(name: &str) -> bool {
+    matches!(name, "c" | "i" | "b" | "u" | "ruby" | "v" | "lang")
 }
 
 /// The tag name of one start tag: everything before its classes or its

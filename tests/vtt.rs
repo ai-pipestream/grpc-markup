@@ -308,3 +308,42 @@ async fn a_leading_bom_still_satisfies_the_signature() {
     );
     assert_eq!(cues[0].text, "hi");
 }
+
+/// docling-core 2.104.0 (#896) strips a tag that is not a WebVTT cue span
+/// (`<font>`, an upper-case `<B>`, any other name) and keeps its text and
+/// the cue: no run, no style, no class name from it. The known spans next
+/// to it still map.
+#[tokio::test]
+async fn unknown_tags_strip_and_keep_their_text_and_the_cue() {
+    let client = client().await;
+    let document = "WEBVTT\n\n00:00.000 --> 00:01.000\n<font color=\"red\">red</font> <B>loud</B> <blink.fast>odd</blink> <c.yellow>ok</c> <i>it</i>\n";
+    let events = parse_ok(&client, document, options(pb::MarkupFormat::Vtt)).await;
+    let cues = cues(&events);
+    assert_eq!(cues.len(), 1, "an unknown tag does not drop the cue");
+    let cue = cues[0];
+    assert_eq!(
+        cue.text, "red loud odd ok it",
+        "unknown tags strip, their text stays"
+    );
+    assert_eq!(
+        cue.spans.len(),
+        2,
+        "only the cue spans make runs: {:?}",
+        cue.spans
+    );
+    assert_eq!(spanned(&cue.text, &cue.spans[0]), "ok");
+    assert_eq!(cue.spans[0].style_name.as_deref(), Some("yellow"));
+    assert_eq!(spanned(&cue.text, &cue.spans[1]), "it");
+    assert_eq!(styles(&cue.spans[1]), [pb::SpanStyle::Italic]);
+    for span in &cue.spans {
+        assert_ne!(
+            span.style_name.as_deref(),
+            Some("fast"),
+            "an unknown tag's class is dropped"
+        );
+    }
+    assert!(
+        warning(&events, pb::WarningCode::MalformedStructure).is_none(),
+        "an unknown tag is not malformed"
+    );
+}
