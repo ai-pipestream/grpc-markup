@@ -60,6 +60,18 @@ impl Outcome {
         out
     }
 
+    /// Every cue's text, joined.
+    fn cue_text(&self) -> String {
+        let mut out = String::new();
+        for event in &self.events {
+            if let Some(pb::parse_markup_response::Event::Cue(cue)) = event.event.as_ref() {
+                out.push_str(&cue.text);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
     /// Every table row, in order.
     fn rows(&self) -> Vec<&pb::TableRow> {
         self.events
@@ -532,8 +544,8 @@ fn end_tags_that_match_nothing_open_stay_linear() {
     // tens of seconds; a payload of a few megabytes was hours.
     let outcome = hostile(Format::Vtt, vtt_cue_with_tags("<b>", "</i>", 60_000));
     outcome.within(Duration::from_secs(5));
-    assert!(outcome.text().contains('x'));
+    assert_eq!(outcome.cue_text().trim(), "x");
     let outcome = hostile(Format::Vtt, vtt_cue_with_tags("<b>", "</b>", 60_000));
     outcome.within(Duration::from_secs(5));
-    assert!(outcome.text().contains('x'));
+    assert_eq!(outcome.cue_text().trim(), "x");
 }
