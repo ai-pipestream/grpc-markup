@@ -513,3 +513,27 @@ fn a_client_that_hangs_up_stops_the_latex_reader_before_its_first_event() {
     );
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
+
+// --------------------------------------------------------------------- VTT
+
+/// One cue whose payload opens `count` tags and then closes `count`.
+fn vtt_cue_with_tags(open: &str, close: &str, count: usize) -> String {
+    format!(
+        "WEBVTT\n\n00:00.000 --> 00:01.000\n{}x{}\n",
+        open.repeat(count),
+        close.repeat(count)
+    )
+}
+
+#[test]
+fn end_tags_that_match_nothing_open_stay_linear() {
+    // Every end tag asked whether a tag of its name was open by scanning
+    // the open stack from the bottom, so 60k `</i>` after 60k `<b>` took
+    // tens of seconds; a payload of a few megabytes was hours.
+    let outcome = hostile(Format::Vtt, vtt_cue_with_tags("<b>", "</i>", 60_000));
+    outcome.within(Duration::from_secs(5));
+    assert!(outcome.text().contains('x'));
+    let outcome = hostile(Format::Vtt, vtt_cue_with_tags("<b>", "</b>", 60_000));
+    outcome.within(Duration::from_secs(5));
+    assert!(outcome.text().contains('x'));
+}
