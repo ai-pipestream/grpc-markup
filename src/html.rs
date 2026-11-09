@@ -71,6 +71,7 @@ use crate::html_pictures::{embedded_picture, srcset_first_candidate, svg_picture
 use crate::parse::{Block, Cancel, Emitter, Image, ParseError, Table, scalar};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
+use crate::table_spans::{Asked, SpanTracker};
 
 /// Elements whose entire subtree is dropped: executable, presentational or
 /// interactive machinery whose text is not document content. `svg`,
@@ -1097,17 +1098,6 @@ fn cell_children(element: &ElementRef<'_>, inline: &mut Inline) {
     }
 }
 
-/// The largest `colspan` the HTML table model honours.
-const MAX_COLSPAN: u32 = 1000;
-
-/// The largest `rowspan` the HTML table model honours.
-const MAX_ROWSPAN: u32 = 65534;
-
-/// How many cells may span down across later rows at once before further
-/// `rowspan`s are dropped. Placing a cell sweeps the spans still open, so
-/// this bounds the cost of every row.
-const MAX_CARRIED_SPANS: usize = 1024;
-
 /// The most column specs one table's `<col>` declarations may produce.
 const MAX_COLUMN_SPECS: usize = 16_384;
 
@@ -1134,24 +1124,18 @@ fn table_rows(element: &ElementRef<'_>, source: &pb::CollectorSource) -> Vec<pb:
         }
     }
 
-    let row_count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
-    // Cells from earlier rows that still cover later ones, as (first
-    // column, end column, first row no longer covered), sorted by first
-    // column. Tracking spans rather than every (row, column) pair they
-    // cover keeps the cost proportional to the cells, not to the area a
-    // hostile `rowspan` times `colspan` claims.
-    let mut carried: Vec<(u32, u32, u32)> = Vec::new();
+    // The spans are placed as lanes, so the cost is proportional to the
+    // cells and never to the area a hostile `rowspan` times `colspan`
+    // claims; the table model's own limits are applied there too.
+    let mut tracker = SpanTracker::new(rows.len());
     let mut out = Vec::new();
     for (row_index, row) in rows.iter().enumerate() {
         let row_index = u32::try_from(row_index).unwrap_or(u32::MAX);
-        carried.retain(|&(_, _, until)| until > row_index);
-        let mut sweep = 0usize;
-        let mut started_here = Vec::new();
+        tracker.begin_row(row_index);
         let in_head = row
             .parent()
             .and_then(ElementRef::wrap)
             .is_some_and(|parent| parent.value().name() == "thead");
-        let mut column = 0u32;
         let mut cells = Vec::new();
         let mut all_headers = true;
         for cell in row.child_elements() {
@@ -1159,41 +1143,15 @@ fn table_rows(element: &ElementRef<'_>, source: &pb::CollectorSource) -> Vec<pb:
             if cell_name != "td" && cell_name != "th" {
                 continue;
             }
-            // Skip the columns a cell from an earlier row still covers.
-            while let Some(&(start, end, _)) = carried.get(sweep) {
-                if end <= column {
-                    sweep += 1;
-                } else if start <= column {
-                    column = end;
-                    sweep += 1;
-                } else {
-                    break;
-                }
-            }
             let span = |attr: &str| {
                 cell.attr(attr)
                     .and_then(|value| value.trim().parse::<u32>().ok())
-                    .filter(|span| *span >= 1)
                     .unwrap_or(1)
             };
-            // The HTML table model's own limits: `colspan` at most 1000,
-            // `rowspan` at most 65534 and never past the table's last row.
-            let column_span = span("colspan").min(MAX_COLSPAN);
-            let mut row_span = span("rowspan").min(MAX_ROWSPAN).min(row_count - row_index);
-            if row_span > 1 {
-                if carried.len() + started_here.len() < MAX_CARRIED_SPANS {
-                    started_here.push((
-                        column,
-                        column.saturating_add(column_span),
-                        row_index + row_span,
-                    ));
-                } else {
-                    // Past this many cells spanning down at once the table
-                    // is not a table anyone wrote; the span is dropped so
-                    // every later row stays cheap to place.
-                    row_span = 1;
-                }
-            }
+            let placed = tracker.place(Asked {
+                column_span: span("colspan"),
+                row_span: span("rowspan"),
+            });
             let is_header = cell_name == "th" || in_head;
             all_headers &= is_header;
             // The flat walk is the cell's text, unchanged; a rich cell's
@@ -1205,20 +1163,18 @@ fn table_rows(element: &ElementRef<'_>, source: &pb::CollectorSource) -> Vec<pb:
                 Vec::new()
             };
             cells.push(pb::TableCell {
-                column_index: column,
+                column_index: placed.column,
                 text,
-                column_span,
-                row_span,
+                column_span: placed.column_span,
+                row_span: placed.row_span,
                 is_header,
                 spans,
                 align: attr_alignment(&cell, "align") as i32,
                 valign: attr_alignment(&cell, "valign") as i32,
                 blocks,
             });
-            column = column.saturating_add(column_span);
         }
-        carried.extend(started_here);
-        carried.sort_unstable_by_key(|&(start, _, _)| start);
+        tracker.end_row();
         if cells.is_empty() {
             continue;
         }

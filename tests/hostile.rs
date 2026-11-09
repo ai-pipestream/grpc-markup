@@ -60,6 +60,18 @@ impl Outcome {
         out
     }
 
+    /// Every cue's text, joined.
+    fn cue_text(&self) -> String {
+        let mut out = String::new();
+        for event in &self.events {
+            if let Some(pb::parse_markup_response::Event::Cue(cue)) = event.event.as_ref() {
+                out.push_str(&cue.text);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
     /// Every table row, in order.
     fn rows(&self) -> Vec<&pb::TableRow> {
         self.events
@@ -362,6 +374,69 @@ fn a_hundred_thousand_chained_groups_project_without_recursing() {
     assert!(outcome.text().contains("bottom"), "{}", outcome.text());
 }
 
+// ----------------------------------------------------------------- BoxNote
+
+/// A one-row BoxNote table whose only cell claims `colspan` and `rowspan`.
+fn boxnote_table(colspan: u64, rowspan: u64) -> String {
+    format!(
+        r#"{{"doc":{{"type":"doc","content":[{{"type":"table","content":[{{"type":"table_row","content":[{{"type":"table_cell","attrs":{{"colspan":{colspan},"rowspan":{rowspan}}},"content":[{{"type":"paragraph","content":[{{"type":"text","text":"x"}}]}}]}}]}}]}}]}}}}"#
+    )
+}
+
+#[test]
+fn boxnote_cell_spans_are_clamped_to_the_table_model() {
+    // The fold swept every (row, column) pair a cell's spans claimed into
+    // an occupancy set, so a cell claiming the whole plane was area work
+    // and area memory from a few hundred bytes. The spans are clamped the
+    // way the HTML fold clamps them: `colspan` to the table model's 1000,
+    // `rowspan` to the rows the table has.
+    let outcome = hostile(Format::Boxnote, boxnote_table(65_534, 1));
+    outcome.within(BOUND);
+    let rows = outcome.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].cells[0].column_span, 1000, "colspan clamps to 1000");
+
+    let outcome = hostile(Format::Boxnote, boxnote_table(1, 65_534));
+    outcome.within(BOUND);
+    let rows = outcome.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cells[0].row_span, 1,
+        "rowspan clamps to the rows that exist"
+    );
+
+    // The area cases: the whole plane, and spans past u32 (the column
+    // arithmetic used to overflow on these).
+    for (colspan, rowspan) in [(65_534, 65_534), (u64::from(u32::MAX), u64::from(u32::MAX))] {
+        let outcome = hostile(Format::Boxnote, boxnote_table(colspan, rowspan));
+        outcome.within(Duration::from_secs(2));
+        let rows = outcome.rows();
+        assert_eq!(
+            (rows[0].cells[0].column_span, rows[0].cells[0].row_span),
+            (1000, 1)
+        );
+    }
+}
+
+#[test]
+fn boxnote_spans_still_place_later_cells_after_clamping() {
+    let document = r#"{"doc":{"type":"doc","content":[{"type":"table","content":[
+        {"type":"table_row","content":[
+            {"type":"table_cell","attrs":{"colspan":4000,"rowspan":4000},"content":[{"type":"paragraph","content":[{"type":"text","text":"a"}]}]},
+            {"type":"table_cell","content":[{"type":"paragraph","content":[{"type":"text","text":"b"}]}]}]},
+        {"type":"table_row","content":[
+            {"type":"table_cell","content":[{"type":"paragraph","content":[{"type":"text","text":"c"}]}]}]}]}]}}"#;
+    let outcome = hostile(Format::Boxnote, document.to_owned());
+    outcome.within(BOUND);
+    let rows = outcome.rows();
+    assert_eq!(rows[0].cells[0].row_span, 2);
+    assert_eq!(rows[0].cells[1].column_index, 1000);
+    assert_eq!(
+        rows[1].cells[0].column_index, 1000,
+        "the spanning cell still covers the next row"
+    );
+}
+
 // ---------------------------------------------------------------- Markdown
 
 #[test]
@@ -449,4 +524,28 @@ fn a_client_that_hangs_up_stops_the_latex_reader_before_its_first_event() {
         "stopped inside the reader, before info"
     );
     assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+// --------------------------------------------------------------------- VTT
+
+/// One cue whose payload opens `count` tags and then closes `count`.
+fn vtt_cue_with_tags(open: &str, close: &str, count: usize) -> String {
+    format!(
+        "WEBVTT\n\n00:00.000 --> 00:01.000\n{}x{}\n",
+        open.repeat(count),
+        close.repeat(count)
+    )
+}
+
+#[test]
+fn end_tags_that_match_nothing_open_stay_linear() {
+    // Every end tag asked whether a tag of its name was open by scanning
+    // the open stack from the bottom, so 60k `</i>` after 60k `<b>` took
+    // tens of seconds; a payload of a few megabytes was hours.
+    let outcome = hostile(Format::Vtt, vtt_cue_with_tags("<b>", "</i>", 60_000));
+    outcome.within(Duration::from_secs(5));
+    assert_eq!(outcome.cue_text().trim(), "x");
+    let outcome = hostile(Format::Vtt, vtt_cue_with_tags("<b>", "</b>", 60_000));
+    outcome.within(Duration::from_secs(5));
+    assert_eq!(outcome.cue_text().trim(), "x");
 }

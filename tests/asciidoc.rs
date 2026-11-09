@@ -418,3 +418,25 @@ async fn a_leading_bom_does_not_hide_the_document_title() {
         "a kept BOM would leave the `=` line an ordinary paragraph"
     );
 }
+
+#[tokio::test]
+async fn a_no_break_space_inside_a_cell_is_text_and_not_a_specifier_boundary() {
+    // U+00A0 is whitespace to `char::is_whitespace` and two bytes long. The
+    // specifier scan found the last whitespace by byte and stepped one byte
+    // past it, which landed inside the character and aborted the parse.
+    let document = "|===\n|Nom\u{a0}complet |R\u{f4}le\n|Ada\u{a0}Lovelace |Analyste\n|===\n";
+    let client = client().await;
+    let events = parse_ok(&client, document, options(pb::MarkupFormat::Asciidoc)).await;
+    let rows = table_rows(&events);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].cells[0].text, "Nom complet",
+        "whitespace collapses, nothing is lost"
+    );
+    assert_eq!(
+        rows[0].cells[0].column_span, 1,
+        "no specifier was read out of the prose"
+    );
+    assert_eq!(rows[1].cells[0].text, "Ada Lovelace");
+    assert_eq!(rows[1].cells[1].text, "Analyste");
+}

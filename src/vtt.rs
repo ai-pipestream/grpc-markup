@@ -202,7 +202,7 @@ fn flatten_payload(cue_id: Option<String>, lines: &[&str], start_ms: u64, end_ms
     let mut speaker = None;
     // Open cue spans by tag name, innermost last, so an end tag can find
     // its partner rather than closing whatever happens to be on top.
-    let mut open: Vec<String> = Vec::new();
+    let mut open = OpenTags::default();
     // Where each karaoke segment starts: (its time, its offset in `text`).
     let mut karaoke: Vec<(u64, u32)> = Vec::new();
     // The reading being collected inside an `<rt>`, which goes on the
@@ -292,7 +292,7 @@ fn tag_name(tag: &str) -> String {
 ///
 /// Classes ride on every tag the grammar admits them on, not only on `<c>`,
 /// so `<b.loud>` keeps its class the same way `<c.loud>` does.
-fn open_span(inline: &mut Inline, open: &mut Vec<String>, tag: &str, speaker: &mut Option<String>) {
+fn open_span(inline: &mut Inline, open: &mut OpenTags, tag: &str, speaker: &mut Option<String>) {
     let name: String = tag
         .chars()
         .take_while(|c| *c != '.' && !c.is_whitespace())
@@ -324,11 +324,43 @@ fn open_span(inline: &mut Inline, open: &mut Vec<String>, tag: &str, speaker: &m
     inline.open(mark);
 }
 
+/// The cue spans open at one point of a payload, innermost last, with a
+/// count per tag name so an end tag learns in constant time whether it has
+/// a partner. Scanning the stack for the name made a payload of unpaired
+/// end tags quadratic.
+#[derive(Default)]
+struct OpenTags {
+    stack: Vec<String>,
+    counts: HashMap<String, usize>,
+}
+
+impl OpenTags {
+    fn push(&mut self, name: String) {
+        *self.counts.entry(name.clone()).or_default() += 1;
+        self.stack.push(name);
+    }
+
+    fn pop(&mut self) -> Option<String> {
+        let name = self.stack.pop()?;
+        if let Some(count) = self.counts.get_mut(&name) {
+            *count -= 1;
+            if *count == 0 {
+                self.counts.remove(&name);
+            }
+        }
+        Some(name)
+    }
+
+    fn holds(&self, name: &str) -> bool {
+        self.counts.contains_key(name)
+    }
+}
+
 /// Close the innermost run whose tag name matches, and every run inside it.
 /// An end tag naming nothing open is ignored, which is how a renderer's
 /// tokenizer treats it.
-fn close_span(inline: &mut Inline, open: &mut Vec<String>, name: &str) {
-    if !open.iter().any(|tag| tag == name) {
+fn close_span(inline: &mut Inline, open: &mut OpenTags, name: &str) {
+    if !open.holds(name) {
         return;
     }
     while let Some(tag) = open.pop() {

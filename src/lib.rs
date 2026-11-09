@@ -27,6 +27,8 @@
 //! matter onto the same metadata tree the YAML one lands on, [`spans`] is
 //! the shared inline flattener that
 //! records where the formatted, linked and referring runs landed, and
+//! [`table_spans`] places `colspan` / `rowspan` cells for the folds whose
+//! source states them, and
 //! [`service`] wires it all to tonic. [`document_fold`] is the optional
 //! second consumer of the same event stream: it folds a parse into one
 //! `ai.pipestream.document.v1.Document` when a caller asks for one.
@@ -44,6 +46,7 @@ pub mod parse;
 pub mod service;
 pub mod sniff;
 pub mod spans;
+pub mod table_spans;
 pub mod toml;
 pub mod vtt;
 

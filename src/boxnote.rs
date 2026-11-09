@@ -38,6 +38,7 @@ use serde_json::Value;
 use crate::parse::{Block, Emitter, Image, ParseError, Table};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
+use crate::table_spans::{Asked, SpanTracker};
 
 /// Link schemes kept as hyperlinks. A stray `javascript:` or a bare string
 /// is dropped rather than mis-read as a link.
@@ -320,11 +321,13 @@ impl Walk<'_, '_> {
             return Ok(());
         }
         self.emitter.table_start(Table::default())?;
-        let mut occupied: std::collections::BTreeSet<(u32, u32)> =
-            std::collections::BTreeSet::new();
+        // Spans are placed as lanes and clamped to the table model, so a
+        // cell claiming the whole plane costs one lane rather than every
+        // position it claims.
+        let mut tracker = SpanTracker::new(rows.len());
         for (row_index, row) in rows.iter().enumerate() {
             let row_index = u32::try_from(row_index).unwrap_or(u32::MAX);
-            let mut column = 0u32;
+            tracker.begin_row(row_index);
             let mut cells = Vec::new();
             let mut all_headers = true;
             for cell in content(row) {
@@ -335,38 +338,31 @@ impl Walk<'_, '_> {
                 if cell_type != "table_cell" && cell_type != "table_header" {
                     continue;
                 }
-                while occupied.contains(&(row_index, column)) {
-                    column += 1;
-                }
                 let span = |name: &str| {
                     cell.get("attrs")
                         .and_then(|attrs| attrs.get(name))
                         .and_then(Value::as_u64)
-                        .and_then(|span| u32::try_from(span).ok())
-                        .filter(|span| *span >= 1)
+                        .map(|span| u32::try_from(span).unwrap_or(u32::MAX))
                         .unwrap_or(1)
                 };
-                let row_span = span("rowspan");
-                let column_span = span("colspan");
-                for r in row_index..row_index + row_span {
-                    for c in column..column + column_span {
-                        occupied.insert((r, c));
-                    }
-                }
+                let placed = tracker.place(Asked {
+                    column_span: span("colspan"),
+                    row_span: span("rowspan"),
+                });
                 let is_header = cell_type == "table_header";
                 all_headers &= is_header;
                 let (text, spans) = cell_text(content(cell));
                 cells.push(pb::TableCell {
-                    column_index: column,
+                    column_index: placed.column,
                     text,
-                    column_span,
-                    row_span,
+                    column_span: placed.column_span,
+                    row_span: placed.row_span,
                     is_header,
                     spans,
                     ..pb::TableCell::default()
                 });
-                column += column_span;
             }
+            tracker.end_row();
             if cells.is_empty() {
                 continue;
             }
