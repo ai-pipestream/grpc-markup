@@ -267,28 +267,19 @@ impl Inline {
         let Some(start) = start.filter(|start| *start < self.chars) else {
             return;
         };
-        self.spans.push(pb::InlineSpan {
-            range: Some(pb::IntRange {
-                start,
-                end: self.chars,
-            }),
-            styles: mark.styles.iter().map(|style| *style as i32).collect(),
-            hyperlink: mark.hyperlink,
-            link_title: mark.link_title,
-            anchor_id: mark.anchor_id,
-            reference: mark.reference,
-            reference_kind: mark.reference_kind as i32,
-            raw: mark.raw,
-            font_family: mark.font_family,
-            font_size_pt: mark.font_size_pt,
-            color: mark.color,
-            language: mark.language,
-            style_name: mark.style_name,
-            annotation: mark.annotation,
-            // A field code is something a word processor declares; no markup
-            // format in this build does.
-            field_code: None,
-        });
+        self.spans.push(Self::finished(start, self.chars, mark));
+    }
+
+    /// Record a run over text that is already in the buffer.
+    ///
+    /// A ruby base is written before its `<rt>` reading arrives, so the run
+    /// cannot be opened and closed around the append the way a `<b>` can.
+    /// A silent mark or an empty range records nothing.
+    pub fn record(&mut self, start: u32, end: u32, mark: Mark) {
+        if start >= end || mark.is_silent() {
+            return;
+        }
+        self.spans.push(Self::finished(start, end, mark));
     }
 
     /// Open a link run and count it for the whole-block link rule.
@@ -362,6 +353,30 @@ impl Inline {
             (range.start, u32::MAX - range.end)
         });
         (buf, spans)
+    }
+
+    /// One finished run. The caller has already decided the range is real
+    /// and the mark says something.
+    fn finished(start: u32, end: u32, mark: Mark) -> pb::InlineSpan {
+        pb::InlineSpan {
+            range: Some(pb::IntRange { start, end }),
+            styles: mark.styles.iter().map(|style| *style as i32).collect(),
+            hyperlink: mark.hyperlink,
+            link_title: mark.link_title,
+            anchor_id: mark.anchor_id,
+            reference: mark.reference,
+            reference_kind: mark.reference_kind as i32,
+            raw: mark.raw,
+            font_family: mark.font_family,
+            font_size_pt: mark.font_size_pt,
+            color: mark.color,
+            language: mark.language,
+            style_name: mark.style_name,
+            annotation: mark.annotation,
+            // A field code is something a word processor declares; no markup
+            // format in this build does.
+            field_code: None,
+        }
     }
 
     /// Fix the start offset of every open run that has not seen a character
