@@ -37,6 +37,7 @@ pub mod docling_json;
 pub mod document_fold;
 pub mod html;
 pub mod html_pictures;
+mod html_ref;
 pub mod latex;
 pub mod markdown;
 pub mod metrics;
