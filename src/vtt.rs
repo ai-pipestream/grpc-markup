@@ -272,6 +272,52 @@ struct OpenTag {
     inline: bool,
 }
 
+/// The cue tags open at one point of a payload, innermost last, with a
+/// count per tag name so an end tag learns in constant time whether it has
+/// a partner. Scanning the stack for the name made a payload of unpaired
+/// end tags quadratic.
+#[derive(Default)]
+struct OpenTags {
+    stack: Vec<OpenTag>,
+    counts: HashMap<String, usize>,
+}
+
+impl OpenTags {
+    fn push(&mut self, tag: OpenTag) {
+        *self.counts.entry(tag.name.clone()).or_default() += 1;
+        self.stack.push(tag);
+    }
+
+    fn pop(&mut self) -> Option<OpenTag> {
+        let tag = self.stack.pop()?;
+        self.forget(&tag.name);
+        Some(tag)
+    }
+
+    fn pop_if(&mut self, predicate: impl FnOnce(&mut OpenTag) -> bool) -> Option<OpenTag> {
+        let tag = self.stack.pop_if(predicate)?;
+        self.forget(&tag.name);
+        Some(tag)
+    }
+
+    fn last(&self) -> Option<&OpenTag> {
+        self.stack.last()
+    }
+
+    fn holds(&self, name: &str) -> bool {
+        self.counts.contains_key(name)
+    }
+
+    fn forget(&mut self, name: &str) {
+        if let Some(count) = self.counts.get_mut(name) {
+            *count -= 1;
+            if *count == 0 {
+                self.counts.remove(name);
+            }
+        }
+    }
+}
+
 /// One open `<ruby>`. Each base between its `<rt>` readings becomes its
 /// own run, carrying this tag's classes when it has them.
 struct Ruby {
@@ -321,7 +367,7 @@ fn flatten_payload(
     let mut speaker = None;
     // Open cue spans by tag name, innermost last, so an end tag can find
     // its partner rather than closing whatever happens to be on top.
-    let mut open: Vec<OpenTag> = Vec::new();
+    let mut open = OpenTags::default();
     let mut rubies: Vec<Ruby> = Vec::new();
     // Where each karaoke segment starts: (its time, its offset in `text`).
     let mut karaoke: Vec<(u64, u32)> = Vec::new();
@@ -450,7 +496,7 @@ fn is_cue_span(name: &str) -> bool {
 /// inside an open reading is ignored, so its text joins that reading.
 fn open_start(
     inline: &mut Inline,
-    open: &mut Vec<OpenTag>,
+    open: &mut OpenTags,
     rubies: &mut Vec<Ruby>,
     reading: &mut Option<String>,
     speaker: &mut Option<String>,
@@ -494,7 +540,7 @@ fn open_start(
 /// a BCP 47 tag and not cue text.
 fn open_span(
     inline: &mut Inline,
-    open: &mut Vec<OpenTag>,
+    open: &mut OpenTags,
     name: &str,
     classes: Option<String>,
     annotation: &str,
@@ -532,7 +578,7 @@ fn open_span(
 /// is ignored, and so is any other end tag that names nothing open.
 fn close_end(
     inline: &mut Inline,
-    open: &mut Vec<OpenTag>,
+    open: &mut OpenTags,
     rubies: &mut Vec<Ruby>,
     reading: &mut Option<String>,
     name: &str,
@@ -548,7 +594,7 @@ fn close_end(
     {
         finish_popped(inline, rubies, reading, &tag)?;
     }
-    if !open.iter().any(|tag| tag.name == name) {
+    if !open.holds(name) {
         return Ok(());
     }
     while let Some(tag) = open.pop() {
