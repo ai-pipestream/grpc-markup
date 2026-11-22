@@ -231,8 +231,12 @@ The `WEBVTT` header is mandatory
 are skipped, and each cue becomes one `Cue` event: identifier, timings in
 milliseconds (strict `mm:ss.ttt` grammar, optional hours), first `<v>`
 annotation as `speaker`, payload with its tags removed from the text and
-lines joined with `\n`. A malformed cue — no timings line, unparseable
-timestamps, end before start — is skipped with one aggregated
+lines joined with `\n`. A whitespace-only line stays inside the cue unless
+the next cue starts on one of the two lines after it; leading and trailing
+whitespace of the payload is then removed. A cue whose end does not follow
+its start is kept, with the end set to the start plus 1 ms, and warns. Any
+other malformed cue (no timings line, unparseable timestamps, a character
+reference for a line terminator) is skipped with one aggregated
 `WARNING_CODE_MALFORMED_STRUCTURE`, which is WebVTT's own error recovery.
 
 What the tags said survives beside the text rather than being deleted with
@@ -244,13 +248,18 @@ it:
 | `.class` qualifiers on any cue tag (`<c.loud.narrow>`, `<b.loud>`) | `InlineSpan.style_name`, the class list verbatim, dots and all |
 | `<lang fr>` | `InlineSpan.language` over its run |
 | `<v Name>` | `Cue.speaker` (first annotation wins); its classes still leave a style name |
-| `<ruby>` / `<rt>` | the base text stays in the cue's text and the `<rt>` reading rides as the run's `annotation`; the reading never enters the text it is printed over |
+| `<ruby>` / `<rt>` | each ruby base stays in the cue's text and its `<rt>` reading rides as that run's `annotation`; several pairs are several runs; an `<rt>` not directly inside `<ruby>` is ignored and its text stays; `</ruby>` closes an open `<rt>` |
+| `<font>`, `<B>`, any other non-span tag | the tag is stripped and its text kept; it leaves no run |
 | `<00:00:06.000>` karaoke timestamps | `Cue.timings`, one `CueTiming` per run, tiling the whole text; the leading run starts at the cue's own start and the last ends at the cue's own end. A cue with no timestamp tag carries no segments, because its timing is already the cue's |
 
 Cue text is not prose and is not collapsed: the spacing and line breaks the
-author timed the audio against are kept verbatim, and the character
-entities the grammar admits are decoded *during* the walk, so a `&amp;` is
-five code points in the source and one in the string a range indexes.
+author timed the audio against are kept, apart from leading and trailing
+whitespace of the payload, and every HTML character reference (named,
+decimal, hexadecimal) is decoded *during* the walk, so a `&#39;` is five
+code points in the source and one in the string a range indexes. A
+reference that does not resolve stays literal. Export writes `&` back as
+`&amp;` and `<` in cue text (or `>` in a voice annotation) as a named
+reference, which is what makes the decoded text round-trip.
 
 ### 4.6 BoxNote (ProseMirror `doc` tree)
 
