@@ -1424,8 +1424,19 @@ impl Macros {
 
 /// Nodes flattened to inline text, with the runs they carry recorded.
 fn flatten_nodes(nodes: &[Node], macros: &Macros) -> String {
+    flatten_nodes_at(nodes, macros, 0)
+}
+
+/// [`flatten_nodes`] at a given expansion depth.
+///
+/// A macro argument read as plain text inside an expansion (a `\url`
+/// target, citation keys) must carry the caller's depth: restarting at zero
+/// let a definition that used itself inside one expand again on every use,
+/// without end, until the thread's stack overflowed and took the process
+/// with it.
+fn flatten_nodes_at(nodes: &[Node], macros: &Macros, depth: usize) -> String {
     let mut out = Inline::default();
-    flatten_into(nodes, macros, 0, &mut out);
+    flatten_into(nodes, macros, depth, &mut out);
     out.take().0
 }
 
@@ -1507,7 +1518,7 @@ fn flatten_macro(
         _ if citation_kind(name).is_some() => {
             let kind = citation_kind(name).expect("just matched");
             let Some(arg) = args.first() else { return };
-            let keys = flatten_nodes(arg, macros);
+            let keys = flatten_nodes_at(arg, macros, depth);
             // `\cite{a,b}` names two works, so it leaves two references.
             for (position, key) in keys.split(',').map(str::trim).enumerate() {
                 if key.is_empty() {
@@ -1521,7 +1532,7 @@ fn flatten_macro(
         }
         "url" => {
             if let Some(arg) = args.first() {
-                let url = flatten_nodes(arg, macros);
+                let url = flatten_nodes_at(arg, macros, depth);
                 if !url.is_empty() {
                     out.open_link(&url, None);
                     out.push(&url);
@@ -1530,8 +1541,8 @@ fn flatten_macro(
             }
         }
         "href" => {
-            let url = args.first().map(|arg| flatten_nodes(arg, macros));
-            let display = args.get(1).map(|arg| flatten_nodes(arg, macros));
+            let url = args.first().map(|arg| flatten_nodes_at(arg, macros, depth));
+            let display = args.get(1).map(|arg| flatten_nodes_at(arg, macros, depth));
             match (display, url) {
                 (Some(display), Some(url)) if !display.is_empty() && !url.is_empty() => {
                     // The link used to be smuggled into the prose as the

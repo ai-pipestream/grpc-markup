@@ -587,3 +587,50 @@ async fn many_small_blocks_reach_a_client_that_reads_late() {
         Some(pb::parse_markup_response::Event::Status(_))
     ));
 }
+
+#[tokio::test]
+async fn a_client_that_stops_reading_gets_deadline_exceeded_not_ok() {
+    // A connected client that stops reading for longer than the stall
+    // allowance used to see the stream end with OK and no trailer: the
+    // parse gave up, nothing terminal was queued, and tonic closed the
+    // call as a success. A truncated stream has to end with an error.
+    const PARAGRAPHS: usize = 50_000;
+    let document: String = (0..PARAGRAPHS).map(|n| format!("p{n}\n\n")).collect();
+    let service = MarkupGrpc::new().with_consumer_stall(std::time::Duration::from_millis(200));
+    let mut client = common::client_with(service).await;
+    let requests = common::frames(&document, options(pb::MarkupFormat::Markdown), 64 * 1024);
+    let mut stream = client
+        .parse_markup(tokio_stream::iter(requests))
+        .await
+        .expect("the call opens")
+        .into_inner();
+    stream
+        .message()
+        .await
+        .expect("the first event arrives")
+        .expect("an event");
+    // Stop reading long enough for the windows and the channel to fill and
+    // the stall allowance to pass several times over.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let ended = tokio::time::timeout(CALL_TIMEOUT, async {
+        loop {
+            match stream.message().await {
+                Ok(Some(event)) => {
+                    assert!(
+                        !matches!(
+                            event.event,
+                            Some(pb::parse_markup_response::Event::Status(_))
+                        ),
+                        "the parse was stopped, so it cannot have finished"
+                    );
+                }
+                Ok(None) => return Ok(()),
+                Err(status) => return Err(status),
+            }
+        }
+    })
+    .await
+    .expect("the stream ends");
+    let status = ended.expect_err("a stream cut short must not end with OK");
+    assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
+}

@@ -113,7 +113,8 @@ event:
 | Condition | Code |
 |---|---|
 | Over the byte cap (refused on the crossing chunk, mid-upload), past the concurrency limit, or past the server-wide memory budget for buffered documents | `RESOURCE_EXHAUSTED` |
-| An upload that stalls past the idle timeout or runs past the total upload timeout, or a parse that runs past the client's deadline or the server's per-parse budget | `DEADLINE_EXCEEDED` |
+| An upload that stalls past the idle timeout or runs past the total upload timeout, a parse that runs past the client's deadline or the server's per-parse budget, or a client that stops reading events for 30 s (the parse stops, and the events already queued are followed by this status, never by OK) | `DEADLINE_EXCEEDED` |
+| A stream that ended with neither a trailer nor a reason for stopping | `INTERNAL` |
 | Input the format's own error rules cannot repair: a VTT without its header, bytes that are not the JSON a JSON format requires, a legacy `atext` BoxNote | `INVALID_ARGUMENT` |
 | A format outside the build (none today; the registry, not the enum, decides), or a sniff that found nothing | `UNIMPLEMENTED` |
 | A parser fault | `INTERNAL` |
