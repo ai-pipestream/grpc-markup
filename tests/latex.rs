@@ -659,3 +659,39 @@ async fn a_leading_bom_parses_the_same_as_none() {
     let headers = blocks_labelled(&events, pb::BlockLabel::SectionHeader);
     assert_eq!(texts(&headers), ["Intro"]);
 }
+
+#[tokio::test]
+async fn a_footnote_inside_flattened_text_becomes_a_footnote_block() {
+    // A footnote in a heading, a table cell or a styled argument went
+    // through the flattener, which dropped the body without a word.
+    let document = r"\begin{document}
+\section{Results\footnote{Funded by grant X.}}
+Some \textbf{bold\footnote{Inside bold.}} prose.
+\begin{tabular}{ll}
+Cell\footnote{Inside a cell.} & two \\
+\end{tabular}
+\end{document}
+";
+    let client = client().await;
+    let events = parse_ok(&client, document, options(pb::MarkupFormat::Latex)).await;
+    let notes: Vec<(String, String)> = common::text_blocks(&events)
+        .iter()
+        .filter(|block| block.label == pb::BlockLabel::Footnote as i32)
+        .map(|block| {
+            (
+                block.text.clone(),
+                block.anchor_id.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let bodies: Vec<&str> = notes.iter().map(|(text, _)| text.as_str()).collect();
+    assert_eq!(
+        bodies,
+        ["Funded by grant X.", "Inside bold.", "Inside a cell."],
+        "{notes:?}"
+    );
+    let anchors: std::collections::HashSet<&str> =
+        notes.iter().map(|(_, anchor)| anchor.as_str()).collect();
+    assert_eq!(anchors.len(), 3, "each note has its own anchor: {notes:?}");
+    assert!(!anchors.contains(""), "{notes:?}");
+}
