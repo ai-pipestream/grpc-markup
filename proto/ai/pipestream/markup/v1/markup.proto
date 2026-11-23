@@ -791,6 +791,11 @@ enum WarningCode {
   // Raw embedded HTML inside a non-HTML format was flattened to its text
   // rather than parsed.
   WARNING_CODE_EMBEDDED_HTML_FLATTENED = 5;
+
+  // A limit cut something short: more distinct warning kinds than the
+  // trailer lists, for example. The message names the limit; `count` is how
+  // many occurrences it covers.
+  WARNING_CODE_LIMIT_REACHED = 6;
 }
 
 // ParseWarning is one non-fatal finding, carried on the trailer.

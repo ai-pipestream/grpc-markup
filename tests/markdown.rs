@@ -853,3 +853,15 @@ async fn a_leading_bom_does_not_demote_the_opening_heading() {
         "a kept BOM would parse `# Title` as paragraph text"
     );
 }
+
+#[tokio::test]
+async fn text_after_a_nested_block_in_a_tight_list_item_is_kept() {
+    let client = client().await;
+    let source = "- first\n  - nested\n  # heading inside\n  tail of first\n- second\n";
+    let events = parse_ok(&client, source, options(pb::MarkupFormat::Markdown)).await;
+    let all = texts(&text_blocks(&events));
+    assert!(
+        all.iter().any(|text| text.contains("tail of first")),
+        "{all:?}"
+    );
+}

@@ -29,7 +29,8 @@ use crate::{COLLECTOR, VERSION, asciidoc, boxnote, docling_json, html, latex, ma
 /// Warnings aggregate by (code, message), so a normal document produces a
 /// handful. A hostile one could mint a distinct message per block, which is
 /// unbounded memory on the trailer; past this many the driver stops adding
-/// new kinds and keeps counting the ones it has.
+/// new kinds, keeps counting the ones it has, and spends the last slot on a
+/// `LIMIT_REACHED` entry that counts what it left unlisted.
 const MAX_WARNING_KINDS: usize = 64;
 
 /// Consumer of parse events; returns `false` when the client is gone and the
@@ -414,6 +415,8 @@ pub struct Emitter<'a> {
     index: u64,
     counts: pb::ParseCounts,
     warnings: BTreeMap<(i32, String), u64>,
+    /// Occurrences of warning kinds that arrived after the table was full.
+    warnings_unlisted: u64,
     /// Tables opened so far, for minting `table_ref`s.
     tables_opened: u64,
     /// The open table: (ref, rows sent, widest row after span expansion).
@@ -455,6 +458,7 @@ impl<'a> Emitter<'a> {
             index: 0,
             counts: pb::ParseCounts::default(),
             warnings: BTreeMap::new(),
+            warnings_unlisted: 0,
             tables_opened: 0,
             open_table: None,
             fold: config.emit_document.then(DocumentFold::new),
@@ -686,8 +690,10 @@ impl<'a> Emitter<'a> {
         let key = (code as i32, message.to_owned());
         if let Some(existing) = self.warnings.get_mut(&key) {
             *existing += count;
-        } else if self.warnings.len() < MAX_WARNING_KINDS {
+        } else if self.warnings.len() < MAX_WARNING_KINDS - 1 {
             self.warnings.insert(key, count);
+        } else {
+            self.warnings_unlisted += count;
         }
     }
 
@@ -716,7 +722,7 @@ impl<'a> Emitter<'a> {
         if let Some(document) = document {
             self.send(pb::parse_markup_response::Event::Document(document))?;
         }
-        let warnings = self
+        let mut warnings: Vec<pb::ParseWarning> = self
             .warnings
             .iter()
             .map(|((code, message), count)| pb::ParseWarning {
@@ -725,6 +731,16 @@ impl<'a> Emitter<'a> {
                 count: *count,
             })
             .collect();
+        if self.warnings_unlisted > 0 {
+            warnings.push(pb::ParseWarning {
+                code: pb::WarningCode::LimitReached as i32,
+                message: format!(
+                    "further warning kinds were counted but not listed after the cap of {} kinds",
+                    MAX_WARNING_KINDS - 1
+                ),
+                count: self.warnings_unlisted,
+            });
+        }
         let status = pb::ParseStatus {
             format: self.format.to_proto() as i32,
             counts: Some(self.counts),
@@ -922,8 +938,12 @@ mod tests {
     }
 
     #[test]
-    fn the_warning_table_is_bounded_against_hostile_variety() {
-        let mut emit = |_| true;
+    fn the_warning_table_is_bounded_against_hostile_variety_and_says_so() {
+        let mut events = Vec::new();
+        let mut emit = |event: pb::ParseMarkupResponse| {
+            events.push(event);
+            true
+        };
         let config = ParseConfig::default();
         let mut emitter = Emitter::new(
             Format::Markdown,
@@ -936,7 +956,32 @@ mod tests {
         for n in 0..10_000 {
             emitter.warn(pb::WarningCode::UnmappedConstruct, &format!("kind {n}"));
         }
-        assert_eq!(emitter.warnings.len(), MAX_WARNING_KINDS);
+        // A kind already listed keeps counting after the cap.
+        emitter.warn(pb::WarningCode::UnmappedConstruct, "kind 0");
+        emitter
+            .info(None, std::collections::HashMap::new())
+            .unwrap();
+        emitter.finish().unwrap();
+        let Some(pb::parse_markup_response::Event::Status(status)) =
+            events.last().and_then(|e| e.event.as_ref())
+        else {
+            panic!("trailer last");
+        };
+        assert_eq!(status.warnings.len(), MAX_WARNING_KINDS);
+        let listed = MAX_WARNING_KINDS - 1;
+        let overflow = status
+            .warnings
+            .iter()
+            .find(|w| w.code == pb::WarningCode::LimitReached as i32)
+            .expect("the cut is reported");
+        assert_eq!(overflow.count, 10_000 - listed as u64);
+        assert!(overflow.message.contains("63"), "{}", overflow.message);
+        let first = status
+            .warnings
+            .iter()
+            .find(|w| w.message == "kind 0")
+            .expect("listed");
+        assert_eq!(first.count, 2);
     }
 
     #[test]

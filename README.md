@@ -120,7 +120,9 @@ event:
 
 Warnings never fail a parse. They aggregate per (code, message) on the
 trailer, so a document with ten thousand instances of one finding produces
-one warning with a count.
+one warning with a count. The trailer lists at most 63 distinct kinds; past
+that, one `WARNING_CODE_LIMIT_REACHED` entry counts the occurrences it left
+unlisted, so a short list is never mistaken for a complete one.
 
 ## Web demo
 
@@ -251,6 +253,10 @@ payloads, whose provenance passes through untouched.
 | `GRPC_MARKUP_MAX_PARSE_SECS` | 300 | Wall-clock budget for one parse; a shorter client deadline wins; past it, `DEADLINE_EXCEEDED` |
 | `GRPC_MARKUP_METRICS_INTERVAL_SECS` | 60 | Seconds between metrics lines; 0 disables |
 | `GRPC_MARKUP_WINDOW_BYTES` | 16 MiB | HTTP/2 initial stream and connection window |
+
+A variable that is set but does not parse as the number it takes stops
+startup with an error naming it; the server never runs on defaults the
+operator did not choose.
 
 Metrics are a line on stdout on that interval — parses started, ok, failed,
 refused, capped, bytes in, events out, and a per-format count. The counters

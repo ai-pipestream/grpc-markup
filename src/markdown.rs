@@ -888,7 +888,8 @@ impl Walk<'_, '_> {
 
     /// Emit the pending text of the innermost open list item, so the item
     /// precedes whatever interrupted it — a nested list, a further
-    /// paragraph, or its own end.
+    /// paragraph, or its own end. Text gathered after the item's own block
+    /// went out becomes a further paragraph rather than being dropped.
     fn flush_started_item(&mut self) -> Result<(), ParseError> {
         let Some(Capture::Item {
             line,
@@ -902,12 +903,25 @@ impl Walk<'_, '_> {
         else {
             return Ok(());
         };
-        if *emitted || inline.is_empty() {
+        if inline.is_empty() {
             return Ok(());
         }
-        *emitted = true;
         let hyperlink = inline.hyperlink();
         let (text, spans) = inline.take();
+        if *emitted {
+            // Text the item gained after a nested block interrupted it, as
+            // a tight list delivers a paragraph that follows a nested list
+            // or heading: a further paragraph of the same item, the way
+            // the HTML fold keeps a second run of item text.
+            return self.emit(Block {
+                label: pb::BlockLabel::Paragraph,
+                text,
+                hyperlink,
+                spans,
+                ..Block::default()
+            });
+        }
+        *emitted = true;
         let block = Block {
             label: pb::BlockLabel::ListItem,
             text,

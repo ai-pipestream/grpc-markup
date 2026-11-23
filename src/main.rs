@@ -59,25 +59,45 @@ const DEFAULT_WINDOW_BYTES: u32 = 16 * 1024 * 1024;
 /// Default seconds between metrics lines.
 const DEFAULT_METRICS_INTERVAL_SECS: u64 = 60;
 
-/// Read a numeric environment variable, falling back to `default`.
-fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
+/// Read a numeric environment variable: `default` when it is unset, an
+/// error naming the variable when it is set to something that does not parse.
+///
+/// A mistyped limit must stop startup rather than run the server on
+/// defaults the operator did not choose.
+fn env_num<T: std::str::FromStr>(name: &str, default: T) -> Result<T, String> {
+    setting(name, std::env::var(name), default)
 }
 
-/// Read a whole-seconds environment variable, falling back to `default`.
-fn env_secs(name: &str, default: Duration) -> Duration {
-    Duration::from_secs(env_num(name, default.as_secs()))
+/// The decision behind [`env_num`], separated from the process environment
+/// so it can be tested.
+fn setting<T: std::str::FromStr>(
+    name: &str,
+    value: Result<String, std::env::VarError>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(raw)) => Err(format!(
+            "{name} is set to {} which is not UTF-8",
+            raw.to_string_lossy()
+        )),
+        Ok(raw) => raw.trim().parse().map_err(|_| {
+            format!("{name} is set to {raw:?} which is not a number this setting takes")
+        }),
+    }
+}
+
+/// Read a whole-seconds environment variable, `default` when it is unset.
+fn env_secs(name: &str, default: Duration) -> Result<Duration, String> {
+    Ok(Duration::from_secs(env_num(name, default.as_secs())?))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workers = env_num(
         "GRPC_MARKUP_WORKERS",
         std::thread::available_parallelism().map_or(4, usize::from),
-    );
-    let blocking = env_num("GRPC_MARKUP_BLOCKING_THREADS", 512usize);
+    )?;
+    let blocking = env_num("GRPC_MARKUP_BLOCKING_THREADS", 512usize)?;
 
     // Parsing is CPU-bound and blocking; it runs in the blocking pool so it
     // never stalls the async workers moving bytes on and off the sockets.
@@ -100,35 +120,35 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(env_num(
             "GRPC_MARKUP_METRICS_INTERVAL_SECS",
             DEFAULT_METRICS_INTERVAL_SECS,
-        )),
+        )?),
     );
 
     let service = MarkupGrpc::with_metrics(metrics)
         .with_default_max_document_mib(env_num(
             "GRPC_MARKUP_MAX_DOCUMENT_MIB",
             DEFAULT_MAX_DOCUMENT_MIB,
-        ))
+        )?)
         .with_ceiling_max_document_mib(env_num(
             "GRPC_MARKUP_MAX_DOCUMENT_MIB_CEILING",
             CEILING_MAX_DOCUMENT_MIB,
-        ))
+        )?)
         .with_max_concurrent_parses(env_num(
             "GRPC_MARKUP_MAX_CONCURRENT_PARSES",
             DEFAULT_MAX_CONCURRENT_PARSES,
-        ))
+        )?)
         .with_memory_budget_mib(env_num(
             "GRPC_MARKUP_MEMORY_BUDGET_MIB",
             DEFAULT_MEMORY_BUDGET_MIB,
-        ))
+        )?)
         .with_upload_idle_timeout(env_secs(
             "GRPC_MARKUP_UPLOAD_IDLE_SECS",
             DEFAULT_UPLOAD_IDLE,
-        ))
+        )?)
         .with_upload_total_timeout(env_secs(
             "GRPC_MARKUP_UPLOAD_TOTAL_SECS",
             DEFAULT_UPLOAD_TOTAL,
-        ))
-        .with_max_parse_time(env_secs("GRPC_MARKUP_MAX_PARSE_SECS", DEFAULT_MAX_PARSE))
+        )?)
+        .with_max_parse_time(env_secs("GRPC_MARKUP_MAX_PARSE_SECS", DEFAULT_MAX_PARSE)?)
         .into_service();
 
     // Health lets an orchestrator gate traffic; reflection lets grpcurl and
@@ -146,7 +166,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
-    let window: u32 = env_num("GRPC_MARKUP_WINDOW_BYTES", DEFAULT_WINDOW_BYTES);
+    let window: u32 = env_num("GRPC_MARKUP_WINDOW_BYTES", DEFAULT_WINDOW_BYTES)?;
     println!("grpc-markup listening on {addr} (http2 window {window} bytes)");
     Server::builder()
         .tcp_nodelay(true)
@@ -173,5 +193,29 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = sigterm.recv() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::setting;
+    use std::env::VarError;
+
+    #[test]
+    fn an_unset_variable_takes_the_default() {
+        assert_eq!(setting("N", Err(VarError::NotPresent), 7u64), Ok(7));
+    }
+
+    #[test]
+    fn a_set_variable_is_read() {
+        assert_eq!(setting("N", Ok("12".to_owned()), 7u64), Ok(12));
+    }
+
+    #[test]
+    fn a_mistyped_variable_stops_startup() {
+        let error = setting("GRPC_MARKUP_WORKERS", Ok("eight".to_owned()), 7u64)
+            .expect_err("a typo must not start the server on defaults");
+        assert!(error.contains("GRPC_MARKUP_WORKERS"), "{error}");
+        assert!(error.contains("eight"), "{error}");
     }
 }
