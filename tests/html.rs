@@ -1181,3 +1181,54 @@ async fn a_block_container_inside_a_heading_is_part_of_its_text() {
         "nothing inside the heading became a paragraph of its own"
     );
 }
+
+#[tokio::test]
+async fn a_definition_list_grouped_in_divs_keeps_its_terms() {
+    // HTML5 lets `dl` group each term and description in a `div`, and
+    // generated docs do. The walk took only direct `dt`/`dd` children, so
+    // every grouped term and definition vanished.
+    let client = client().await;
+    let html = "<dl><div><dt>Term</dt><dd>Definition</dd></div><dt>Flat</dt><dd>Kept</dd></dl>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let items: Vec<(&str, &str)> = text_blocks(&events)
+        .iter()
+        .filter(|block| block.label == pb::BlockLabel::ListItem as i32)
+        .map(|block| (block.role.as_str(), block.text.as_str()))
+        .collect();
+    assert_eq!(
+        items,
+        [
+            ("definition-term", "Term"),
+            ("definition-description", "Definition"),
+            ("definition-term", "Flat"),
+            ("definition-description", "Kept"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_list_child_that_is_not_an_item_keeps_its_text() {
+    // `<ul><div><li>..</li></div></ul>` and a stray `<a>` or `<p>` among
+    // the items: browsers render them, and the walk dropped them.
+    let client = client().await;
+    let html = "<ul><div><li>Wrapped</li></div><p>Loose words</p><li>Plain</li></ul>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let all: Vec<String> = text_blocks(&events)
+        .iter()
+        .map(|block| block.text.clone())
+        .collect();
+    for wanted in ["Wrapped", "Loose words", "Plain"] {
+        assert!(all.iter().any(|text| text == wanted), "{wanted}: {all:?}");
+    }
+
+    let html =
+        "<table><tr><td><ul><div><li>one</li></div><p>loose</p><li>two</li></ul></td></tr></table>";
+    let events = parse_ok(&client, html, options(pb::MarkupFormat::Html)).await;
+    let cell = &table_rows(&events)[0].cells[0];
+    let blocks: Vec<&str> = cell
+        .blocks
+        .iter()
+        .map(|block| cell_text(block).text.as_str())
+        .collect();
+    assert_eq!(blocks, ["one", "loose", "two"], "inside a cell too");
+}
