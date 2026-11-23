@@ -703,7 +703,13 @@ impl Walk<'_, '_> {
                 // accept; it reads as a nested list.
                 "ul" => self.list(&child, false, depth + 1)?,
                 "ol" => self.list(&child, true, depth + 1)?,
-                _ => {}
+                // A wrapper around items is transparent: its items are
+                // this list's.
+                "div" => self.list(&child, ordered, depth)?,
+                // Anything else browsers render where it stands, and so is
+                // it read: its text is kept, and a construct with no
+                // mapping is reported as one anywhere else is.
+                _ => self.element(&child)?,
             }
         }
         Ok(())
@@ -812,7 +818,16 @@ impl Walk<'_, '_> {
             let (role, item_depth) = match child.value().name() {
                 "dt" => ("definition-term", depth),
                 "dd" => ("definition-description", depth + 1),
-                _ => continue,
+                // HTML5 groups a term with its description in a `div`.
+                "div" => {
+                    self.definition_list(&child, depth)?;
+                    continue;
+                }
+                // Anything else keeps its text, as it would elsewhere.
+                _ => {
+                    self.element(&child)?;
+                    continue;
+                }
             };
             let (text, spans, hyperlink) = self.flatten(&child)?;
             if text.is_empty() {
@@ -1343,7 +1358,23 @@ impl CellBlocks {
                 }
                 "ul" => self.list(&child, false, depth + 1, source),
                 "ol" => self.list(&child, true, depth + 1, source),
-                _ => {}
+                // A wrapper around items is transparent.
+                "div" => self.list(&child, ordered, depth, source),
+                // Anything else keeps its text, as a paragraph between
+                // the items around it.
+                _ => {
+                    let mut inline = Inline::default();
+                    cell_run_element(&child, &mut inline, false);
+                    let (text, spans) = inline.take();
+                    if !text.is_empty() {
+                        self.blocks.push(into_cell_text(cell_text_block(
+                            pb::BlockLabel::Paragraph,
+                            text,
+                            spans,
+                            source,
+                        )));
+                    }
+                }
             }
         }
     }
