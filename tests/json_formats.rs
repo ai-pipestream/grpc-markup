@@ -111,6 +111,60 @@ async fn an_unknown_boxnote_node_warns_and_the_parse_continues() {
 }
 
 #[tokio::test]
+async fn a_boxnote_link_keeps_its_target_whatever_the_scheme_and_unknown_marks_warn() {
+    let client = client().await;
+    let note = r#"{"doc": {"type": "doc", "content": [
+        {"type": "paragraph", "content": [
+            {"type": "text", "text": "call",
+             "marks": [{"type": "link", "attrs": {"href": "tel:+15551234"}}]},
+            {"type": "text", "text": " and "},
+            {"type": "text", "text": "sibling",
+             "marks": [{"type": "link", "attrs": {"href": "./other-note"}}]},
+            {"type": "text", "text": " and "},
+            {"type": "text", "text": "noted",
+             "marks": [{"type": "annotation_thread", "attrs": {"id": "7"}}]},
+            {"type": "mention", "attrs": {"name": "Ada"}}
+        ]}
+    ]}}"#;
+    let events = parse_ok(&client, note, options(pb::MarkupFormat::Boxnote)).await;
+    let blocks = text_blocks(&events);
+    let paragraph = blocks
+        .iter()
+        .find(|b| b.text.contains("sibling"))
+        .expect("the paragraph");
+    let links: Vec<(String, &str)> = paragraph
+        .spans
+        .iter()
+        .filter_map(|span| {
+            span.hyperlink
+                .as_deref()
+                .map(|href| (spanned(&paragraph.text, span), href))
+        })
+        .collect();
+    assert_eq!(
+        links,
+        vec![
+            ("call".to_owned(), "tel:+15551234"),
+            ("sibling".to_owned(), "./other-note"),
+        ]
+    );
+    let messages: Vec<&str> = status(&events)
+        .warnings
+        .iter()
+        .filter(|w| w.code == pb::WarningCode::UnmappedConstruct as i32)
+        .map(|w| w.message.as_str())
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("annotation_thread")),
+        "{messages:?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("mention")),
+        "{messages:?}"
+    );
+}
+
+#[tokio::test]
 async fn boxnote_refusals_are_invalid_argument() {
     let client = client().await;
     let cases: [(&str, &str); 4] = [

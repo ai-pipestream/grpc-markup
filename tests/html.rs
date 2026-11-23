@@ -1183,6 +1183,51 @@ async fn a_block_container_inside_a_heading_is_part_of_its_text() {
 }
 
 #[tokio::test]
+async fn skipped_elements_that_held_text_are_reported() {
+    let client = client().await;
+    let source = "<html><body><p>Visible.</p>\
+        <noscript><p>The article body for readers without scripts.</p></noscript>\
+        <form><textarea>An answer typed into the form</textarea>\
+        <select><option selected>Option one</option><option>Option two</option></select>\
+        <button>Send</button></form>\
+        <video src=\"a.mp4\">Your browser cannot play this video.</video>\
+        <iframe src=\"x.html\"></iframe>\
+        <script>var x = 1;</script><style>p { color: red }</style>\
+        </body></html>";
+    let events = parse_ok(&client, source, options(pb::MarkupFormat::Html)).await;
+    let skipped: Vec<(&str, u64)> = status(&events)
+        .warnings
+        .iter()
+        .filter(|w| w.code == pb::WarningCode::UnmappedConstruct as i32)
+        .map(|w| (w.message.as_str(), w.count))
+        .collect();
+    for (element, count) in [
+        ("noscript", 1),
+        ("textarea", 1),
+        ("option", 2),
+        ("button", 1),
+        ("video", 1),
+    ] {
+        let tag = format!("<{element}>");
+        assert!(
+            skipped
+                .iter()
+                .any(|(message, n)| message.contains(&tag) && *n == count),
+            "{element}: {skipped:?}"
+        );
+    }
+    // Executable and presentational machinery, and elements with no text,
+    // are not content and stay silent.
+    for element in ["script", "style", "iframe", "select"] {
+        let tag = format!("<{element}>");
+        assert!(
+            !skipped.iter().any(|(message, _)| message.contains(&tag)),
+            "{element}: {skipped:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_definition_list_grouped_in_divs_keeps_its_terms() {
     // HTML5 lets `dl` group each term and description in a `div`, and
     // generated docs do. The walk took only direct `dt`/`dd` children, so

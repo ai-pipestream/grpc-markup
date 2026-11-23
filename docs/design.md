@@ -143,7 +143,7 @@ scope by construction.
 | `svg` | one `ImageBlock` per `image` it holds, `href` preferred over `xlink:href`, the reference verbatim exactly as an `img src`; `aria-label`, the `<title>` child or the `<desc>` as `alt`, an unused `<desc>` as `title`; the `image`'s own `width`/`height`. An `svg` with drawn content and no `image` is one `ImageBlock` whose `src` is the element serialized as a `data:image/svg+xml;base64,` URI, only under a 32 KiB source cap (`html_pictures::INLINE_SVG_MAX_BYTES`). Decorative `svg` (`aria-hidden="true"`, `role="presentation"`/`"none"`, or both `width` and `height` at most 24 px) is nothing, and so is a sprite sheet of `defs`/`use` |
 | `object data`, `embed src` | one `ImageBlock` when the `type` is `image/*` (or, with no `type`, the reference has an image extension); `title` as `title`, `aria-label` or the `object`'s fallback text as `alt`; anything else stays dropped |
 | `details` | descended; its `summary` keeps its role |
-| `script`, `style`, `head`, `template`, form controls, media embeds | never text |
+| `script`, `style`, `head`, `template`, form controls, media embeds | never text; when a `noscript`, `textarea`, `option`, `button`, `datalist`, `video`, `audio`, `canvas` or `iframe` held text, one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per element name counts them |
 | `br` | a `\n` in the enclosing block's text, cells included |
 | `hr` | nothing + `WARNING_CODE_UNMAPPED_CONSTRUCT` |
 | any element without a mapping | text flattened into the enclosing block + one aggregated `WARNING_CODE_UNMAPPED_CONSTRUCT` per element name |
@@ -282,7 +282,10 @@ reference, which is what makes the decoded text round-trip.
 A node-for-node walk of the tree: headings (first level-1 is the
 title), paragraphs from styled runs (every mark leaves a run: the boolean
 ones as styles, colour, family and size as the run's own typography, and
-each safe-scheme link as a link run whatever else the block holds; the
+each link as a link run whatever else the block holds, its target
+verbatim whatever the scheme (an extractor does not decide what is safe to
+follow; marks and inline nodes with no mapping keep their text and warn
+`WARNING_CODE_UNMAPPED_CONSTRUCT`); the
 block-level `hyperlink` still means "the whole block is one link"), bullet
 / ordered / check lists (checkbox
 in `role`; BoxNote writes no markers so `marker` stays absent), code

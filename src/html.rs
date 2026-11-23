@@ -73,6 +73,34 @@ use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 use crate::table_spans::{Asked, SpanTracker};
 
+/// One aggregated `UNMAPPED_CONSTRUCT` per element name in
+/// [`SKIPPED_WITH_CONTENT`], counting the outermost such elements whose text
+/// is not blank. Elements nested inside one already counted are its text,
+/// not separate losses.
+fn report_skipped_content(html: &Html, emitter: &mut Emitter<'_>) {
+    let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut pending = vec![html.tree.root()];
+    while let Some(node) = pending.pop() {
+        if let Some(element) = ElementRef::wrap(node) {
+            let name = element.value().name().to_ascii_lowercase();
+            if SKIPPED_WITH_CONTENT.contains(&name.as_str()) {
+                if element.text().any(|run| !run.trim().is_empty()) {
+                    *counts.entry(name).or_default() += 1;
+                }
+                continue;
+            }
+        }
+        pending.extend(node.children());
+    }
+    for (name, count) in counts {
+        emitter.warn_n(
+            pb::WarningCode::UnmappedConstruct,
+            &format!("HTML <{name}> text is not mapped and was left out"),
+            count,
+        );
+    }
+}
+
 /// Elements whose entire subtree is dropped: executable, presentational or
 /// interactive machinery whose text is not document content. `svg`,
 /// `object` and `embed` are not here because each can place a picture; the
@@ -81,6 +109,14 @@ const SKIPPED: &[&str] = &[
     "script", "style", "noscript", "template", "iframe", "canvas", "audio", "video", "source",
     "track", "input", "select", "option", "optgroup", "textarea", "button", "datalist", "map",
     "area", "base", "link", "meta", "title", "head",
+];
+
+/// The [`SKIPPED`] elements whose text can be document content: a page's
+/// readable body in `noscript`, a form's typed answers and choices, a media
+/// element's fallback prose. Their text is not mapped, so a parse that met
+/// one with text says so rather than returning a quietly thinner Document.
+const SKIPPED_WITH_CONTENT: &[&str] = &[
+    "noscript", "textarea", "option", "button", "datalist", "video", "audio", "canvas", "iframe",
 ];
 
 /// Inline elements whose text flows into the enclosing block unchanged.
@@ -126,6 +162,8 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         &format!("elements nested deeper than {MAX_ELEMENT_DEPTH} levels flattened to their text"),
         flattened,
     );
+
+    report_skipped_content(&html, emitter);
 
     // The tree builder's own error list is the only source of
     // MALFORMED_STRUCTURE: these are repairs html5ever actually made. Two

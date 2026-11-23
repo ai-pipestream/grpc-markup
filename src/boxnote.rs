@@ -9,11 +9,16 @@
 //! - `heading` collapses its inline runs; the first level-1 heading is the
 //!   title, deeper ones are section headers at their level.
 //! - `paragraph` flattens to one block; a paragraph that is entirely one
-//!   link (of a safe scheme) carries `hyperlink`, and every mark on every
+//!   link carries `hyperlink`, and every mark on every
 //!   run leaves an `InlineSpan`: bold, italic, underline, strikethrough,
 //!   code, highlight, sub and superscript as styles, text colour, font
 //!   family and font size as the run's own typography, and each link as a
-//!   link run whether or not the block holds anything else.
+//!   link run whether or not the block holds anything else. A link keeps
+//!   its target verbatim whatever the scheme: relative, `tel:` and
+//!   Box-internal targets are data, and deciding what is safe to follow is
+//!   the renderer's job, not the extractor's. A mark or an inline node with
+//!   no mapping keeps its text and gets an aggregated
+//!   `WARNING_CODE_UNMAPPED_CONSTRUCT` naming it.
 //! - `bullet_list` / `ordered_list` / `check_list` yield one
 //!   `BLOCK_LABEL_LIST_ITEM` per item, `enumerated` for ordered lists,
 //!   nesting depth tracked; BoxNote writes no markers, so `marker` stays
@@ -39,10 +44,6 @@ use crate::parse::{Block, Emitter, Image, ParseError, Table};
 use crate::proto::v1 as pb;
 use crate::spans::{Inline, Mark};
 use crate::table_spans::{Asked, SpanTracker};
-
-/// Link schemes kept as hyperlinks. A stray `javascript:` or a bare string
-/// is dropped rather than mis-read as a link.
-const SAFE_LINK_SCHEMES: [&str; 3] = ["http://", "https://", "mailto:"];
 
 /// Map one Box Note.
 ///
@@ -120,6 +121,33 @@ impl Walk<'_, '_> {
         self.emitter.text_block(block)
     }
 
+    /// [`collapse`], with whatever it could not map reported.
+    fn collapse(&mut self, nodes: &[Value]) -> Collapsed {
+        let mut unmapped = Vec::new();
+        let collapsed = collapse(nodes, &mut unmapped);
+        self.report_unmapped(&unmapped);
+        collapsed
+    }
+
+    /// [`cell_text`], with whatever it could not map reported.
+    fn cell_text(&mut self, blocks: &[Value]) -> (String, Vec<pb::InlineSpan>) {
+        let mut unmapped = Vec::new();
+        let cell = cell_text(blocks, &mut unmapped);
+        self.report_unmapped(&unmapped);
+        cell
+    }
+
+    /// One aggregated warning per inline construct the fold had no mapping
+    /// for; the text it covered was kept.
+    fn report_unmapped(&mut self, unmapped: &[String]) {
+        for construct in unmapped {
+            self.emitter.warn(
+                pb::WarningCode::UnmappedConstruct,
+                &format!("BoxNote {construct} has no mapping; its text was kept"),
+            );
+        }
+    }
+
     /// Map a run of sibling block nodes. `list_depth` is how many lists are
     /// open above them, 0 outside any list.
     fn blocks(&mut self, nodes: &[Value], list_depth: u32) -> Result<(), ParseError> {
@@ -167,7 +195,7 @@ impl Walk<'_, '_> {
     }
 
     fn heading(&mut self, node: &serde_json::Map<String, Value>) -> Result<(), ParseError> {
-        let (text, spans, hyperlink) = collapse(content(node));
+        let (text, spans, hyperlink) = self.collapse(content(node));
         if text.is_empty() {
             return Ok(());
         }
@@ -195,7 +223,7 @@ impl Walk<'_, '_> {
     }
 
     fn paragraph(&mut self, node: &serde_json::Map<String, Value>) -> Result<(), ParseError> {
-        let (text, spans, hyperlink) = collapse(content(node));
+        let (text, spans, hyperlink) = self.collapse(content(node));
         if text.is_empty() {
             return Ok(());
         }
@@ -257,7 +285,7 @@ impl Walk<'_, '_> {
                 text.is_empty() && child.get("type").and_then(Value::as_str) == Some("paragraph");
             if is_leading_paragraph {
                 let child_content = child.as_object().map_or(&[][..], |node| content(node));
-                (text, spans, hyperlink) = collapse(child_content);
+                (text, spans, hyperlink) = self.collapse(child_content);
             } else {
                 nested.push(child);
             }
@@ -351,7 +379,7 @@ impl Walk<'_, '_> {
                 });
                 let is_header = cell_type == "table_header";
                 all_headers &= is_header;
-                let (text, spans) = cell_text(content(cell));
+                let (text, spans) = self.cell_text(content(cell));
                 cells.push(pb::TableCell {
                     column_index: placed.column,
                     text,
@@ -403,16 +431,18 @@ impl Walk<'_, '_> {
 /// its bold. Every mark now leaves a run, and `hyperlink` keeps its old
 /// meaning, "this whole block is one link", which is a question about the
 /// block rather than about the runs.
-fn collapse(nodes: &[Value]) -> Collapsed {
+fn collapse(nodes: &[Value], unmapped: &mut Vec<String>) -> Collapsed {
     let mut inline = Inline::default();
-    collapse_into(nodes, &mut inline);
+    collapse_into(nodes, &mut inline, unmapped);
     let hyperlink = inline.hyperlink();
     let (text, spans) = inline.take();
     (text, spans, hyperlink)
 }
 
 /// Everything one text node's marks say about the run they cover.
-fn run_mark(node: &serde_json::Map<String, Value>) -> Mark {
+///
+/// A mark this fold has no mapping for is named in `unmapped`.
+fn run_mark(node: &serde_json::Map<String, Value>, unmapped: &mut Vec<String>) -> Mark {
     let mut mark = Mark::default();
     let Some(marks) = node.get("marks").and_then(Value::as_array) else {
         return mark;
@@ -452,17 +482,14 @@ fn run_mark(node: &serde_json::Map<String, Value>) -> Mark {
                     .and_then(|size| size.trim_end_matches("pt").trim().parse().ok());
             }
             "link" => {
-                if let Some(href) = attr("href").filter(|href| {
-                    let lower = href.to_ascii_lowercase();
-                    SAFE_LINK_SCHEMES
-                        .iter()
-                        .any(|scheme| lower.starts_with(scheme))
-                }) {
+                if let Some(href) = attr("href") {
                     mark.hyperlink = Some(href.to_owned());
                     mark.link_title = attr("title").map(str::to_owned);
+                } else {
+                    unmapped.push("link mark with no href".to_owned());
                 }
             }
-            _ => {}
+            other => unmapped.push(format!("mark `{other}`")),
         }
     }
     mark
@@ -487,11 +514,11 @@ fn plain_text(nodes: &[Value]) -> String {
 
 /// One table cell's flattened text and the runs inside it: the cell's
 /// blocks joined with single spaces, each block's own marks kept.
-fn cell_text(blocks: &[Value]) -> (String, Vec<pb::InlineSpan>) {
+fn cell_text(blocks: &[Value], unmapped: &mut Vec<String>) -> (String, Vec<pb::InlineSpan>) {
     let mut inline = Inline::default();
     for block in blocks.iter().filter_map(Value::as_object) {
         inline.space();
-        collapse_into(content(block), &mut inline);
+        collapse_into(content(block), &mut inline, unmapped);
     }
     inline.take()
 }
@@ -499,7 +526,10 @@ fn cell_text(blocks: &[Value]) -> (String, Vec<pb::InlineSpan>) {
 /// Flatten inline content into an existing flattener, so a cell's blocks
 /// share one offset space. A node that is neither text nor a break is a
 /// wrapper whose own content is what carries the text.
-fn collapse_into(nodes: &[Value], inline: &mut Inline) {
+///
+/// A mark or a childless inline node with no mapping is named in
+/// `unmapped`, so the caller can say what it could not read.
+fn collapse_into(nodes: &[Value], inline: &mut Inline, unmapped: &mut Vec<String>) {
     for node in nodes {
         let Some(node) = node.as_object() else {
             continue;
@@ -510,7 +540,7 @@ fn collapse_into(nodes: &[Value], inline: &mut Inline) {
                 if text.is_empty() {
                     continue;
                 }
-                let mark = run_mark(node);
+                let mark = run_mark(node, unmapped);
                 if mark.hyperlink.is_some() {
                     inline.open_link_mark(mark);
                     inline.push(text);
@@ -524,7 +554,14 @@ fn collapse_into(nodes: &[Value], inline: &mut Inline) {
             Some("hard_break") => inline.space(),
             // A cell holds blocks; their inline content is what carries
             // the text.
-            _ => collapse_into(content(node), inline),
+            other => {
+                let children = content(node);
+                if children.is_empty() {
+                    unmapped.push(format!("inline node `{}`", other.unwrap_or("(no type)")));
+                } else {
+                    collapse_into(children, inline, unmapped);
+                }
+            }
         }
     }
 }
@@ -548,7 +585,7 @@ mod tests {
             {"type": "text", "text": "Box docs",
              "marks": [{"type": "link", "attrs": {"href": "https://box.com"}}]}
         ]);
-        let (text, spans, link) = collapse(single.as_array().unwrap());
+        let (text, spans, link) = collapse(single.as_array().unwrap(), &mut Vec::new());
         assert_eq!(text, "Box docs");
         assert_eq!(link.as_deref(), Some("https://box.com"));
         assert_eq!(spans[0].hyperlink.as_deref(), Some("https://box.com"));
@@ -558,7 +595,7 @@ mod tests {
             {"type": "text", "text": "docs",
              "marks": [{"type": "link", "attrs": {"href": "https://box.com"}}]}
         ]);
-        let (text, spans, link) = collapse(mixed.as_array().unwrap());
+        let (text, spans, link) = collapse(mixed.as_array().unwrap(), &mut Vec::new());
         assert_eq!(text, "see docs");
         assert!(link.is_none(), "the block is not one link");
         assert_eq!(
@@ -579,7 +616,7 @@ mod tests {
                        {"type": "font_color", "attrs": {"color": "#ff0000"}},
                        {"type": "font_size", "attrs": {"size": "14pt"}}]}
         ]);
-        let (text, spans, _) = collapse(nodes.as_array().unwrap());
+        let (text, spans, _) = collapse(nodes.as_array().unwrap(), &mut Vec::new());
         assert_eq!(text, "café prêt");
         assert_eq!(covered(&text, &spans[0]), "café");
         assert_eq!(
@@ -598,14 +635,18 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_link_schemes_are_dropped() {
+    fn a_link_keeps_its_target_verbatim_whatever_the_scheme() {
+        // An extractor is not a renderer: the consumer decides what is safe
+        // to follow, and it cannot decide about a target it never sees.
         let node = serde_json::json!([
             {"type": "text", "text": "x",
              "marks": [{"type": "link", "attrs": {"href": "javascript:alert(1)"}}]}
         ]);
-        let (_, spans, link) = collapse(node.as_array().unwrap());
-        assert!(link.is_none());
-        assert!(spans.is_empty(), "and it is not smuggled in as a run");
+        let mut unmapped = Vec::new();
+        let (_, spans, link) = collapse(node.as_array().unwrap(), &mut unmapped);
+        assert_eq!(link.as_deref(), Some("javascript:alert(1)"));
+        assert_eq!(spans.len(), 1);
+        assert!(unmapped.is_empty(), "{unmapped:?}");
     }
 
     #[test]
@@ -615,7 +656,7 @@ mod tests {
             {"type": "hard_break"},
             {"type": "text", "text": "b"}
         ]);
-        let (text, _, _) = collapse(nodes.as_array().unwrap());
+        let (text, _, _) = collapse(nodes.as_array().unwrap(), &mut Vec::new());
         assert_eq!(text, "a b");
         assert_eq!(plain_text(nodes.as_array().unwrap()), "a\nb");
     }
