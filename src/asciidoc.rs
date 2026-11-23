@@ -85,6 +85,7 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         pending_anchor: None,
         in_table: false,
         table_row_index: 0,
+        open_row: None,
         listing: None,
     };
     for (index, line) in lines.iter().enumerate() {
@@ -204,6 +205,25 @@ fn table_row(line: &str) -> Option<(Option<CellSpec>, &str)> {
         Some(parse_cell_spec(head)?)
     };
     Some((lead, &line[pipe + 1..]))
+}
+
+/// Append a continuation line to a cell, a space apart. A style run that
+/// reached the end of the cell's text reaches the end of the continuation
+/// too: the specifier styled the whole cell, not its first line.
+fn continue_cell(cell: &mut pb::TableCell, text: &str) {
+    let before = u32::try_from(cell.text.chars().count()).unwrap_or(u32::MAX);
+    if !cell.text.is_empty() {
+        cell.text.push(' ');
+    }
+    cell.text.push_str(text);
+    let after = u32::try_from(cell.text.chars().count()).unwrap_or(u32::MAX);
+    for span in &mut cell.spans {
+        if let Some(range) = span.range.as_mut()
+            && range.end == before
+        {
+            range.end = after;
+        }
+    }
 }
 
 /// The id an anchor line declares, when the whole line is one anchor.
@@ -440,6 +460,9 @@ struct Walk<'w, 'e> {
     pending_anchor: Option<String>,
     in_table: bool,
     table_row_index: u32,
+    /// The row read last, held until the next row or the end of the table:
+    /// a cell runs until the next `|`, so a line with none continues it.
+    open_row: Option<(bool, Vec<pb::TableCell>)>,
     listing: Option<Listing>,
 }
 
@@ -479,6 +502,7 @@ impl Walk<'_, '_> {
         if line.trim() == "|===" {
             self.flush_paragraph()?;
             if self.in_table {
+                self.flush_row()?;
                 self.in_table = false;
                 return self.emitter.table_end();
             }
@@ -494,13 +518,30 @@ impl Walk<'_, '_> {
         }
         if self.in_table {
             if let Some((lead, row)) = table_row(line) {
+                self.flush_row()?;
                 let is_header = self.table_row_index == 0;
                 let cells = self.row_cells(lead, row, is_header);
                 self.table_row_index += 1;
-                return self.emitter.table_row(is_header, cells);
+                self.open_row = Some((is_header, cells));
+                return Ok(());
             }
-            // Blank separators and stray prose between rows are layout,
-            // not cells.
+            let text = line.trim();
+            if text.is_empty() {
+                // A blank line between rows is layout.
+                return Ok(());
+            }
+            // A line with no `|` continues the cell before it.
+            match self
+                .open_row
+                .as_mut()
+                .and_then(|(_, cells)| cells.last_mut())
+            {
+                Some(cell) => continue_cell(cell, text),
+                None => self.emitter.warn(
+                    pb::WarningCode::MalformedStructure,
+                    "text inside a |=== table before its first cell was dropped",
+                ),
+            }
             return Ok(());
         }
 
@@ -600,6 +641,14 @@ impl Walk<'_, '_> {
         }
         self.paragraph.push(line.trim().to_owned());
         Ok(())
+    }
+
+    /// Send the row held open for continuation lines, if there is one.
+    fn flush_row(&mut self) -> Result<(), ParseError> {
+        match self.open_row.take() {
+            Some((is_header, cells)) => self.emitter.table_row(is_header, cells),
+            None => Ok(()),
+        }
     }
 
     /// One `|`-delimited row as cells, with each cell's specifier honoured
@@ -721,6 +770,7 @@ impl Walk<'_, '_> {
             self.emit_listing(listing)?;
         }
         if self.in_table {
+            self.flush_row()?;
             self.emitter.warn(
                 pb::WarningCode::MalformedStructure,
                 "a |=== table was not closed",

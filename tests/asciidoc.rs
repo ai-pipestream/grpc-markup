@@ -440,3 +440,36 @@ async fn a_no_break_space_inside_a_cell_is_text_and_not_a_specifier_boundary() {
     assert_eq!(rows[1].cells[0].text, "Ada Lovelace");
     assert_eq!(rows[1].cells[1].text, "Analyste");
 }
+
+#[tokio::test]
+async fn cell_text_that_continues_on_the_next_line_stays_in_its_cell() {
+    // An AsciiDoc cell runs until the next `|`, so a line with no `|` inside
+    // a table continues the cell before it. Every such line was dropped.
+    let document = "|===\n|Name |Role\n|Ada |First programmer,\nworked with Babbage\n\n|Grace |Compilers\n|===\n";
+    let client = client().await;
+    let events = parse_ok(&client, document, options(pb::MarkupFormat::Asciidoc)).await;
+    let rows: Vec<Vec<&str>> = table_rows(&events)
+        .iter()
+        .map(|row| row.cells.iter().map(|c| c.text.as_str()).collect())
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            vec!["Name", "Role"],
+            vec!["Ada", "First programmer, worked with Babbage"],
+            vec!["Grace", "Compilers"],
+        ]
+    );
+}
+
+#[tokio::test]
+async fn text_in_a_table_before_any_cell_is_reported() {
+    let document = "|===\nstray words\n|A |B\n|===\n";
+    let client = client().await;
+    let events = parse_ok(&client, document, options(pb::MarkupFormat::Asciidoc)).await;
+    assert!(
+        warning(&events, pb::WarningCode::MalformedStructure).is_some(),
+        "{:?}",
+        status(&events).warnings
+    );
+}
