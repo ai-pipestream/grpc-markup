@@ -219,9 +219,25 @@ macros are deliberately not expanded (textual `#N` substitution would be
 guessing at the author's intent). Also
 deliberate: theorem lead-ins are plain text with a `role`, never
 markdown-in-a-string; `\bibliography{file}` is consumed
-silently rather than leaking its filename as text; accent macros drop the
-accent and keep the base letter; no `source_line` (the reader is not
-line-oriented and inventing lines would be guessing).
+silently rather than leaking its filename as text; no `source_line` (the
+reader is not line-oriented and inventing lines would be guessing).
+
+Accent macros produce the accented letter: `\"o`, `\c{c}` and `\'{\i}` are
+`ö`, `ç` and `í`, composed to the single code point Unicode has for the pair
+and left as base plus combining mark where it has none (`\b{o}`). An accent
+over an empty group is the accent character itself, which is how LaTeX writes
+`~` and `^` in text. The kernel's symbol macros (`\ss`, `\ae`, `\o`, `\l`,
+`\S`, `\copyright`, `\ldots`, the `\text...` signs) map to their characters,
+and the blanks after one are skipped as TeX skips them, so `stra\ss e` is
+`straße`. A name the document redefines keeps the document's meaning. Inside
+`tabbing`, `\=`, `\'` and `` \` `` are tab stops and read as word breaks.
+
+Any other macro the reader has no mapping for keeps its argument text and
+loses its command, and the trailer names it: one aggregated
+`WARNING_CODE_UNMAPPED_CONSTRUCT` per macro name with the number of uses, for
+the first 32 distinct names, and one more that counts the uses of every name
+past those and of any name longer than 64 characters. Before this, such a macro vanished without a trace, accents
+included.
 
 ### 4.5 WebVTT (hand-written parser)
 

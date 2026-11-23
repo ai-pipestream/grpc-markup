@@ -315,6 +315,43 @@ async fn unknown_environments_descend_with_one_aggregated_warning() {
 }
 
 #[tokio::test]
+async fn accents_and_symbols_reach_the_text_and_unknown_macros_are_named() {
+    let client = client().await;
+    let latex = "\\begin{document}\n\
+                 Kurt G\\\"odel met Fran\\c{c}ois in a caf\\'e on Stra\\ss e 5\\mystery{}.\n\n\
+                 Again\\mystery{} and \\other{kept}.\n\
+                 \\end{document}\n";
+    let events = parse_ok(&client, latex, options(pb::MarkupFormat::Latex)).await;
+    let paragraphs = blocks_labelled(&events, pb::BlockLabel::Paragraph);
+    assert_eq!(
+        texts(&paragraphs),
+        [
+            "Kurt Gödel met François in a café on Straße 5.",
+            "Again and kept."
+        ]
+    );
+    let unmapped: Vec<_> = status(&events)
+        .warnings
+        .iter()
+        .filter(|w| w.code == pb::WarningCode::UnmappedConstruct as i32)
+        .map(|w| (w.message.as_str(), w.count))
+        .collect();
+    assert_eq!(
+        unmapped,
+        [
+            (
+                "macro `\\mystery` has no mapping; the command was dropped and its argument text kept",
+                2
+            ),
+            (
+                "macro `\\other` has no mapping; the command was dropped and its argument text kept",
+                1
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn theorems_and_bibliographies_map_as_docling_maps_them() {
     let client = client().await;
     let latex = "\\begin{theorem}Numbers exist.\\end{theorem}\n\n\
