@@ -307,6 +307,28 @@ fn a_self_referencing_newcommand_expands_once_not_exponentially() {
 }
 
 #[test]
+fn a_newcommand_that_uses_itself_inside_a_link_or_citation_expands_once() {
+    // `\url`, `\cite` and `\href` flattened their argument from depth
+    // zero again, so a definition that used itself inside one expanded
+    // without end: a 30-byte definition overflowed the 2 MiB stack and
+    // aborted the process, taking every in-flight parse with it.
+    for body in [
+        "x\\url{\\loop}",
+        "x\\cite{\\loop}",
+        "x\\href{\\loop}{\\loop}",
+    ] {
+        let document = format!(
+            "\\newcommand{{\\loop}}{{{body}}}\n\\begin{{document}}\nBefore \\loop after.\n\\end{{document}}\n"
+        );
+        let outcome = hostile(Format::Latex, document);
+        outcome.within(Duration::from_secs(5));
+        let text = outcome.text();
+        assert!(text.contains("Before"), "{body}: {text}");
+        assert!(text.contains("after."), "{body}: {text}");
+    }
+}
+
+#[test]
 fn newcommand_expansion_stops_at_its_budget() {
     // A 1 KiB definition used a hundred thousand times is 100 MiB of text
     // from 300 KiB of source; the budget stops it at a multiple of the
