@@ -55,9 +55,16 @@
 //!
 //! Zero-argument `\newcommand` macros are expanded, one level;
 //! parameterized custom macros are not (see `docs/design.md`).
+//!
+//! Accent macros (`\"o`, `\c{c}`) become the accented letter, composed
+//! to one code point where Unicode has one, and the symbol macros of the
+//! LaTeX kernel (`\ss`, `\o`, `\S`, `\ldots`) become their characters.
+//! A macro the reader has no mapping for keeps its argument text, loses
+//! its command, and is named in one aggregated
+//! `WARNING_CODE_UNMAPPED_CONSTRUCT` per macro name.
 
-use std::cell::Cell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::parse::{Block, Cancel, Emitter, Image, ParseError, Table};
 use crate::proto::v1 as pb;
@@ -124,6 +131,187 @@ fn citation_kind(name: &str) -> Option<pb::ReferenceKind> {
 
 /// Escaped characters that are their own macro name.
 const ESCAPED: &[&str] = &["&", "%", "$", "#", "_", "{", "}"];
+
+/// One accent macro: the combining mark it puts on its base letter, the
+/// character it is with no base (`\~{}` is how LaTeX writes a tilde), and
+/// whether it sits above the letter, where it replaces the dot of a
+/// dotless `\i` or `\j`.
+struct Accent {
+    name: &'static str,
+    combining: char,
+    alone: Option<char>,
+    above: bool,
+}
+
+/// The accent macros of the LaTeX kernel.
+const ACCENTS: &[Accent] = &[
+    accent("`", '\u{300}', Some('`'), true),
+    accent("'", '\u{301}', Some('´'), true),
+    accent("^", '\u{302}', Some('^'), true),
+    accent("~", '\u{303}', Some('~'), true),
+    accent("\"", '\u{308}', Some('¨'), true),
+    accent("=", '\u{304}', Some('¯'), true),
+    accent(".", '\u{307}', Some('˙'), true),
+    accent("u", '\u{306}', Some('˘'), true),
+    accent("v", '\u{30c}', Some('ˇ'), true),
+    accent("H", '\u{30b}', Some('˝'), true),
+    accent("r", '\u{30a}', Some('˚'), true),
+    accent("c", '\u{327}', Some('¸'), false),
+    accent("k", '\u{328}', Some('˛'), false),
+    accent("d", '\u{323}', None, false),
+    accent("b", '\u{331}', None, false),
+    accent("t", '\u{361}', None, false),
+];
+
+const fn accent(name: &'static str, combining: char, alone: Option<char>, above: bool) -> Accent {
+    Accent {
+        name,
+        combining,
+        alone,
+        above,
+    }
+}
+
+/// The accent a macro name is, when it is one.
+fn accent_named(name: &str) -> Option<&'static Accent> {
+    ACCENTS.iter().find(|accent| accent.name == name)
+}
+
+/// `base` with `accent` on its first letter, composed to the single code
+/// point Unicode has for the pair when it has one.
+fn accented(accent: &Accent, base: &str) -> String {
+    let mut rest = base.chars();
+    let Some(first) = rest.next() else {
+        return accent.alone.map(String::from).unwrap_or_default();
+    };
+    let first = match first {
+        'ı' if accent.above => 'i',
+        'ȷ' if accent.above => 'j',
+        other => other,
+    };
+    let mut out = String::with_capacity(base.len() + accent.combining.len_utf8());
+    match unicode_normalization::char::compose(first, accent.combining) {
+        Some(composed) => out.push(composed),
+        None => {
+            out.push(first);
+            out.push(accent.combining);
+        }
+    }
+    out.push_str(rest.as_str());
+    out
+}
+
+/// Argument-less macros that stand for text: the letters and signs LaTeX
+/// spells as commands. Each maps to the characters it prints.
+const SYMBOLS: &[(&str, &str)] = &[
+    ("ss", "ß"),
+    ("SS", "SS"),
+    ("ae", "æ"),
+    ("AE", "Æ"),
+    ("oe", "œ"),
+    ("OE", "Œ"),
+    ("o", "ø"),
+    ("O", "Ø"),
+    ("aa", "å"),
+    ("AA", "Å"),
+    ("l", "ł"),
+    ("L", "Ł"),
+    ("i", "ı"),
+    ("j", "ȷ"),
+    ("dh", "ð"),
+    ("DH", "Ð"),
+    ("th", "þ"),
+    ("TH", "Þ"),
+    ("dj", "đ"),
+    ("DJ", "Đ"),
+    ("ng", "ŋ"),
+    ("NG", "Ŋ"),
+    ("S", "§"),
+    ("P", "¶"),
+    ("dag", "†"),
+    ("ddag", "‡"),
+    ("copyright", "©"),
+    ("pounds", "£"),
+    ("euro", "€"),
+    ("ldots", "…"),
+    ("dots", "…"),
+    ("slash", "/"),
+    ("LaTeX", "LaTeX"),
+    ("LaTeXe", "LaTeX2e"),
+    ("TeX", "TeX"),
+    ("textasciicircum", "^"),
+    ("textasciitilde", "~"),
+    ("textbackslash", "\\"),
+    ("textbar", "|"),
+    ("textbraceleft", "{"),
+    ("textbraceright", "}"),
+    ("textbullet", "•"),
+    ("textcopyright", "©"),
+    ("textdagger", "†"),
+    ("textdaggerdbl", "‡"),
+    ("textdegree", "°"),
+    ("textdollar", "$"),
+    ("textellipsis", "…"),
+    ("textemdash", "—"),
+    ("textendash", "–"),
+    ("texteuro", "€"),
+    ("textexclamdown", "¡"),
+    ("textgreater", ">"),
+    ("textless", "<"),
+    ("textparagraph", "¶"),
+    ("textperiodcentered", "·"),
+    ("textquestiondown", "¿"),
+    ("textquotedblleft", "“"),
+    ("textquotedblright", "”"),
+    ("textquoteleft", "‘"),
+    ("textquoteright", "’"),
+    ("textregistered", "®"),
+    ("textsection", "§"),
+    ("textsterling", "£"),
+    ("texttrademark", "™"),
+    ("textunderscore", "_"),
+    ("guillemotleft", "«"),
+    ("guillemotright", "»"),
+    ("guilsinglleft", "‹"),
+    ("guilsinglright", "›"),
+    ("quotedblbase", "„"),
+    ("quotesinglbase", "‚"),
+];
+
+/// The text a symbol macro prints, when the name is one.
+fn symbol(name: &str) -> Option<&'static str> {
+    SYMBOLS
+        .iter()
+        .find(|(symbol, _)| *symbol == name)
+        .map(|(_, text)| *text)
+}
+
+/// Macros that are horizontal space and nothing else; each reads as a
+/// word break. A backslash before a line end is TeX's control space.
+const SPACES: &[&str] = &[
+    ",",
+    ";",
+    ":",
+    "\n",
+    "\r",
+    "\t",
+    "quad",
+    "qquad",
+    "enspace",
+    "enskip",
+    "thinspace",
+    "space",
+    "nobreakspace",
+];
+
+/// Control symbols that print nothing and carry no text: the negative
+/// thin space, the discretionary hyphen, the italic correction, and the
+/// sentence-spacing marker.
+const INVISIBLE: &[&str] = &["!", "-", "/", "@"];
+
+/// The control symbols that set and use tab stops inside `tabbing`, where
+/// `\=`, `\'` and `` \` `` are not the accents they are everywhere else.
+const TAB_STOPS: &[char] = &['=', '>', '<', '\'', '`', '+', '-'];
 
 /// Environments whose whole body is one display formula.
 const MATH_ENVS: &[&str] = &[
@@ -210,6 +398,10 @@ const GREEDY_IGNORED: &[&str] = &[
     "phantom",
     "hphantom",
     "vphantom",
+    "linebreak",
+    "nolinebreak",
+    "pagebreak",
+    "nopagebreak",
 ];
 
 /// Bare macros silently discarded: spacing, layout, legacy formatting.
@@ -254,11 +446,24 @@ const BARE_IGNORED: &[&str] = &[
     "scriptsize",
     "footnotesize",
     "small",
+    "normalsize",
     "large",
     "Large",
     "LARGE",
     "huge",
     "Huge",
+    "relax",
+    "null",
+    "strut",
+    "indent",
+    "ignorespaces",
+    "allowbreak",
+    "sloppy",
+    "fussy",
+    "frenchspacing",
+    "nonfrenchspacing",
+    "hrulefill",
+    "dotfill",
 ];
 
 /// Map one LaTeX document.
@@ -287,14 +492,15 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
 
     // Zero-argument custom macros, expanded the way docling expands them.
     let mut definitions = HashMap::new();
-    collect_newcommands(text, &mut definitions);
-    let macros = Macros::new(definitions, text.len());
+    let mut opaque = HashSet::new();
+    collect_newcommands(text, &mut definitions, &mut opaque);
+    let macros = Macros::with_opaque(definitions, opaque, text.len());
 
     // Preamble metadata surfaces even though the preamble is skipped.
     let mut title = None;
     let mut author = None;
     let mut date = None;
-    scan_metadata(&nodes, &mut title, &mut author, &mut date);
+    scan_metadata(&nodes, &macros, &mut title, &mut author, &mut date);
 
     emitter.info(title.clone(), HashMap::new())?;
 
@@ -335,6 +541,26 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         pb::WarningCode::UnmappedConstruct,
         "\\newcommand expansion budget exhausted; later uses were left unexpanded",
         starved,
+    );
+    let unmapped = walk.macros.unmapped.take();
+    for (name, count) in &unmapped.names {
+        walk.emitter.warn_n(
+            pb::WarningCode::UnmappedConstruct,
+            &format!(
+                "macro `\\{}` has no mapping; the command was dropped and its argument text kept",
+                name.escape_debug()
+            ),
+            *count,
+        );
+    }
+    walk.emitter.warn_n(
+        pb::WarningCode::UnmappedConstruct,
+        &format!(
+            "other macros have no mapping (more than {MAX_UNMAPPED_NAMES} distinct names, or a \
+             name over {MAX_UNMAPPED_NAME_LEN} characters); the commands were dropped and their \
+             argument text kept"
+        ),
+        unmapped.others,
     );
     Ok(())
 }
@@ -435,6 +661,8 @@ struct Parser<'t> {
     at: usize,
     /// Groups and environments currently open.
     depth: usize,
+    /// `tabbing` environments currently open.
+    tabbing: usize,
     /// Groups and environments read as flat text because they sat deeper
     /// than [`MAX_NESTING`].
     flattened: u64,
@@ -462,6 +690,7 @@ impl<'t> Parser<'t> {
             text,
             at: 0,
             depth: 0,
+            tabbing: 0,
             flattened: 0,
             no_brace_from: usize::MAX,
             no_bracket_from: usize::MAX,
@@ -648,11 +877,25 @@ impl<'t> Parser<'t> {
             return match first {
                 '[' => Some(self.bracket_math("\\]", true)),
                 '(' => Some(self.bracket_math("\\)", false)),
-                _ => Some(Node::Macro {
-                    name: first.to_string(),
-                    opt: None,
-                    args: Vec::new(),
-                }),
+                // Inside `tabbing` these move between tab stops: a column
+                // boundary, read as the word break it is.
+                _ if self.tabbing > 0 && TAB_STOPS.contains(&first) => {
+                    Some(Node::Text(" ".to_owned()))
+                }
+                _ => {
+                    let name = first.to_string();
+                    // `\"o`: the base follows the accent directly.
+                    let args = if accent_named(&name).is_some() {
+                        self.accent_base()
+                    } else {
+                        Vec::new()
+                    };
+                    Some(Node::Macro {
+                        name,
+                        opt: None,
+                        args,
+                    })
+                }
             };
         }
 
@@ -678,6 +921,26 @@ impl<'t> Parser<'t> {
         }
 
         let base = name.trim_end_matches('*');
+        if accent_named(base).is_some() {
+            // `\c c` and `\c{c}`: TeX skips the blanks after a control
+            // word, then the base follows.
+            let saved = self.at;
+            self.skip_blanks();
+            let args = self.accent_base();
+            if args.is_empty() {
+                self.at = saved;
+            }
+            return Some(Node::Macro {
+                name: base.to_owned(),
+                opt: None,
+                args,
+            });
+        }
+        if symbol(base).is_some() {
+            // `stra\ss e` is "straße": the blanks after a control word
+            // end its name and are not text.
+            self.skip_blanks();
+        }
         let (opt, args) = match signature(base) {
             Sig::None => (None, Vec::new()),
             Sig::OptOnly => (self.take_opt(), Vec::new()),
@@ -773,7 +1036,10 @@ impl<'t> Parser<'t> {
         }
 
         self.depth += 1;
+        let tabbing = usize::from(base == "tabbing");
+        self.tabbing += tabbing;
         let body = self.nodes(Some(&name));
+        self.tabbing -= tabbing;
         self.depth -= 1;
         // Consume the terminator the recursive call stopped at.
         if self.text[self.at..].starts_with("\\end") {
@@ -841,6 +1107,60 @@ impl<'t> Parser<'t> {
             self.at += 1;
         }
     }
+
+    /// Skip what TeX skips after a control word: blanks, and one line end
+    /// with the next line's indent. A blank line is a paragraph break and
+    /// stays.
+    fn skip_blanks(&mut self) {
+        self.skip_ws();
+        let rest = &self.text[self.at..];
+        let Some(line) = rest
+            .strip_prefix("\r\n")
+            .or_else(|| rest.strip_prefix('\n'))
+        else {
+            return;
+        };
+        let next = line.trim_start_matches([' ', '\t']);
+        if next.is_empty() || next.starts_with(['\n', '\r']) {
+            return;
+        }
+        self.at = self.text.len() - next.len();
+    }
+
+    /// The base an accent macro sits on, as its one argument: a `{...}`
+    /// group, a dotless `\i` or `\j`, or the next letter or digit. Empty
+    /// when none of those follows.
+    fn accent_base(&mut self) -> Vec<Vec<Node>> {
+        let rest = &self.text[self.at..];
+        let mut chars = rest.chars();
+        match chars.next() {
+            Some('{') => {
+                self.at += 1;
+                vec![self.group()]
+            }
+            Some('\\') => {
+                let name = chars.as_str();
+                let letters = name.chars().take_while(char::is_ascii_alphabetic).count();
+                let dotless = &name[..letters];
+                if dotless == "i" || dotless == "j" {
+                    self.at += 1 + letters;
+                    self.skip_blanks();
+                    vec![vec![Node::Macro {
+                        name: dotless.to_owned(),
+                        opt: None,
+                        args: Vec::new(),
+                    }]]
+                } else {
+                    Vec::new()
+                }
+            }
+            Some(letter) if letter.is_alphanumeric() => {
+                self.at += letter.len_utf8();
+                vec![vec![Node::Text(letter.to_string())]]
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Close a pending text run into the node list.
@@ -878,6 +1198,7 @@ fn find_document(nodes: &[Node]) -> Option<&Vec<Node>> {
 /// `\title` / `\author` / `\date` before the document body begins.
 fn scan_metadata(
     nodes: &[Node],
+    macros: &Macros,
     title: &mut Option<String>,
     author: &mut Option<String>,
     date: &mut Option<String>,
@@ -895,7 +1216,7 @@ fn scan_metadata(
                 if slot.is_none()
                     && let Some(arg) = args.first()
                 {
-                    let text = flatten_nodes(arg, &Macros::default());
+                    let text = flatten_nodes(arg, macros);
                     if !text.is_empty() {
                         *slot = Some(text);
                     }
@@ -911,7 +1232,11 @@ fn scan_metadata(
 /// Collected from the source text rather than the node tree, because the
 /// parser already discarded newcommand arguments as preamble machinery.
 /// Parameterized macros (`[1]` and up) are deliberately not expanded.
-fn collect_newcommands(text: &str, macros: &mut HashMap<String, String>) {
+fn collect_newcommands(
+    text: &str,
+    macros: &mut HashMap<String, String>,
+    opaque: &mut HashSet<String>,
+) {
     for keyword in ["\\newcommand", "\\renewcommand", "\\providecommand"] {
         let mut rest = text;
         while let Some(hit) = rest.find(keyword) {
@@ -947,7 +1272,8 @@ fn collect_newcommands(text: &str, macros: &mut HashMap<String, String>) {
             let after = after.trim_start();
             if after.starts_with('[') {
                 // Parameterized: not expanded, matching the documented
-                // limit.
+                // limit. The name is still the author's.
+                opaque.insert(name.to_owned());
                 continue;
             }
             let Some(braced) = after.strip_prefix('{') else {
@@ -982,6 +1308,15 @@ fn collect_newcommands(text: &str, macros: &mut HashMap<String, String>) {
             rest = &braced[end + 1..];
         }
     }
+    // `\def\name` in any form: the reader expands none of them.
+    let mut rest = text;
+    while let Some(hit) = rest.find("\\def\\") {
+        rest = &rest[hit + "\\def\\".len()..];
+        let letters = rest.chars().take_while(char::is_ascii_alphabetic).count();
+        if letters > 0 {
+            opaque.insert(rest[..letters].to_owned());
+        }
+    }
 }
 
 // ----------------------------------------------------------- text flatten
@@ -1006,19 +1341,72 @@ struct Macros {
     budget: Cell<usize>,
     /// Uses left unexpanded because the budget ran out.
     starved: Cell<u64>,
+    /// Names the document defines in a form the reader does not expand
+    /// (a parameterized `\newcommand`, a `\def`). They are the author's
+    /// macros, so the kernel's meaning for the name no longer applies.
+    opaque: HashSet<String>,
+    /// Macros flattened with no mapping, by name.
+    unmapped: RefCell<Unmapped>,
+}
+
+/// How many distinct unmapped macro names one parse reports by name.
+///
+/// A hostile document can mint a name per use; past this many the rest
+/// are counted together, so the tally stays bounded and nothing goes
+/// uncounted.
+const MAX_UNMAPPED_NAMES: usize = 32;
+
+/// The longest macro name reported by name; a longer one is counted with
+/// the rest, so a megabyte of letters after a backslash cannot become a
+/// megabyte of warning text.
+const MAX_UNMAPPED_NAME_LEN: usize = 64;
+
+/// Macros that flattened to nothing because the reader has no mapping for
+/// them: the command is gone from the text, so the trailer says which.
+#[derive(Default)]
+struct Unmapped {
+    /// Uses by macro name, for the first [`MAX_UNMAPPED_NAMES`] names.
+    names: BTreeMap<String, u64>,
+    /// Uses of every name past the bound, and of names too long to print.
+    others: u64,
+}
+
+impl Unmapped {
+    fn record(&mut self, name: &str) {
+        if name.len() > MAX_UNMAPPED_NAME_LEN {
+            self.others += 1;
+        } else if let Some(count) = self.names.get_mut(name) {
+            *count += 1;
+        } else if self.names.len() < MAX_UNMAPPED_NAMES {
+            self.names.insert(name.to_owned(), 1);
+        } else {
+            self.others += 1;
+        }
+    }
 }
 
 impl Macros {
-    fn new(defs: HashMap<String, String>, input_len: usize) -> Self {
+    fn with_opaque(
+        defs: HashMap<String, String>,
+        opaque: HashSet<String>,
+        input_len: usize,
+    ) -> Self {
         Self {
             defs,
+            opaque,
             budget: Cell::new(
                 input_len
                     .saturating_mul(EXPANSION_BUDGET_PER_BYTE)
                     .max(MIN_EXPANSION_BUDGET),
             ),
             starved: Cell::new(0),
+            unmapped: RefCell::default(),
         }
+    }
+
+    /// True when the document itself defines `name`.
+    fn defines(&self, name: &str) -> bool {
+        self.defs.contains_key(name) || self.opaque.contains(name)
     }
 
     /// Draw `cost` bytes from the budget; false (and counted) when it is
@@ -1072,8 +1460,38 @@ fn flatten_macro(
         out.push(name);
         return;
     }
+    // The document's own definition of a name comes before the kernel's.
+    if !macros.defines(name) {
+        if let Some(accent) = accent_named(name) {
+            match args.first() {
+                Some(base) => {
+                    // The same depth, so a definition that uses itself
+                    // under an accent still expands one level only.
+                    let mut letter = Inline::default();
+                    flatten_into(base, macros, depth, &mut letter);
+                    out.push(&accented(accent, &letter.take().0));
+                }
+                // No base to sit on: nothing prints. A bare `\~` stays
+                // the word break it has always read as.
+                None if name == "~" => out.space(),
+                None => {}
+            }
+            return;
+        }
+        if let Some(text) = symbol(name) {
+            out.push(text);
+            return;
+        }
+    }
+    if SPACES.contains(&name) {
+        out.space();
+        return;
+    }
+    if INVISIBLE.contains(&name) {
+        return;
+    }
     match name {
-        "~" | " " | "\\" => out.space(),
+        " " | "\\" => out.space(),
         _ if is_text_wrapper(name) => {
             if let Some(arg) = args.first() {
                 match wrapper_mark(name) {
@@ -1149,13 +1567,22 @@ fn flatten_macro(
                     let expanded = Parser::new(definition).nodes(None);
                     flatten_into(&expanded, macros, depth + 1, out);
                 }
+                // What the reader took for an accent's base is ordinary
+                // text after a redefined `\d` or `\c`.
+                for arg in args {
+                    flatten_into(arg, macros, depth, out);
+                }
                 return;
             }
             // Unknown macro: its argument text survives, the command
-            // itself does not.
+            // itself does not, and the trailer says so by name.
+            macros.unmapped.borrow_mut().record(name);
+            let accent_base = accent_named(name).is_some();
             for arg in args {
                 flatten_into(arg, macros, depth, out);
-                out.space();
+                if !accent_base {
+                    out.space();
+                }
             }
         }
     }
@@ -2022,6 +2449,158 @@ mod tests {
         assert_eq!(flat("50\\% \\& \\$5"), "50% & $5");
     }
 
+    #[test]
+    fn accent_macros_compose_the_accented_letter() {
+        assert_eq!(flat("Kurt G\\\"odel"), "Kurt Gödel");
+        assert_eq!(flat("Fran\\c{c}ois Caf\\'e"), "François Café");
+        assert_eq!(flat("Fran\\c cois"), "François");
+        assert_eq!(flat("\\`a \\^{o} \\~n \\=a \\.z"), "à ô ñ ā ż");
+        assert_eq!(
+            flat("\\v{s} \\u{g} \\H{o} \\k{a} \\r{a} \\d{o}"),
+            "š ğ ő ą å ọ"
+        );
+        assert_eq!(flat("{\\\"u}ber \\\"Uber \\'Etat"), "über Über État");
+        // Two accents stack, innermost first.
+        assert_eq!(flat("\\'{\\^a}"), "ấ");
+        // No precomposed letter exists: the base keeps its combining mark.
+        assert_eq!(flat("\\b{o}"), "o\u{331}");
+        assert_eq!(flat("\\t{oo}"), "o\u{361}o");
+    }
+
+    #[test]
+    fn accents_take_the_dotless_letters_as_their_base() {
+        assert_eq!(flat("na\\\"{\\i}ve \\'{\\i} \\^\\j"), "naïve í ĵ");
+        // Below the letter the dot stays where it was.
+        assert_eq!(flat("\\d{\\i}"), "ı\u{323}");
+        assert_eq!(flat("\\i\\ and \\j"), "ı and ȷ");
+    }
+
+    #[test]
+    fn an_accent_over_nothing_is_the_accent_character() {
+        assert_eq!(flat("a\\~{}b x\\^{}2"), "a~b x^2");
+        assert_eq!(flat("\\c{}"), "¸");
+    }
+
+    #[test]
+    fn symbol_macros_map_to_their_characters() {
+        // TeX swallows the blanks after a control word.
+        assert_eq!(flat("stra\\ss e"), "straße");
+        assert_eq!(
+            flat("\\AA ngstr\\\"om, S\\o ren, \\L\\'od\\'z"),
+            "Ångström, Søren, Łódź"
+        );
+        assert_eq!(
+            flat("\\oe uvre \\ae on, \\S 4, \\copyright\\ 2024, \\pounds 5"),
+            "œuvre æon, §4, © 2024, £5"
+        );
+        assert_eq!(
+            flat("wait\\ldots{} \\LaTeX{} and \\TeX"),
+            "wait… LaTeX and TeX"
+        );
+        assert_eq!(
+            flat("pages 3\\textendash 5\\textemdash see 5\\,km"),
+            "pages 3–5—see 5 km"
+        );
+        assert_eq!(flat("re\\-flow it\\/ now"), "reflow it now");
+    }
+
+    #[test]
+    fn a_symbol_macro_does_not_swallow_a_paragraph_break() {
+        let nodes = Parser::new("stra\\ss\n\nnext").nodes(None);
+        assert!(
+            matches!(nodes.last(), Some(Node::Text(text)) if text.starts_with("\n\n")),
+            "{nodes:?}"
+        );
+        assert_eq!(flat("stra\\ss\n  e"), "straße");
+    }
+
+    #[test]
+    fn tab_stops_in_a_tabbing_environment_are_not_accents() {
+        assert_eq!(
+            flat("\\begin{tabbing}Name\\=Value\\\\ A\\>B\\'C\\end{tabbing} \\=a"),
+            "Name Value A B C ā"
+        );
+    }
+
+    #[test]
+    fn a_user_definition_wins_over_a_built_in_symbol() {
+        let mut defs = HashMap::new();
+        defs.insert("S".to_owned(), "Symmetric".to_owned());
+        let macros = Macros::with_opaque(defs, HashSet::new(), 64);
+        let nodes = Parser::new("the \\S{} group").nodes(None);
+        assert_eq!(flatten_nodes(&nodes, &macros), "the Symmetric group");
+    }
+
+    #[test]
+    fn a_redefined_accent_letter_is_the_authors_macro_not_an_accent() {
+        let source = "\\newcommand{\\v}[1]{\\mathbf{#1}} \\def\\d{d} the vector \\v{x} over \\d t";
+        let mut defs = HashMap::new();
+        let mut opaque = HashSet::new();
+        collect_newcommands(source, &mut defs, &mut opaque);
+        let macros = Macros::with_opaque(defs, opaque, source.len());
+        let nodes = Parser::new("the vector \\v{x} over \\d t").nodes(None);
+        assert_eq!(flatten_nodes(&nodes, &macros), "the vector x over t");
+        let unmapped = macros.unmapped.borrow();
+        assert_eq!(unmapped.names.get("v"), Some(&1));
+        assert_eq!(unmapped.names.get("d"), Some(&1));
+    }
+
+    #[test]
+    fn a_definition_that_uses_itself_under_an_accent_expands_once() {
+        let source = "\\newcommand{\\loop}{x\\'{\\loop}}";
+        let mut defs = HashMap::new();
+        collect_newcommands(source, &mut defs, &mut HashSet::new());
+        let macros = Macros::with_opaque(defs, HashSet::new(), 1 << 20);
+        let nodes = Parser::new("\\loop").nodes(None);
+        // The inner use is not expanded again, so the accent has no base.
+        assert_eq!(flatten_nodes(&nodes, &macros), "x´");
+    }
+
+    #[test]
+    fn unmapped_macros_are_counted_by_name() {
+        let macros = Macros::default();
+        let nodes = Parser::new("A\\foo{} B\\foo{} C\\baz{x} G\\\"odel \\noindent").nodes(None);
+        assert_eq!(flatten_nodes(&nodes, &macros), "A B Cx Gödel");
+        let unmapped = macros.unmapped.borrow();
+        assert_eq!(unmapped.names.get("foo"), Some(&2));
+        assert_eq!(unmapped.names.get("baz"), Some(&1));
+        assert_eq!(unmapped.names.len(), 2, "{:?}", unmapped.names);
+    }
+
+    #[test]
+    fn unmapped_macro_names_are_bounded() {
+        let macros = Macros::default();
+        let source: String = (0..200).map(|n| format!("\\m{} ", letters(n))).collect();
+        let nodes = Parser::new(&source).nodes(None);
+        let _ = flatten_nodes(&nodes, &macros);
+        let unmapped = macros.unmapped.borrow();
+        assert_eq!(unmapped.names.len(), MAX_UNMAPPED_NAMES);
+        assert_eq!(unmapped.others, 200 - MAX_UNMAPPED_NAMES as u64);
+    }
+
+    #[test]
+    fn an_overlong_unmapped_name_is_counted_but_not_printed() {
+        let macros = Macros::default();
+        let source = format!("\\{} x", "a".repeat(MAX_UNMAPPED_NAME_LEN + 1));
+        let nodes = Parser::new(&source).nodes(None);
+        assert_eq!(flatten_nodes(&nodes, &macros), "x");
+        let unmapped = macros.unmapped.borrow();
+        assert!(unmapped.names.is_empty());
+        assert_eq!(unmapped.others, 1);
+    }
+
+    /// A distinct all-letter suffix for `n`, since macro names take no digits.
+    fn letters(mut n: usize) -> String {
+        let mut out = String::new();
+        loop {
+            out.push(char::from(b'a' + u8::try_from(n % 26).expect("under 26")));
+            n /= 26;
+            if n == 0 {
+                return out;
+            }
+        }
+    }
+
     /// The text and the runs a snippet flattens to.
     fn runs(latex: &str) -> (String, Vec<pb::InlineSpan>) {
         let nodes = Parser::new(latex).nodes(None);
@@ -2143,19 +2722,29 @@ mod tests {
     #[test]
     fn zero_argument_newcommands_expand() {
         let mut macros = HashMap::new();
-        collect_newcommands("\\newcommand{\\etal}{et al.}", &mut macros);
+        collect_newcommands(
+            "\\newcommand{\\etal}{et al.}",
+            &mut macros,
+            &mut HashSet::new(),
+        );
         assert_eq!(macros.get("etal").map(String::as_str), Some("et al."));
 
         let mut with_args = HashMap::new();
-        collect_newcommands("\\newcommand{\\pair}[2]{#1-#2}", &mut with_args);
+        let mut opaque = HashSet::new();
+        collect_newcommands(
+            "\\newcommand{\\pair}[2]{#1-#2}",
+            &mut with_args,
+            &mut opaque,
+        );
         assert!(
             with_args.is_empty(),
             "parameterized macros are deliberately not expanded"
         );
+        assert!(opaque.contains("pair"), "but the name is the author's");
 
         let nodes = Parser::new("Knuth \\etal shipped.").nodes(None);
         assert_eq!(
-            flatten_nodes(&nodes, &Macros::new(macros, 0)),
+            flatten_nodes(&nodes, &Macros::with_opaque(macros, HashSet::new(), 0)),
             "Knuth et al. shipped."
         );
     }
@@ -2189,7 +2778,13 @@ mod tests {
         )
         .nodes(None);
         let (mut title, mut author, mut date) = (None, None, None);
-        scan_metadata(&nodes, &mut title, &mut author, &mut date);
+        scan_metadata(
+            &nodes,
+            &Macros::default(),
+            &mut title,
+            &mut author,
+            &mut date,
+        );
         assert_eq!(title.as_deref(), Some("The Title"));
         assert_eq!(author.as_deref(), Some("Ada"));
         assert_eq!(date.as_deref(), Some("1843"));
