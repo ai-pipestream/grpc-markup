@@ -89,6 +89,9 @@ pub struct MarkupGrpc {
     upload_idle: Duration,
     upload_total: Duration,
     max_parse: Duration,
+    /// How long the parse waits on a client that has stopped reading before
+    /// it gives up on the call.
+    consumer_stall: Duration,
     metrics: Arc<Metrics>,
 }
 
@@ -114,8 +117,17 @@ impl MarkupGrpc {
             upload_idle: DEFAULT_UPLOAD_IDLE,
             upload_total: DEFAULT_UPLOAD_TOTAL,
             max_parse: DEFAULT_MAX_PARSE,
+            consumer_stall: CONSUMER_STALL,
             metrics,
         }
+    }
+
+    /// Override how long the parse waits on a client that has stopped
+    /// reading. Past it the call ends with `DEADLINE_EXCEEDED`.
+    #[must_use]
+    pub const fn with_consumer_stall(mut self, stall: Duration) -> Self {
+        self.consumer_stall = stall;
+        self
     }
 
     /// Override the budget for document bytes buffered across every parse
@@ -369,6 +381,12 @@ impl MarkupParseService for MarkupGrpc {
         let panic_tx = event_tx.clone();
         let metrics = Arc::clone(&self.metrics);
         let handle = tokio::runtime::Handle::current();
+        let stall = self.consumer_stall;
+        // The status the call ends with when the parse could not queue one:
+        // the channel was full because the client stopped reading.
+        let fallback = Terminal::default();
+        let parse_fallback = fallback.clone();
+        let fallback_for_stream = fallback.clone();
         tokio::spawn(async move {
             // The permit lives as long as the parse, not as long as this
             // async wrapper, so it is moved into the blocking closure.
@@ -376,30 +394,49 @@ impl MarkupParseService for MarkupGrpc {
                 let _permit = permit;
                 let _memory = memory;
                 run_parse(
-                    &handle, &bytes, &config, &cancel, started, &event_tx, &metrics,
+                    &handle,
+                    &bytes,
+                    &config,
+                    &cancel,
+                    started,
+                    &Outlet {
+                        events: &event_tx,
+                        stall,
+                        fallback: &parse_fallback,
+                    },
+                    &metrics,
                 );
             })
             .await;
             match joined {
                 Ok(()) => {}
-                Err(e) if e.is_panic() => {
+                Err(e) => {
                     // A panic in a fold is this server's fault, not the
                     // document's, so it is INTERNAL and not INVALID_ARGUMENT.
-                    let _ = panic_tx
-                        .send(Err(Status::internal("the markup parser task panicked")))
-                        .await;
-                }
-                Err(_) => {
-                    let _ = panic_tx
-                        .send(Err(Status::cancelled(
-                            "the markup parser task was cancelled",
-                        )))
-                        .await;
+                    let failure = if e.is_panic() {
+                        Status::internal("the markup parser task panicked")
+                    } else {
+                        Status::cancelled("the markup parser task was cancelled")
+                    };
+                    // A full channel must not hold this task forever: the
+                    // status then ends the stream once the client drains it.
+                    if let Err(error) = panic_tx.try_send(Err(failure)) {
+                        let failure = match error {
+                            mpsc::error::TrySendError::Full(item)
+                            | mpsc::error::TrySendError::Closed(item) => item,
+                        };
+                        if let Err(failure) = failure {
+                            fallback.set(failure);
+                        }
+                    }
                 }
             }
         });
 
-        Ok(Response::new(Batched::new(ReceiverStream::new(event_rx))))
+        Ok(Response::new(Batched::new(
+            ReceiverStream::new(event_rx),
+            fallback_for_stream,
+        )))
     }
 
     async fn get_service_info(
@@ -465,11 +502,18 @@ pub struct Batched {
     releasing: bool,
     /// Runs while a small batch waits for more events.
     wait: Option<Pin<Box<Sleep>>>,
+    /// A trailer or an error status has been taken from the channel.
+    terminal_seen: bool,
+    /// The status to end with when the channel closes with neither.
+    fallback: Terminal,
 }
 
 impl Batched {
     /// Batch the events arriving on `events`.
-    fn new(events: ReceiverStream<Result<pb::ParseMarkupResponse, Status>>) -> Self {
+    fn new(
+        events: ReceiverStream<Result<pb::ParseMarkupResponse, Status>>,
+        fallback: Terminal,
+    ) -> Self {
         Self {
             events,
             batch: VecDeque::new(),
@@ -477,8 +521,51 @@ impl Batched {
             closed: false,
             releasing: false,
             wait: None,
+            terminal_seen: false,
+            fallback,
         }
     }
+}
+
+/// The status a call ends with when the parse could not queue it, shared
+/// between the parse and the response stream.
+///
+/// A stream whose channel closes with no trailer and no error status was cut
+/// short, and tonic would close it as OK. The parse leaves the reason here
+/// instead (the client stopped reading, or the failure itself could not be
+/// sent), and the stream ends with it.
+#[derive(Clone, Default)]
+struct Terminal(Arc<std::sync::Mutex<Option<Status>>>);
+
+impl Terminal {
+    /// Record the status to end with. The first one recorded wins.
+    fn set(&self, status: Status) {
+        let mut slot = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_none() {
+            *slot = Some(status);
+        }
+    }
+
+    /// The status to end with, or INTERNAL when nothing said why.
+    fn take(&self) -> Status {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| Status::internal("the parse ended without a ParseStatus trailer"))
+    }
+}
+
+/// Where the blocking parse sends its events.
+struct Outlet<'a> {
+    events: &'a mpsc::Sender<Result<pb::ParseMarkupResponse, Status>>,
+    /// How long one send may wait on a client that is not reading.
+    stall: Duration,
+    /// Where the reason goes when it cannot be sent.
+    fallback: &'a Terminal,
 }
 
 impl Stream for Batched {
@@ -502,9 +589,17 @@ impl Stream for Batched {
                                 )
                             }
                         };
+                        this.terminal_seen |= flush;
                         this.batch.push_back(item);
                     }
-                    Poll::Ready(None) => this.closed = true,
+                    Poll::Ready(None) => {
+                        this.closed = true;
+                        if !this.terminal_seen {
+                            // Cut short: end with the reason, never with OK.
+                            this.terminal_seen = true;
+                            this.batch.push_back(Err(this.fallback.take()));
+                        }
+                    }
                 }
             }
             if this.batch.is_empty() {
@@ -542,12 +637,12 @@ fn run_parse(
     config: &ParseConfig,
     cancel: &Cancel,
     started: Instant,
-    event_tx: &mpsc::Sender<Result<pb::ParseMarkupResponse, Status>>,
+    outlet: &Outlet<'_>,
     metrics: &Metrics,
 ) {
     let mut events = 0u64;
     let mut emit = |event: pb::ParseMarkupResponse| {
-        let sent = deliver(handle, event_tx, event);
+        let sent = deliver(handle, outlet, Ok(event));
         if sent {
             events += 1;
         }
@@ -561,28 +656,40 @@ fn run_parse(
         Err(error) => {
             metrics.parses_failed.fetch_add(1, Ordering::Relaxed);
             let failure = status_for(&error);
-            let _ = handle.block_on(async {
-                tokio::time::timeout(CONSUMER_STALL, event_tx.send(Err(failure))).await
-            });
+            // A failure that cannot be queued still ends the call: it is
+            // left for the response stream first, so it, not the stall
+            // that kept it from being queued, is what the call ends with.
+            outlet.fallback.set(failure.clone());
+            deliver(handle, outlet, Err(failure));
         }
     }
 }
 
-/// Send one event to the client.
+/// Send one event, or the failure, to the client.
 ///
 /// A bounded send with a deadline: real backpressure for a client that is
 /// merely slow, and an exit for one that has stopped reading without
-/// closing the stream. Returns false when the consumer is gone.
+/// closing the stream. Returns false when the event was not queued. A
+/// client that stopped reading is recorded as the reason the call ends,
+/// `DEADLINE_EXCEEDED`, so the stream it eventually drains does not end
+/// with OK.
 fn deliver(
     handle: &tokio::runtime::Handle,
-    event_tx: &mpsc::Sender<Result<pb::ParseMarkupResponse, Status>>,
-    event: pb::ParseMarkupResponse,
+    outlet: &Outlet<'_>,
+    item: Result<pb::ParseMarkupResponse, Status>,
 ) -> bool {
-    handle.block_on(async {
-        tokio::time::timeout(CONSUMER_STALL, event_tx.send(Ok(event)))
-            .await
-            .is_ok_and(|r| r.is_ok())
-    })
+    match handle.block_on(tokio::time::timeout(outlet.stall, outlet.events.send(item))) {
+        Ok(Ok(())) => true,
+        // The receiver is gone: nobody is left to tell.
+        Ok(Err(_)) => false,
+        Err(_) => {
+            outlet.fallback.set(Status::deadline_exceeded(format!(
+                "the client read nothing for {} ms, so the parse was stopped",
+                outlet.stall.as_millis()
+            )));
+            false
+        }
+    }
 }
 
 /// The fleet's error taxonomy, in one place.
