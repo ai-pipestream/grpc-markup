@@ -510,7 +510,6 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
         title_taken: false,
         pending_anchor: None,
         float_anchor: None,
-        footnotes: 0,
     };
     if let Some(text) = title {
         walk.title_taken = true;
@@ -1347,6 +1346,21 @@ struct Macros {
     opaque: HashSet<String>,
     /// Macros flattened with no mapping, by name.
     unmapped: RefCell<Unmapped>,
+    /// Footnotes minted so far, by the walk and the flattener alike, so
+    /// every marker and anchor is unique.
+    footnotes: Cell<u32>,
+    /// Footnotes and captions the flattener met inside text it folded into
+    /// one block, waiting for the walk to emit them after that block.
+    notes: RefCell<Vec<Flattened>>,
+}
+
+/// A block the flattener met inside text and could not place inline.
+enum Flattened {
+    /// A `\footnote` or `\marginpar` body, under the anchor its marker
+    /// points at.
+    Footnote { key: String, text: String },
+    /// A `\caption` met inside flattened text.
+    Caption(String),
 }
 
 /// How many distinct unmapped macro names one parse reports by name.
@@ -1401,7 +1415,17 @@ impl Macros {
             ),
             starved: Cell::new(0),
             unmapped: RefCell::default(),
+            footnotes: Cell::new(0),
+            notes: RefCell::default(),
         }
+    }
+
+    /// The anchor a footnote body carries when the source names none, and
+    /// the marker its reference leaves in the text.
+    fn footnote_key(&self) -> (String, String) {
+        let n = self.footnotes.get() + 1;
+        self.footnotes.set(n);
+        (format!("footnote-{n}"), n.to_string())
     }
 
     /// True when the document itself defines `name`.
@@ -1556,7 +1580,40 @@ fn flatten_macro(
                 out.push(": ");
             }
         }
-        "footnote" | "marginpar" | "caption" | "label" => {}
+        // A footnote met inside text being flattened (a heading, a cell, a
+        // styled argument) cannot interrupt that text as a block, so it
+        // leaves its marker here and its body waits for the walk to emit
+        // it after the block. It used to be dropped without a word.
+        "footnote" | "marginpar" => {
+            if let Some(arg) = args.first() {
+                let mut body = Inline::default();
+                flatten_into(arg, macros, depth, &mut body);
+                let text = body.take().0;
+                if !text.is_empty() {
+                    let (key, marker) = macros.footnote_key();
+                    out.push_marked(
+                        &marker,
+                        Mark::reference(&key, pb::ReferenceKind::Footnote)
+                            .with_style(pb::SpanStyle::Superscript),
+                    );
+                    macros
+                        .notes
+                        .borrow_mut()
+                        .push(Flattened::Footnote { key, text });
+                }
+            }
+        }
+        "caption" => {
+            if let Some(arg) = args.first() {
+                let mut body = Inline::default();
+                flatten_into(arg, macros, depth, &mut body);
+                let text = body.take().0;
+                if !text.is_empty() {
+                    macros.notes.borrow_mut().push(Flattened::Caption(text));
+                }
+            }
+        }
+        "label" => {}
         _ if BARE_IGNORED.contains(&name) || GREEDY_IGNORED.contains(&name) => {}
         _ => {
             if let Some(definition) = macros.defs.get(name) {
@@ -1648,9 +1705,6 @@ struct Walk<'w, 'e> {
     /// happens to sit beside it, so it waits for the picture or the table
     /// rather than being claimed by the block before it.
     float_anchor: Option<String>,
-    /// Footnotes emitted so far, for minting the marker a `\footnote`
-    /// leaves behind in the paragraph it interrupts.
-    footnotes: u32,
 }
 
 impl Walk<'_, '_> {
@@ -1723,6 +1777,7 @@ impl Walk<'_, '_> {
                         }
                         self.flush(&mut buffer, ctx)?;
                         self.structural(name, opt.as_deref(), args, anchor)?;
+                        self.emit_flattened_notes()?;
                     } else {
                         flatten_macro(name, opt.as_deref(), args, &self.macros, 0, &mut buffer);
                     }
@@ -1735,10 +1790,36 @@ impl Walk<'_, '_> {
                 } => {
                     self.flush(&mut buffer, ctx)?;
                     self.environment(name, opt.as_deref(), raw, body, ctx)?;
+                    self.emit_flattened_notes()?;
                 }
             }
         }
-        self.flush(&mut buffer, ctx)
+        self.flush(&mut buffer, ctx)?;
+        self.emit_flattened_notes()
+    }
+
+    /// Emit the footnotes and captions the flattener met inside text it
+    /// folded into one block (a heading, a cell, a styled argument), each as
+    /// its own block after that one, as a footnote the paragraph walk meets
+    /// is.
+    fn emit_flattened_notes(&mut self) -> Result<(), ParseError> {
+        let notes = self.macros.notes.take();
+        for note in notes {
+            match note {
+                Flattened::Footnote { key, text } => self.emitter.text_block(Block {
+                    label: pb::BlockLabel::Footnote,
+                    text,
+                    anchor_id: Some(key),
+                    ..Block::default()
+                })?,
+                Flattened::Caption(text) => self.emitter.text_block(Block {
+                    label: pb::BlockLabel::Caption,
+                    text,
+                    ..Block::default()
+                })?,
+            }
+        }
+        Ok(())
     }
 
     /// True for macros that produce their own block rather than inline
@@ -2005,11 +2086,7 @@ impl Walk<'_, '_> {
     /// The anchor a footnote body carries when the source names none, and
     /// the marker its reference leaves in the text.
     fn footnote_key(&mut self) -> (String, String) {
-        self.footnotes += 1;
-        (
-            format!("footnote-{}", self.footnotes),
-            self.footnotes.to_string(),
-        )
+        self.macros.footnote_key()
     }
 
     /// An `itemize` / `enumerate` / `description` body: nodes split on
@@ -2444,7 +2521,11 @@ mod tests {
     #[test]
     fn inline_commands_flatten_to_their_text() {
         assert_eq!(flat("\\textbf{bold} and \\emph{em}"), "bold and em");
-        assert_eq!(flat("A\\footnote{dropped} B"), "A B");
+        assert_eq!(
+            flat("A\\footnote{kept} B"),
+            "A1 B",
+            "the marker stays in the text"
+        );
         assert_eq!(flat("x~y"), "x y");
         assert_eq!(flat("50\\% \\& \\$5"), "50% & $5");
     }
