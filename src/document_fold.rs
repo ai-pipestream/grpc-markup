@@ -47,6 +47,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use prost::Message;
 
 use crate::document::v1 as doc;
@@ -1118,19 +1120,7 @@ impl DocumentFold {
             // The href of a link whose only content was the image: a click
             // on the picture follows it.
             hyperlink: image.hyperlink.clone(),
-            image: Some(doc::ImageRef {
-                mimetype: image_mimetype(&image.src).to_owned(),
-                dpi: 0,
-                size,
-                uri: image.src.clone(),
-                size_raw,
-                // The reference stays a reference: a `data:` source is kept
-                // verbatim in `uri`, as the wire carries it.
-                data: None,
-                // `uri` is the source's own spelling, so there is no second
-                // one to keep.
-                source_ref: None,
-            }),
+            image: Some(image_ref(&image.src, size, size_raw)),
             source: vec![self.collector_source()],
             ..doc::PictureItem::default()
         });
@@ -1341,6 +1331,79 @@ const fn model_name(format: pb::MarkupFormat) -> &'static str {
         pb::MarkupFormat::DoclingJson => "docling-json",
         pb::MarkupFormat::Rst => "rst",
     }
+}
+
+/// The image a source names, as an `ImageRef`.
+///
+/// A reference stays a reference: `uri` is the source's own spelling, so
+/// there is no second one for `source_ref` to keep. A `data:` URI is not a
+/// reference but the image itself, and the schema keeps a producer's bytes in
+/// `data`, never spelled as a URI; so one that decodes is its bytes with no
+/// `uri`. One that does not decode stays in `uri` exactly as written, which
+/// loses nothing and reads nothing into it.
+fn image_ref(src: &str, size: Option<doc::Size>, size_raw: Option<String>) -> doc::ImageRef {
+    let data = data_uri_bytes(src);
+    doc::ImageRef {
+        mimetype: image_mimetype(src).to_owned(),
+        dpi: 0,
+        size,
+        uri: if data.is_some() {
+            String::new()
+        } else {
+            src.to_owned()
+        },
+        size_raw,
+        data,
+        source_ref: None,
+    }
+}
+
+/// The bytes a `data:` URI (RFC 2397) holds, or `None` when `src` is not one
+/// or does not decode: base64 when the header says so, percent-encoded
+/// otherwise.
+fn data_uri_bytes(src: &str) -> Option<Vec<u8>> {
+    let scheme = src.get(..5)?;
+    if !scheme.eq_ignore_ascii_case("data:") {
+        return None;
+    }
+    let (header, payload) = src[5..].split_once(',')?;
+    let is_base64 = header
+        .rsplit(';')
+        .next()
+        .is_some_and(|last| last.eq_ignore_ascii_case("base64"));
+    if is_base64 {
+        // Whitespace inside the payload is common in hand-written HTML and
+        // is not part of the encoding.
+        let compact: String = payload
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        BASE64.decode(compact).ok()
+    } else {
+        percent_decode(payload)
+    }
+}
+
+/// Percent-decode `text`, or `None` when a `%` is not followed by two hex
+/// digits.
+fn percent_decode(text: &str) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text.get(i + 1..i + 3)?;
+            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(out)
 }
 
 /// Media type of an image reference, derived from its source. An empty
@@ -2999,6 +3062,50 @@ mod tests {
         assert_eq!(meta.alt_text.as_deref(), Some("the pipeline"));
         assert_eq!(meta.accessibility_title.as_deref(), Some("Fig 1"));
         assert_eq!(meta.custom_fields, HashMap::new(), "no custom field bag");
+    }
+
+    /// The picture a source names with an `img src` of `src`.
+    fn picture_of(src: &str) -> doc::ImageRef {
+        let document = fold(&[
+            info(pb::MarkupFormat::Html),
+            pb::parse_markup_response::Event::Image(pb::ImageBlock {
+                index: 0,
+                src: src.to_owned(),
+                ..pb::ImageBlock::default()
+            }),
+        ]);
+        document.pictures[0].image.clone().expect("an image ref")
+    }
+
+    /// A `data:` URI is the image's own bytes, not a reference to one held
+    /// elsewhere, and `ImageRef.data` is where the schema keeps them.
+    #[test]
+    fn a_data_uri_image_carries_its_bytes_not_a_uri() {
+        let png = picture_of("data:image/png;base64,iVBORw0KGgo=");
+        assert_eq!(png.mimetype, "image/png");
+        assert_eq!(png.data.as_deref(), Some(&b"\x89PNG\r\n\x1a\n"[..]));
+        assert_eq!(png.uri, "", "the bytes are not spelled twice");
+
+        // The plain form is percent-encoded text.
+        let svg = picture_of("data:image/svg+xml,%3Csvg%2F%3E");
+        assert_eq!(svg.mimetype, "image/svg+xml");
+        assert_eq!(svg.data.as_deref(), Some(&b"<svg/>"[..]));
+        assert_eq!(svg.uri, "");
+    }
+
+    /// A `data:` URI that does not decode is kept exactly as the source wrote
+    /// it, so nothing is lost and nothing is invented.
+    #[test]
+    fn a_data_uri_that_does_not_decode_stays_verbatim() {
+        for src in [
+            "data:image/png;base64,not base64!",
+            "data:image/png%zz",
+            "data:image/gif,%G0",
+        ] {
+            let image = picture_of(src);
+            assert_eq!(image.uri, src);
+            assert_eq!(image.data, None);
+        }
     }
 
     #[test]
