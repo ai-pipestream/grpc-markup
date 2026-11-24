@@ -592,6 +592,8 @@ fn map_image_ref(value: &Value, unmapped: &mut Unmapped) -> Option<doc::ImageRef
         // Docling's ImageRef has no inline bytes: a `data:` URI arrives in
         // `uri`, and a `data` key would be reported as unmapped.
         data: None,
+        // A Docling document carries one spelling of the reference.
+        source_ref: None,
     };
     obj.finish();
     Some(image)
