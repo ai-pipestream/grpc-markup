@@ -405,6 +405,10 @@ Carried across from the typed wire, into slots the schema already had:
   declared alignment lands on the cell. The wire merges both alignment axes
   into one enum and the folds keep them in the right field, so the
   projection splits them and refuses a vertical value in a horizontal slot.
+- An image's `src` is `ImageRef.uri` verbatim, except a `data:` URI: that is
+  the image itself, so its decoded bytes (base64 or percent-encoded) are
+  `ImageRef.data` and `uri` is empty, as the schema asks. One that does not
+  decode stays in `uri` exactly as written.
 - An image's declared `width` and `height` become `ImageRef.size` when the
   source stated both as bare numbers, and `ImageRef.size_raw` otherwise,
   with `size` unset: `Size` is two plain doubles with no unit beside them,
