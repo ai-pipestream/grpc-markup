@@ -479,9 +479,13 @@ Dropped or demoted per format, deliberately:
 Every residual this repo's last report listed now has a typed slot and is
 in it, so what remains is two deliberate calls rather than five gaps.
 
-- **`ParseStatus` and its warnings** describe the stream and not the
-  document, and stay off this plane by construction. That includes
-  `evidence`, whose *conclusion* does land: the sniff's rung becomes
+- **`ParseStatus` counts** describe the stream and not the document, and
+  stay off this plane by construction. Its **warnings do land**: each is a
+  `Document.warnings` entry with the fleet `WarningCode` that says what a
+  consumer can rely on (`SOURCE_ENCODING_SUBSTITUTION`,
+  `SOURCE_CONTENT_TRUNCATED` and so on), the exact finding in the message
+  and the occurrence count, because a caller that takes only the Document
+  would otherwise see a clean parse. `evidence`'s *conclusion* lands too: the sniff's rung becomes
   `DocumentOrigin.mimetype_evidence` (`requested`, `signature`,
   `heuristic`), so a consumer reading `text/markdown` off a document can
   tell a stated fact from a classified guess without the stream's trailer.

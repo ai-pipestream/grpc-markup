@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::document::v1 as doc;
-use crate::document_fold::DocumentFold;
+use crate::document_fold::{self, DocumentFold};
 use crate::proto::v1 as pb;
 use crate::sniff::{self, Evidence, Format};
 use crate::{COLLECTOR, VERSION, asciidoc, boxnote, docling_json, html, latex, markdown, vtt};
@@ -726,19 +726,16 @@ impl<'a> Emitter<'a> {
     }
 
     /// Send the optional Document and the `ParseStatus` trailer.
+    ///
+    /// The trailer is built first so that its warnings reach the Document
+    /// too: a caller that takes only the Document would otherwise see a
+    /// clean parse.
     fn finish(&mut self) -> Result<(), ParseError> {
         assert!(self.info_sent, "a fold emits MarkupInfo before finishing");
         assert!(
             self.open_table.is_none(),
             "a fold closes every table it opens"
         );
-        let document = self
-            .document
-            .take()
-            .or_else(|| self.fold.take().map(|mut fold| fold.take()));
-        if let Some(document) = document {
-            self.send(pb::parse_markup_response::Event::Document(document))?;
-        }
         let mut warnings: Vec<pb::ParseWarning> = self
             .warnings
             .iter()
@@ -765,6 +762,27 @@ impl<'a> Emitter<'a> {
             bytes_consumed: self.bytes_consumed,
             elapsed_millis: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
+        let document = if let Some(mut document) = self.document.take() {
+            // A Document carried over whole (Docling JSON) still gets the
+            // warnings this parse raised while reading it.
+            let source = doc::CollectorSource {
+                collector: COLLECTOR.to_owned(),
+                version: Some(VERSION.to_owned()),
+                ..doc::CollectorSource::default()
+            };
+            document
+                .warnings
+                .extend(document_fold::collector_warnings(&source, &status.warnings));
+            Some(document)
+        } else {
+            self.fold.take().map(|mut fold| {
+                fold.consume(&pb::parse_markup_response::Event::Status(status.clone()));
+                fold.take()
+            })
+        };
+        if let Some(document) = document {
+            self.send(pb::parse_markup_response::Event::Document(document))?;
+        }
         self.send(pb::parse_markup_response::Event::Status(status))
     }
 
@@ -873,6 +891,70 @@ mod tests {
             status.warnings
         );
         assert_eq!(status.bytes_consumed, bytes.len() as u64);
+    }
+
+    /// A caller that takes only the Document saw a clean parse: the
+    /// trailer's warnings never reached it. They are `Document.warnings`
+    /// now, each with the fleet code that says what a consumer can rely on.
+    #[test]
+    fn trailer_warnings_reach_the_document_with_a_fleet_code_and_their_count() {
+        let mut bytes = b"# Title\n\nbody ".to_vec();
+        bytes.extend([0xFF, b' ', 0xFE, b'!']);
+        let config = ParseConfig {
+            format: Some(Format::Markdown),
+            emit_document: true,
+            ..ParseConfig::default()
+        };
+        let (_, events) = collect(&bytes, &config).expect("lossy parse succeeds");
+        let document = events
+            .iter()
+            .find_map(|e| match e.event.as_ref() {
+                Some(pb::parse_markup_response::Event::Document(d)) => Some(d),
+                _ => None,
+            })
+            .expect("a document event");
+        let Some(pb::parse_markup_response::Event::Status(status)) =
+            events.last().and_then(|e| e.event.as_ref())
+        else {
+            panic!("last event is the trailer");
+        };
+        assert_eq!(document.warnings.len(), status.warnings.len());
+        let substitution = document
+            .warnings
+            .iter()
+            .find(|w| w.code == doc::WarningCode::SourceEncodingSubstitution as i32)
+            .expect("the substitution is on the document");
+        let wire = status
+            .warnings
+            .iter()
+            .find(|w| w.code == pb::WarningCode::EncodingSubstitution as i32)
+            .expect("and on the trailer");
+        assert_eq!(substitution.message, wire.message);
+        assert_eq!(substitution.count, (wire.count > 1).then_some(wire.count));
+        assert_eq!(
+            substitution.source.as_ref().map(|s| s.collector.as_str()),
+            Some(crate::COLLECTOR)
+        );
+    }
+
+    /// Every wire code has a fleet code, so no warning reaches the Document
+    /// as UNSPECIFIED.
+    #[test]
+    fn every_wire_warning_code_has_a_fleet_code() {
+        for code in [
+            pb::WarningCode::UnmappedConstruct,
+            pb::WarningCode::Metadata,
+            pb::WarningCode::MalformedStructure,
+            pb::WarningCode::EncodingSubstitution,
+            pb::WarningCode::EmbeddedHtmlFlattened,
+            pb::WarningCode::LimitReached,
+        ] {
+            assert_ne!(
+                crate::document_fold::fleet_warning_code(code),
+                doc::WarningCode::Unspecified,
+                "{code:?}"
+            );
+        }
     }
 
     #[test]
