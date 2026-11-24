@@ -215,10 +215,11 @@ impl DocumentFold {
 
     /// Fold one response event.
     ///
-    /// Every variant is handled, and the ones that map to nothing say so:
-    /// `status` is counts and warnings, which describe the stream rather
-    /// than the document, and a `document` event is this fold's own output —
-    /// folding one back in would double the fragment.
+    /// Every variant is handled, and the one that maps to nothing says so: a
+    /// `document` event is this fold's own output, and folding one back in
+    /// would double the fragment. The `status` trailer's warnings become
+    /// `Document.warnings`, so a caller that takes only the Document still
+    /// sees what the parse reported; its counts describe the stream.
     pub fn consume(&mut self, event: &pb::parse_markup_response::Event) {
         use pb::parse_markup_response::Event;
         match event {
@@ -229,7 +230,11 @@ impl DocumentFold {
             Event::TableEnd(end) => self.on_table_end(end),
             Event::Image(image) => self.on_image(image),
             Event::Cue(cue) => self.on_cue(cue),
-            Event::Status(_) | Event::Document(_) => {}
+            Event::Status(status) => {
+                let warnings = collector_warnings(&self.source, &status.warnings);
+                self.document.warnings.extend(warnings);
+            }
+            Event::Document(_) => {}
         }
     }
 
@@ -1236,6 +1241,44 @@ impl DocumentFold {
         doc::SourceType {
             source: Some(doc::source_type::Source::Collector(self.source.clone())),
         }
+    }
+}
+
+/// The trailer's warnings as `Document.warnings`, each attributed to
+/// `source`, with the fleet code that says what a consumer can rely on and
+/// the exact finding kept in the message.
+pub(crate) fn collector_warnings(
+    source: &doc::CollectorSource,
+    warnings: &[pb::ParseWarning],
+) -> Vec<doc::CollectorWarning> {
+    warnings
+        .iter()
+        .map(|warning| doc::CollectorWarning {
+            source: Some(source.clone()),
+            message: warning.message.clone(),
+            code: fleet_warning_code(
+                pb::WarningCode::try_from(warning.code).unwrap_or(pb::WarningCode::Unspecified),
+            ) as i32,
+            // One occurrence is the default a reader assumes.
+            count: (warning.count > 1).then_some(warning.count),
+            ..doc::CollectorWarning::default()
+        })
+        .collect()
+}
+
+/// The fleet code for one of this service's wire warning codes.
+pub(crate) const fn fleet_warning_code(code: pb::WarningCode) -> doc::WarningCode {
+    match code {
+        pb::WarningCode::Unspecified => doc::WarningCode::Unspecified,
+        // Both leave a construct's text in the enclosing block without the
+        // structure it had: no mapping for it, or embedded HTML read as text.
+        pb::WarningCode::UnmappedConstruct | pb::WarningCode::EmbeddedHtmlFlattened => {
+            doc::WarningCode::SourceConstructUnmapped
+        }
+        pb::WarningCode::Metadata => doc::WarningCode::SourceMetadataUnreadable,
+        pb::WarningCode::MalformedStructure => doc::WarningCode::SourceStructureMalformed,
+        pb::WarningCode::EncodingSubstitution => doc::WarningCode::SourceEncodingSubstitution,
+        pb::WarningCode::LimitReached => doc::WarningCode::SourceContentTruncated,
     }
 }
 
