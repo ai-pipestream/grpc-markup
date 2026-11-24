@@ -1161,6 +1161,9 @@ impl DocumentFold {
                 size,
                 uri: image.src.clone(),
                 size_raw,
+                // The reference stays a reference: a `data:` source is kept
+                // verbatim in `uri`, as the wire carries it.
+                data: None,
             }),
             source: vec![self.collector_source()],
             ..doc::PictureItem::default()
@@ -2451,6 +2454,10 @@ fn doc_span(span: &pb::InlineSpan) -> doc::InlineSpan {
         // one as a colour rather than as a `mark`.
         highlight_color: None,
         annotation: span.annotation.clone(),
+        // No markup format in this build names a link's target frame or
+        // the link itself apart from its text.
+        hyperlink_target_frame: None,
+        hyperlink_name: None,
     }
 }
 

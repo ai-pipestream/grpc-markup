@@ -589,6 +589,9 @@ fn map_image_ref(value: &Value, unmapped: &mut Unmapped) -> Option<doc::ImageRef
             .and_then(|value| map_size(value, obj.unmapped)),
         uri: obj.text("uri"),
         size_raw: obj.string("size_raw"),
+        // Docling's ImageRef has no inline bytes: a `data:` URI arrives in
+        // `uri`, and a `data` key would be reported as unmapped.
+        data: None,
     };
     obj.finish();
     Some(image)
@@ -655,6 +658,8 @@ fn map_span(value: &Value, unmapped: &mut Unmapped) -> Option<doc::InlineSpan> {
         style_name: obj.string("style_name"),
         highlight_color: obj.string("highlight_color"),
         annotation: obj.string("annotation"),
+        hyperlink_target_frame: obj.string("hyperlink_target_frame"),
+        hyperlink_name: obj.string("hyperlink_name"),
     };
     obj.finish();
     Some(span)
