@@ -1122,6 +1122,9 @@ impl DocumentFold {
                 // The reference stays a reference: a `data:` source is kept
                 // verbatim in `uri`, as the wire carries it.
                 data: None,
+                // `uri` is the source's own spelling, so there is no second
+                // one to keep.
+                source_ref: None,
             }),
             source: vec![self.collector_source()],
             ..doc::PictureItem::default()
