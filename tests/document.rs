@@ -165,11 +165,19 @@ async fn the_html_fold_is_a_merge_safe_fragment_with_docling_structure() {
         "MarkupInfo.title names the document"
     );
     assert_eq!(document.origin.as_ref().unwrap().mimetype, "text/html");
-    let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
-    assert_eq!(
-        meta.custom_fields["html.meta.author"].kind,
-        Some(prost_types::value::Kind::StringValue("Ada".to_owned()))
+    assert!(
+        document.body.as_ref().unwrap().meta.is_none(),
+        "no custom field bag on the body"
     );
+    assert_eq!(
+        document
+            .meta_tags
+            .iter()
+            .map(|tag| (tag.name.as_str(), tag.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("author", "Ada")]
+    );
+    assert_eq!(document.source_meta.as_ref().unwrap().authors, vec!["Ada"]);
     // The heading ladder and list group survive the fold.
     let Some(doc::base_text_item::Item::SectionHeader(section)) = document.texts[1].item.as_ref()
     else {
@@ -214,10 +222,20 @@ async fn the_asciidoc_fold_is_a_merge_safe_fragment() {
     assert_eq!(integrity_errors(document), Vec::<String>::new());
     assert_eq!(document.name, "The Title", "named after its title item");
     assert_eq!(document.origin.as_ref().unwrap().mimetype, "text/asciidoc");
-    let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
+    assert!(
+        document.body.as_ref().unwrap().meta.is_none(),
+        "no custom field bag on the body"
+    );
+    let meta = document.source_meta.as_ref().unwrap();
+    assert_eq!(meta.authors, vec!["Ada"]);
     assert_eq!(
-        meta.custom_fields["asciidoc.author"].kind,
-        Some(prost_types::value::Kind::StringValue("Ada".to_owned()))
+        meta.front_matter,
+        vec![entry("author", text("Ada"))],
+        "the attribute entry, verbatim"
+    );
+    assert_eq!(
+        meta.front_matter_format, None,
+        "an AsciiDoc header is not a fenced front matter block"
     );
     assert_eq!(document.groups.len(), 2, "outer list and its nested list");
     assert_eq!(
@@ -380,49 +398,91 @@ async fn the_docling_document_is_carried_over_losslessly_and_stamped() {
 }
 
 #[tokio::test]
-async fn info_metadata_lands_on_the_body_meta_under_the_format_prefix() {
+async fn info_metadata_lands_in_the_typed_front_matter() {
     let client = client().await;
     let markdown = "---\ntitle: Named\nauthor: Ada\n---\nbody text\n";
     let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
     let document = document(&events).expect("the fold was requested");
     assert_eq!(document.name, "Named");
-    let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
+    assert!(
+        document.body.as_ref().unwrap().meta.is_none(),
+        "no custom field bag on the body"
+    );
+    let meta = document.source_meta.as_ref().unwrap();
     assert_eq!(
-        meta.custom_fields["markdown.author"].kind,
-        Some(prost_types::value::Kind::StringValue("Ada".to_owned()))
+        meta.front_matter_format,
+        Some(doc::FrontMatterFormat::Yaml as i32)
+    );
+    assert_eq!(
+        meta.front_matter,
+        vec![entry("author", text("Ada")), entry("title", text("Named"))]
     );
 }
 
 #[tokio::test]
-async fn info_metadata_trees_land_as_the_same_tree_of_struct_values() {
-    use prost_types::value::Kind;
+async fn toml_front_matter_names_its_syntax() {
+    let client = client().await;
+    let markdown = "+++\ntitle = \"Named\"\n+++\nbody text\n";
+    let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
+    let document = document(&events).expect("the fold was requested");
+    let meta = document.source_meta.as_ref().unwrap();
+    assert_eq!(
+        meta.front_matter_format,
+        Some(doc::FrontMatterFormat::Toml as i32)
+    );
+    assert_eq!(meta.front_matter, vec![entry("title", text("Named"))]);
+}
+
+fn text(value: &str) -> doc::FrontMatterValue {
+    doc::FrontMatterValue {
+        kind: Some(doc::front_matter_value::Kind::Text(value.to_owned())),
+    }
+}
+
+fn entry(key: &str, value: doc::FrontMatterValue) -> doc::FrontMatterEntry {
+    doc::FrontMatterEntry {
+        key: key.to_owned(),
+        value: Some(value),
+    }
+}
+
+fn list(values: Vec<doc::FrontMatterValue>) -> doc::FrontMatterValue {
+    doc::FrontMatterValue {
+        kind: Some(doc::front_matter_value::Kind::List(doc::FrontMatterList {
+            values,
+        })),
+    }
+}
+
+fn map(entries: Vec<doc::FrontMatterEntry>) -> doc::FrontMatterValue {
+    doc::FrontMatterValue {
+        kind: Some(doc::front_matter_value::Kind::Map(doc::FrontMatterMap {
+            entries,
+        })),
+    }
+}
+
+#[tokio::test]
+async fn info_metadata_trees_land_as_the_same_front_matter_tree() {
     let client = client().await;
     let markdown = "---\ntitle: Named\ntags:\n  - streaming\n  - markup\nauthors:\n  - name: Ada\n  - name: Charles\n---\nbody text\n";
     let events = parse_ok(&client, markdown, with_document(pb::MarkupFormat::Markdown)).await;
     let document = document(&events).expect("the fold was requested");
-    let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
-    let Some(Kind::ListValue(tags)) = meta.custom_fields["markdown.tags"].kind.as_ref() else {
-        panic!("a list of scalars lands as a ListValue");
-    };
+    let meta = document.source_meta.as_ref().unwrap();
     assert_eq!(
-        tags.values[0].kind,
-        Some(Kind::StringValue("streaming".to_owned()))
-    );
-    assert_eq!(
-        tags.values[1].kind,
-        Some(Kind::StringValue("markup".to_owned()))
-    );
-    let Some(Kind::ListValue(authors)) = meta.custom_fields["markdown.authors"].kind.as_ref()
-    else {
-        panic!("a list of maps lands as a ListValue");
-    };
-    let Some(Kind::StructValue(ada)) = authors.values[0].kind.as_ref() else {
-        panic!("each map in the list lands as a Struct");
-    };
-    assert_eq!(
-        ada.fields["name"].kind,
-        Some(Kind::StringValue("Ada".to_owned())),
-        "the leaf is the verbatim string, not a JSON encoding"
+        meta.front_matter,
+        vec![
+            entry(
+                "authors",
+                list(vec![
+                    map(vec![entry("name", text("Ada"))]),
+                    map(vec![entry("name", text("Charles"))]),
+                ])
+            ),
+            entry("tags", list(vec![text("streaming"), text("markup")])),
+            entry("title", text("Named")),
+        ],
+        "a sequence is a list, a mapping a map, and each leaf the verbatim text"
     );
 }
 
@@ -565,8 +625,12 @@ async fn front_matter_lands_in_the_document_metadata_slots() {
     );
     assert_eq!(meta.keywords, vec!["engine", "looms"]);
     assert_eq!(
-        meta.extra.get("licence").map(String::as_str),
+        meta.license.as_ref().and_then(|l| l.statement.as_deref()),
         Some("CC-BY-4.0")
+    );
+    assert!(
+        meta.front_matter.iter().any(|e| e.key == "licence"),
+        "and the front matter keeps the key verbatim"
     );
 }
 
@@ -599,20 +663,10 @@ async fn html_meta_tags_land_in_the_typed_list_not_in_a_free_form_map() {
             ("og:title", "The Engine"),
         ]
     );
-    let fields = &document
-        .body
-        .as_ref()
-        .unwrap()
-        .meta
-        .as_ref()
-        .unwrap()
-        .custom_fields;
     assert!(
-        fields.keys().all(|key| !key.contains(':')),
-        "a namespaced meta tag keeps no colon-keyed custom field: {:?}",
-        fields.keys().collect::<Vec<_>>()
+        document.body.as_ref().unwrap().meta.is_none(),
+        "no custom field bag on the body"
     );
-    assert!(fields.contains_key("html.meta.author"));
     let meta = document.source_meta.as_ref().expect("declared metadata");
     assert_eq!(meta.title.as_deref(), Some("The Engine"));
     assert_eq!(meta.authors, vec!["Ada Lovelace"]);
@@ -621,6 +675,13 @@ async fn html_meta_tags_land_in_the_typed_list_not_in_a_free_form_map() {
         meta.extra.is_empty(),
         "a meta tag has one home, and it is the typed one: {:?}",
         meta.extra
+    );
+    assert!(
+        meta.front_matter
+            .iter()
+            .all(|e| !e.key.starts_with("meta.")),
+        "and the front matter does not repeat it: {:?}",
+        meta.front_matter
     );
     assert!(
         document.anchors.iter().any(|anchor| anchor.name == "lede"),
@@ -1273,20 +1334,12 @@ async fn the_epub_cover_svg_folds_to_a_picture_shaped_like_an_img() {
             height: 1800.0
         })
     );
-    let fields = &cover
-        .meta
-        .as_ref()
-        .expect("alt text rides as a field")
-        .custom_fields;
-    assert_eq!(
-        fields["html.alt"].kind,
-        Some(prost_types::value::Kind::StringValue(
-            "The Great Cover".to_owned()
-        ))
-    );
+    let meta = cover.meta.as_ref().expect("the picture has alt text");
+    assert_eq!(meta.alt_text.as_deref(), Some("The Great Cover"));
     assert!(
-        !fields.keys().any(|key| key.contains("src")),
-        "the reference lives in ImageRef.uri, never in a keyed field: {fields:?}"
+        meta.custom_fields.is_empty(),
+        "the reference lives in ImageRef.uri, never in a keyed field: {:?}",
+        meta.custom_fields
     );
     assert_eq!(
         cover.parent.as_ref().map(|parent| parent.r#ref.as_str()),
