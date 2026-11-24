@@ -29,11 +29,14 @@
 //!   carries a `prov` box — except a cue, whose
 //!   [`TrackSource`](doc::TrackSource) timing is real provenance and rides
 //!   in `source`, and whose karaoke segments are real timed ranges and ride
-//!   in `prov` as [`TimeSpan`](doc::TimeSpan)s. Format-native facts
-//!   with no typed slot — a block's `role`, its source line, an image's alt
-//!   text — go in per-item `meta.custom_fields` under the fold's own prefix
-//!   (`markdown.`, `vtt.`, …), where they are data rather than a fabricated
-//!   coordinate.
+//!   in `prov` as [`TimeSpan`](doc::TimeSpan)s. A block's source line is a
+//!   [`LineSpan`](doc::LineSpan), not a fabricated coordinate.
+//! - **Typed slots only.** Nothing this fold writes goes into a
+//!   `custom_fields` bag: a block's `role` is its `label_raw`, a quotation
+//!   is `DOC_ITEM_LABEL_QUOTE`, an image's alt text and title are
+//!   `PictureMeta.alt_text` and `accessibility_title`, a group names its
+//!   collector on `GroupItem.source`, and the declared metadata is
+//!   `DocumentMeta.front_matter`, a typed tree.
 //!
 //! Structure is a heading-as-parent ladder: a section header of level N is
 //! parented to the nearest open header of a lower level (`#/body` when
@@ -45,8 +48,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
 use prost::Message;
-use prost_types::Value;
-use prost_types::value::Kind;
 
 use crate::document::v1 as doc;
 use crate::proto::v1 as pb;
@@ -84,8 +85,6 @@ pub struct DocumentFold {
     document: doc::Document,
     /// Attribution stamped on every item, `model` filled in by `info`.
     source: doc::CollectorSource,
-    /// The fold's custom-field prefix: the format model, once known.
-    prefix: String,
     /// The table opened by a `table_start` and not yet closed.
     table: Option<PendingTable>,
     /// The open section headers, outermost first: (level, self ref).
@@ -204,7 +203,6 @@ impl DocumentFold {
                 confidence: None,
                 ..doc::CollectorSource::default()
             },
-            prefix: COLLECTOR.to_owned(),
             table: None,
             headings: Vec::new(),
             lists: Vec::new(),
@@ -371,7 +369,6 @@ impl DocumentFold {
         let model = model_name(format);
         if !model.is_empty() {
             self.source.model = Some(model.to_owned());
-            self.prefix = model.to_owned();
         }
         if let Some(title) = info.title.as_ref().filter(|t| !t.is_empty()) {
             self.document.name.clone_from(title);
@@ -388,22 +385,21 @@ impl DocumentFold {
         });
         self.document.source_meta = source_meta(info.title.as_deref(), &info.metadata);
         self.document.meta_tags = meta_tags(&info.metadata);
-        if !info.metadata.is_empty()
-            && let Some(body) = self.document.body.as_mut()
-        {
-            let meta = body.meta.get_or_insert_default();
-            // Deterministic order for a map the wire delivers unordered.
-            for (key, value) in info.metadata.iter().collect::<BTreeMap<_, _>>() {
-                // A namespaced meta tag (og:title, twitter:card, dc:subject)
-                // is already in `meta_tags` under its own name, and a colon
-                // is not a custom field key the document allows (only the
-                // pinned `cell:?` escape is), so it stays in the typed list.
-                if key.starts_with("meta.") && key.contains(':') && scalar_of(value).is_some() {
-                    continue;
-                }
-                meta.custom_fields
-                    .insert(format!("{}.{key}", self.prefix), meta_field(value));
-            }
+        // Every key the source declared, verbatim and typed, beside the
+        // first-class slots `source_meta` filled from the same keys: the
+        // slots are this fold's reading of the block, the entries are the
+        // block itself. A meta tag already has its typed home in
+        // `meta_tags` and is not stated twice.
+        let entries = front_matter(&info.metadata);
+        let format = match pb::FrontMatterSyntax::try_from(info.front_matter_syntax) {
+            Ok(pb::FrontMatterSyntax::Yaml) => Some(doc::FrontMatterFormat::Yaml),
+            Ok(pb::FrontMatterSyntax::Toml) => Some(doc::FrontMatterFormat::Toml),
+            Ok(pb::FrontMatterSyntax::Unspecified) | Err(_) => None,
+        };
+        if !entries.is_empty() || format.is_some() {
+            let meta = self.document.source_meta.get_or_insert_default();
+            meta.front_matter = entries;
+            meta.front_matter_format = format.map(|format| format as i32);
         }
     }
 
@@ -537,11 +533,10 @@ impl DocumentFold {
             parent: base.parent,
             children: base.children,
             content_layer: base.content_layer,
-            meta: base.meta.map(|meta| doc::FloatingMeta {
-                custom_fields: meta.custom_fields,
-                ..doc::FloatingMeta::default()
-            }),
+            // A text block carries no item metadata of its own.
+            meta: None,
             label: doc::DocItemLabel::Code as i32,
+            label_raw: base.label_raw,
             prov: base.prov,
             orig: base.orig,
             text: base.text,
@@ -553,7 +548,7 @@ impl DocumentFold {
         }
     }
 
-    /// The shared base of a text variant, custom fields included.
+    /// The shared base of a text variant.
     fn text_base(
         &self,
         self_ref: &str,
@@ -561,16 +556,15 @@ impl DocumentFold {
         block: &pb::TextBlock,
         label: doc::DocItemLabel,
     ) -> doc::TextItemBase {
-        let fields = self.block_fields(block);
         doc::TextItemBase {
             self_ref: self_ref.to_owned(),
             parent: Some(reference(parent)),
             content_layer: doc::ContentLayer::Body as i32,
-            meta: (!fields.is_empty()).then(|| doc::BaseMeta {
-                custom_fields: fields,
-                ..doc::BaseMeta::default()
-            }),
             label: label as i32,
+            // The format's own refinement of the label (`abstract`,
+            // `definition-term`, a Docling label the block vocabulary is
+            // coarser than), verbatim.
+            label_raw: (!block.role.is_empty()).then(|| block.role.clone()),
             // No page and no box: markup has neither. The line the block
             // starts on is a real coordinate in a real space, and that is
             // the one this plane records.
@@ -627,22 +621,6 @@ impl DocumentFold {
         }
     }
 
-    /// Per-item `meta.custom_fields`: everything the wire block says that
-    /// the Document plane has no typed slot for, under the format prefix.
-    fn block_fields(&self, block: &pb::TextBlock) -> HashMap<String, Value> {
-        let mut fields = HashMap::new();
-        let label = pb::BlockLabel::try_from(block.label).unwrap_or_default();
-        if label == pb::BlockLabel::Quote {
-            // The schema has no quote label; the block folds as TEXT and
-            // the quotation fact is recorded where the schema allows.
-            fields.insert(format!("{}.quote", self.prefix), flag(true));
-        }
-        if !block.role.is_empty() {
-            fields.insert(format!("{}.role", self.prefix), string(&block.role));
-        }
-        fields
-    }
-
     // ----------------------------------------------------------------- quotes
 
     /// Bring the quotation stack to the depth the block states.
@@ -661,17 +639,12 @@ impl DocumentFold {
         while self.quotes.len() < depth {
             let parent = self.current_parent();
             let self_ref = format!("#/groups/{}", self.document.groups.len());
-            let mut fields = HashMap::new();
-            self.attribute(&mut fields);
             self.document.groups.push(doc::GroupItem {
                 self_ref: self_ref.clone(),
                 parent: Some(reference(&parent)),
                 children: Vec::new(),
                 content_layer: doc::ContentLayer::Body as i32,
-                meta: Some(doc::BaseMeta {
-                    custom_fields: fields,
-                    ..doc::BaseMeta::default()
-                }),
+                source: vec![self.collector_source()],
                 name: Some(QUOTE_GROUP.to_owned()),
                 // The group vocabulary has no quotation member, so the
                 // group states its kind in the schema's own raw-label
@@ -737,17 +710,12 @@ impl DocumentFold {
             |(_, _, group_ref)| group_ref.clone(),
         );
         let self_ref = format!("#/groups/{}", self.document.groups.len());
-        let mut fields = HashMap::new();
-        self.attribute(&mut fields);
         self.document.groups.push(doc::GroupItem {
             self_ref: self_ref.clone(),
             parent: Some(reference(&parent)),
             children: Vec::new(),
             content_layer: doc::ContentLayer::Body as i32,
-            meta: Some(doc::BaseMeta {
-                custom_fields: fields,
-                ..doc::BaseMeta::default()
-            }),
+            source: vec![self.collector_source()],
             name: Some("list".to_owned()),
             label: if enumerated {
                 doc::GroupLabel::OrderedList as i32
@@ -949,17 +917,12 @@ impl DocumentFold {
     fn rich_cell_group(&mut self, blocks: &[pb::CellBlock]) -> usize {
         let index = self.document.groups.len();
         let self_ref = format!("#/groups/{index}");
-        let mut fields = HashMap::new();
-        self.attribute(&mut fields);
         self.document.groups.push(doc::GroupItem {
             self_ref: self_ref.clone(),
             parent: None,
             children: Vec::new(),
             content_layer: doc::ContentLayer::Body as i32,
-            meta: Some(doc::BaseMeta {
-                custom_fields: fields,
-                ..doc::BaseMeta::default()
-            }),
+            source: vec![self.collector_source()],
             name: Some(RICH_CELL_GROUP.to_owned()),
             label: doc::GroupLabel::Unspecified as i32,
             label_raw: Some(RICH_CELL_GROUP.to_owned()),
@@ -1126,13 +1089,11 @@ impl DocumentFold {
         captions: Vec<doc::RefItem>,
     ) -> String {
         let self_ref = format!("#/pictures/{}", self.document.pictures.len());
-        let mut fields = HashMap::new();
-        if !image.alt.is_empty() {
-            fields.insert(format!("{}.alt", self.prefix), string(&image.alt));
-        }
-        if !image.title.is_empty() {
-            fields.insert(format!("{}.title", self.prefix), string(&image.title));
-        }
+        let meta = doc::PictureMeta {
+            alt_text: (!image.alt.is_empty()).then(|| image.alt.clone()),
+            accessibility_title: (!image.title.is_empty()).then(|| image.title.clone()),
+            ..doc::PictureMeta::default()
+        };
         let (size, size_raw) = declared_size(image);
         if let Some(anchor) = image.anchor_id.as_ref().filter(|id| !id.is_empty()) {
             // A picture is addressed as a whole; there is no range into it.
@@ -1145,10 +1106,7 @@ impl DocumentFold {
             self_ref: self_ref.clone(),
             parent: Some(reference(parent)),
             content_layer: doc::ContentLayer::Body as i32,
-            meta: (!fields.is_empty()).then(|| doc::PictureMeta {
-                custom_fields: fields,
-                ..doc::PictureMeta::default()
-            }),
+            meta: (meta != doc::PictureMeta::default()).then_some(meta),
             label: doc::DocItemLabel::Picture as i32,
             prov: line_prov(image.source_line),
             captions,
@@ -1279,22 +1237,6 @@ impl DocumentFold {
             source: Some(doc::source_type::Source::Collector(self.source.clone())),
         }
     }
-
-    /// Attribute a *group* to this collector through its custom fields:
-    /// `GroupItem` has no `source` slot in this schema, and leaving the one
-    /// item kind this fold mints unattributable would be worse than the
-    /// indirection.
-    fn attribute(&self, fields: &mut HashMap<String, Value>) {
-        let mut entry = BTreeMap::new();
-        entry.insert("collector".to_owned(), string(COLLECTOR));
-        entry.insert("version".to_owned(), string(VERSION));
-        fields.insert(
-            format!("{}.collector", self.prefix),
-            Value {
-                kind: Some(Kind::StructValue(prost_types::Struct { fields: entry })),
-            },
-        );
-    }
 }
 
 /// An empty document with its two roots in place.
@@ -1324,9 +1266,7 @@ fn reference(target: &str) -> doc::RefItem {
 }
 
 /// The Document label for a wire label. The two vocabularies were written
-/// to match, so this is a rename and not an interpretation; `QUOTE` is the
-/// one label with no slot, and it lands on `TEXT` with the quotation
-/// recorded in the item's custom fields.
+/// to match, so this is a rename and not an interpretation.
 const fn doc_label(label: pb::BlockLabel) -> doc::DocItemLabel {
     match label {
         pb::BlockLabel::Title => doc::DocItemLabel::Title,
@@ -1337,7 +1277,8 @@ const fn doc_label(label: pb::BlockLabel) -> doc::DocItemLabel {
         pb::BlockLabel::Caption => doc::DocItemLabel::Caption,
         pb::BlockLabel::Footnote => doc::DocItemLabel::Footnote,
         pb::BlockLabel::Paragraph => doc::DocItemLabel::Paragraph,
-        pb::BlockLabel::Quote | pb::BlockLabel::Unspecified => doc::DocItemLabel::Text,
+        pb::BlockLabel::Quote => doc::DocItemLabel::Quote,
+        pb::BlockLabel::Unspecified => doc::DocItemLabel::Text,
     }
 }
 
@@ -1484,46 +1425,49 @@ fn ms_to_seconds(ms: u64) -> f64 {
     ms / 1000.0
 }
 
-/// A `MetaValue` tree as the `google.protobuf.Value` the Document plane's
-/// custom fields hold: scalar to string, list to `ListValue`, map to
-/// `Struct`, recursively. The Document schema is fleet-wide and stays
-/// Struct-based; this direction is lossless because every scalar rides as
-/// the verbatim string it already was.
-fn meta_field(value: &pb::MetaValue) -> Value {
-    match value.kind.as_ref() {
-        Some(pb::meta_value::Kind::Value(text)) => string(text),
-        Some(pb::meta_value::Kind::List(list)) => Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: list.items.iter().map(meta_field).collect(),
+/// The source's declared metadata as front matter entries: every key but a
+/// meta tag, which `meta_tags` already holds, in key order because the wire
+/// map arrives unordered.
+fn front_matter(metadata: &HashMap<String, pb::MetaValue>) -> Vec<doc::FrontMatterEntry> {
+    metadata
+        .iter()
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .filter(|(key, value)| !(key.starts_with("meta.") && scalar_of(value).is_some()))
+        .map(|(key, value)| front_matter_entry(key, value))
+        .collect()
+}
+
+fn front_matter_entry(key: &str, value: &pb::MetaValue) -> doc::FrontMatterEntry {
+    doc::FrontMatterEntry {
+        key: key.to_owned(),
+        value: Some(front_matter_value(value)),
+    }
+}
+
+/// A `MetaValue` tree as the same front matter tree. Every scalar stays
+/// the verbatim text the wire carries: the wire deliberately has no number
+/// arm, so this fold does not guess one back.
+fn front_matter_value(value: &pb::MetaValue) -> doc::FrontMatterValue {
+    use doc::front_matter_value::Kind as Fm;
+    doc::FrontMatterValue {
+        kind: match value.kind.as_ref() {
+            Some(pb::meta_value::Kind::Value(text)) => Some(Fm::Text(text.clone())),
+            Some(pb::meta_value::Kind::List(list)) => Some(Fm::List(doc::FrontMatterList {
+                values: list.items.iter().map(front_matter_value).collect(),
             })),
-        },
-        Some(pb::meta_value::Kind::Map(map)) => Value {
-            kind: Some(Kind::StructValue(prost_types::Struct {
-                fields: map
+            Some(pb::meta_value::Kind::Map(map)) => Some(Fm::Map(doc::FrontMatterMap {
+                entries: map
                     .entries
                     .iter()
-                    .map(|(key, nested)| (key.clone(), meta_field(nested)))
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
+                    .map(|(key, nested)| front_matter_entry(key, nested))
                     .collect(),
             })),
+            // A peer that set no arm said nothing, and neither does this.
+            None => None,
         },
-        // A peer that set no arm said nothing; null records exactly that.
-        None => Value {
-            kind: Some(Kind::NullValue(0)),
-        },
-    }
-}
-
-/// A `google.protobuf.Value` holding a string.
-fn string(text: &str) -> Value {
-    Value {
-        kind: Some(Kind::StringValue(text.to_owned())),
-    }
-}
-
-/// A `google.protobuf.Value` holding a boolean.
-const fn flag(value: bool) -> Value {
-    Value {
-        kind: Some(Kind::BoolValue(value)),
     }
 }
 
@@ -2047,10 +1991,10 @@ impl Walk {
 ///
 /// The wire delivers metadata keyed as the source spelled it, so the names
 /// are matched case-insensitively and with a format's own prefix (the HTML
-/// fold's `meta.`) stripped. A key with a first-class slot lands in it; a
-/// scalar with none lands in `extra` under its own name. A key whose value
-/// is a tree has no honest string form and stays where it already is, in
-/// the body's custom fields, which carry the whole tree either way.
+/// fold's `meta.`) stripped. A key with a first-class slot lands in it.
+/// Every key also lands verbatim in `front_matter` (see `on_info`), so a
+/// key with no slot is not lost, and nothing is written to the `extra`
+/// string map.
 fn source_meta(
     title: Option<&str>,
     metadata: &HashMap<String, pb::MetaValue>,
@@ -2098,16 +2042,19 @@ fn source_meta(
                 meta.keywords.extend(keyword_list(value));
                 continue;
             }
-            _ => {
-                // A meta tag already has a typed home in `meta_tags`; it
-                // does not need a second one here.
-                if !key.starts_with("meta.")
-                    && let Some(text) = scalar_of(value)
-                {
-                    meta.extra.insert(key.clone(), text);
+            "license" | "licence" | "rights" => {
+                if let Some(text) = scalar_of(value) {
+                    meta.license
+                        .get_or_insert_default()
+                        .statement
+                        .get_or_insert(text);
                 }
                 continue;
             }
+            // Every other key is in the front matter entries, verbatim and
+            // typed, and a meta tag is in `meta_tags`; neither needs a
+            // second, stringly home.
+            _ => continue,
         };
         if slot.is_none() {
             *slot = scalar_of(value);
@@ -2592,7 +2539,21 @@ mod tests {
                 "author".to_owned(),
                 crate::parse::scalar("Ada"),
             )]),
+            front_matter_syntax: pb::FrontMatterSyntax::Yaml as i32,
         })
+    }
+
+    fn text_fm(text: &str) -> doc::FrontMatterValue {
+        doc::FrontMatterValue {
+            kind: Some(doc::front_matter_value::Kind::Text(text.to_owned())),
+        }
+    }
+
+    fn fm_entry(key: &str, value: doc::FrontMatterValue) -> doc::FrontMatterEntry {
+        doc::FrontMatterEntry {
+            key: key.to_owned(),
+            value: Some(value),
+        }
     }
 
     #[test]
@@ -2602,22 +2563,60 @@ mod tests {
     }
 
     #[test]
-    fn info_names_the_document_and_lands_metadata_on_the_body() {
+    fn info_names_the_document_and_lands_metadata_in_the_front_matter() {
         let document = fold(&[info(pb::MarkupFormat::Markdown)]);
         assert_eq!(document.name, "Named");
         assert_eq!(
             document.origin.as_ref().map(|o| o.mimetype.as_str()),
             Some("text/markdown")
         );
-        let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
+        let meta = document.source_meta.as_ref().unwrap();
+        assert_eq!(meta.front_matter, vec![fm_entry("author", text_fm("Ada"))]);
         assert_eq!(
-            meta.custom_fields["markdown.author"].kind,
-            Some(Kind::StringValue("Ada".to_owned()))
+            meta.front_matter_format,
+            Some(doc::FrontMatterFormat::Yaml as i32)
+        );
+        assert_eq!(
+            meta.extra,
+            HashMap::new(),
+            "the front matter is the one home for keys with no typed slot"
+        );
+        assert!(
+            document.body.as_ref().unwrap().meta.is_none(),
+            "no untyped custom field bag on the body"
         );
     }
 
     #[test]
-    fn a_metadata_tree_lands_as_the_same_tree_of_struct_values() {
+    fn metadata_without_a_front_matter_fence_names_no_syntax() {
+        let document = fold(&[pb::parse_markup_response::Event::Info(pb::MarkupInfo {
+            format: pb::MarkupFormat::Asciidoc as i32,
+            evidence: pb::FormatEvidence::Requested as i32,
+            title: None,
+            metadata: std::collections::HashMap::from([
+                ("toc".to_owned(), crate::parse::scalar("")),
+                ("meta.description".to_owned(), crate::parse::scalar("About")),
+            ]),
+            front_matter_syntax: pb::FrontMatterSyntax::Unspecified as i32,
+        })]);
+        let meta = document.source_meta.as_ref().unwrap();
+        assert_eq!(meta.front_matter_format, None);
+        assert_eq!(
+            meta.front_matter,
+            vec![fm_entry("toc", text_fm(""))],
+            "an empty attribute is still stated, and a meta tag lives in meta_tags only"
+        );
+        assert_eq!(
+            document.meta_tags,
+            vec![doc::MetaTag {
+                name: "description".to_owned(),
+                content: "About".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_metadata_tree_lands_as_the_same_front_matter_tree() {
         let tree = pb::MetaValue {
             kind: Some(pb::meta_value::Kind::List(pb::MetaList {
                 items: vec![pb::MetaValue {
@@ -2635,19 +2634,24 @@ mod tests {
             evidence: pb::FormatEvidence::Requested as i32,
             title: None,
             metadata: std::collections::HashMap::from([("authors".to_owned(), tree)]),
+            front_matter_syntax: pb::FrontMatterSyntax::Yaml as i32,
         })]);
-        let meta = document.body.as_ref().unwrap().meta.as_ref().unwrap();
-        let Some(Kind::ListValue(authors)) = meta.custom_fields["markdown.authors"].kind.as_ref()
-        else {
-            panic!("a MetaList folds as a ListValue");
-        };
-        let Some(Kind::StructValue(author)) = authors.values[0].kind.as_ref() else {
-            panic!("a MetaMap folds as a Struct");
-        };
+        let meta = document.source_meta.as_ref().unwrap();
         assert_eq!(
-            author.fields["name"].kind,
-            Some(Kind::StringValue("Ada Lovelace".to_owned())),
-            "the scalar leaf is the verbatim string, not a JSON encoding"
+            meta.front_matter,
+            vec![fm_entry(
+                "authors",
+                doc::FrontMatterValue {
+                    kind: Some(doc::front_matter_value::Kind::List(doc::FrontMatterList {
+                        values: vec![doc::FrontMatterValue {
+                            kind: Some(doc::front_matter_value::Kind::Map(doc::FrontMatterMap {
+                                entries: vec![fm_entry("name", text_fm("Ada Lovelace"))],
+                            })),
+                        }],
+                    })),
+                },
+            )],
+            "a MetaList is a list, a MetaMap a map, and the leaf the verbatim text"
         );
     }
 
@@ -2723,17 +2727,78 @@ mod tests {
     }
 
     #[test]
-    fn quote_folds_as_text_with_the_quotation_recorded() {
+    fn quote_folds_as_a_quote_labelled_text_item() {
         let document = fold(&[block(pb::BlockLabel::Quote, "quoted words")]);
         let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
             panic!("quotes fold as TextItem");
         };
         let base = item.base.as_ref().unwrap();
-        assert_eq!(base.label, doc::DocItemLabel::Text as i32);
+        assert_eq!(base.label, doc::DocItemLabel::Quote as i32);
+        assert!(base.meta.is_none(), "no custom field bag");
+    }
+
+    #[test]
+    fn a_block_role_is_the_raw_label() {
+        let role = |label: pb::BlockLabel, text: &str| {
+            pb::parse_markup_response::Event::TextBlock(pb::TextBlock {
+                label: label as i32,
+                text: text.to_owned(),
+                role: "abstract".to_owned(),
+                ..pb::TextBlock::default()
+            })
+        };
+        let document = fold(&[
+            role(pb::BlockLabel::Paragraph, "summary"),
+            role(pb::BlockLabel::Code, "fn main() {}"),
+        ]);
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_ref() else {
+            panic!("a paragraph folds as TextItem");
+        };
+        let base = item.base.as_ref().unwrap();
+        assert_eq!(base.label_raw.as_deref(), Some("abstract"));
+        assert!(base.meta.is_none(), "no custom field bag");
+        let Some(doc::base_text_item::Item::Code(code)) = document.texts[1].item.as_ref() else {
+            panic!("code folds as CodeItem");
+        };
+        assert_eq!(code.label_raw.as_deref(), Some("abstract"));
+        assert!(code.meta.is_none(), "no custom field bag");
+    }
+
+    #[test]
+    fn every_group_names_its_collector_in_source() {
+        let document = fold(&[
+            info(pb::MarkupFormat::Markdown),
+            pb::parse_markup_response::Event::TextBlock(pb::TextBlock {
+                label: pb::BlockLabel::Paragraph as i32,
+                text: "quoted".to_owned(),
+                quote_depth: Some(1),
+                ..pb::TextBlock::default()
+            }),
+            list_item("item", 1, false),
+        ]);
         assert_eq!(
-            base.meta.as_ref().unwrap().custom_fields["markup.quote"].kind,
-            Some(Kind::BoolValue(true))
+            document.groups.len(),
+            2,
+            "a quotation group and a list group"
         );
+        for group in &document.groups {
+            assert!(
+                group.meta.is_none(),
+                "no custom field bag on {}",
+                group.self_ref
+            );
+            let [
+                doc::SourceType {
+                    source: Some(doc::source_type::Source::Collector(collector)),
+                },
+            ] = group.source.as_slice()
+            else {
+                panic!("{} names exactly its collector", group.self_ref);
+            };
+            assert_eq!(collector.collector, COLLECTOR);
+            assert_eq!(collector.version.as_deref(), Some(VERSION));
+            assert_eq!(collector.model.as_deref(), Some("markdown"));
+        }
     }
 
     #[test]
@@ -2884,11 +2949,10 @@ mod tests {
         let picture = &document.pictures[0];
         assert_eq!(picture.image.as_ref().unwrap().uri, "figures/pipeline.png");
         assert!(picture.image.as_ref().unwrap().size.is_none());
-        let fields = &picture.meta.as_ref().unwrap().custom_fields;
-        assert_eq!(
-            fields["markdown.alt"].kind,
-            Some(Kind::StringValue("the pipeline".to_owned()))
-        );
+        let meta = picture.meta.as_ref().unwrap();
+        assert_eq!(meta.alt_text.as_deref(), Some("the pipeline"));
+        assert_eq!(meta.accessibility_title.as_deref(), Some("Fig 1"));
+        assert_eq!(meta.custom_fields, HashMap::new(), "no custom field bag");
     }
 
     #[test]
@@ -3440,6 +3504,7 @@ mod tests {
             evidence: pb::FormatEvidence::Requested as i32,
             title: Some("Sketch of the Engine".to_owned()),
             metadata,
+            front_matter_syntax: pb::FrontMatterSyntax::Toml as i32,
         })]);
         let meta = document.source_meta.as_ref().expect("declared metadata");
         assert_eq!(meta.title.as_deref(), Some("Sketch of the Engine"));
@@ -3459,11 +3524,36 @@ mod tests {
         assert_eq!(meta.language.as_deref(), Some("en"));
         assert_eq!(meta.keywords, vec!["engine", "looms"]);
         assert_eq!(
-            meta.extra.get("licence").map(String::as_str),
+            meta.license.as_ref().and_then(|l| l.statement.as_deref()),
             Some("CC-BY-4.0"),
-            "a scalar with no first-class slot keeps its own name"
+            "a licence statement has its typed slot"
         );
-        assert!(!meta.extra.contains_key("authors"), "no key lands twice");
+        assert_eq!(
+            meta.extra,
+            HashMap::new(),
+            "nothing lands in the string bag"
+        );
+        assert_eq!(
+            meta.front_matter_format,
+            Some(doc::FrontMatterFormat::Toml as i32)
+        );
+        assert!(
+            meta.front_matter.iter().any(|entry| entry.key == "licence"),
+            "the front matter keeps every key verbatim, typed slot or not"
+        );
+        assert!(
+            meta.front_matter
+                .iter()
+                .all(|entry| !entry.key.starts_with("meta.")),
+            "a meta tag is in meta_tags, not in the front matter too"
+        );
+        let keys: Vec<&str> = meta.front_matter.iter().map(|e| e.key.as_str()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            keys, sorted,
+            "an unordered wire map lands in a stable order"
+        );
     }
 
     #[test]

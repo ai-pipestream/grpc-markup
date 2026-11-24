@@ -65,8 +65,8 @@ use crate::spans::{Inline, Mark};
 /// Only [`ParseError::ConsumerGone`]: Markdown's own error handling never
 /// rejects input, it re-reads it as literal text, and this fold follows it.
 pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
-    let (metadata, title, body_start) = front_matter(text, emitter);
-    emitter.info(title, metadata)?;
+    let (metadata, title, body_start, syntax) = front_matter(text, emitter);
+    emitter.info_with_syntax(title, metadata, syntax)?;
 
     let body = &text[body_start..];
     let mut options = Options::empty();
@@ -109,8 +109,9 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
 
 /// Parse a leading front matter block, when there is one.
 ///
-/// Returns the metadata map, the title it declared, and the byte offset the
-/// Markdown body starts at. The fence decides the dialect: `---` is YAML
+/// Returns the metadata map, the title it declared, the byte offset the
+/// Markdown body starts at, and the syntax the metadata was read in
+/// (unspecified when there is none). The fence decides the dialect: `---` is YAML
 /// and `+++` is TOML, which is what the generators that write front matter
 /// mean by each. A block that is fenced but does not parse as its own
 /// dialect warns and is skipped; text without a closed leading fence is all
@@ -118,9 +119,15 @@ pub fn fold(text: &str, emitter: &mut Emitter<'_>) -> Result<(), ParseError> {
 fn front_matter(
     text: &str,
     emitter: &mut Emitter<'_>,
-) -> (HashMap<String, pb::MetaValue>, Option<String>, usize) {
+) -> (
+    HashMap<String, pb::MetaValue>,
+    Option<String>,
+    usize,
+    pb::FrontMatterSyntax,
+) {
+    let none = pb::FrontMatterSyntax::Unspecified;
     let Some((raw, body_start, dialect)) = front_matter_span(text) else {
-        return (HashMap::new(), None, 0);
+        return (HashMap::new(), None, 0, none);
     };
     if dialect == Dialect::Yaml && !yaml_aliases_within_budget(raw) {
         emitter.warn(
@@ -130,7 +137,7 @@ fn front_matter(
                  the block was skipped"
             ),
         );
-        return (HashMap::new(), None, body_start);
+        return (HashMap::new(), None, body_start, none);
     }
     let Some(metadata) = (match dialect {
         Dialect::Yaml => yaml_mapping(raw),
@@ -140,13 +147,13 @@ fn front_matter(
             pb::WarningCode::Metadata,
             &format!("front matter is not a {dialect} mapping and was skipped"),
         );
-        return (HashMap::new(), None, body_start);
+        return (HashMap::new(), None, body_start, none);
     };
     let title = metadata.get("title").and_then(|value| match &value.kind {
         Some(pb::meta_value::Kind::Value(text)) if !text.is_empty() => Some(text.clone()),
         _ => None,
     });
-    (metadata, title, body_start)
+    (metadata, title, body_start, dialect.syntax())
 }
 
 /// Which dialect a front-matter fence declares.
@@ -159,6 +166,14 @@ enum Dialect {
 }
 
 impl Dialect {
+    /// The wire name of this dialect.
+    const fn syntax(self) -> pb::FrontMatterSyntax {
+        match self {
+            Self::Yaml => pb::FrontMatterSyntax::Yaml,
+            Self::Toml => pb::FrontMatterSyntax::Toml,
+        }
+    }
+
     /// The fence that opens and closes this dialect's block.
     const fn fence(self) -> &'static str {
         match self {

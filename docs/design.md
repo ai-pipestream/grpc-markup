@@ -341,8 +341,8 @@ where a round trip is measured.
 The fold (`src/document_fold.rs`) consumes this service's own emitted
 events — grpc-epub's pattern — and produces a merge-safe fragment: dense
 local refs, reciprocal `parent` / `children`, `CollectorSource{collector:
-"markup", model: <fold>, version}` on every item, format-native facts in
-`meta.custom_fields` under the fold's prefix. `integrity_errors` is the
+"markup", model: <fold>, version}` on every item and every group, and no
+`custom_fields` bag anywhere: every format-native fact has a typed slot. `integrity_errors` is the
 merge contract as a check; every fold test asserts it is empty.
 
 Structure: a heading-as-parent ladder (a section header of level N parents
@@ -435,7 +435,7 @@ Carried across from the typed wire, into slots the schema already had:
 Dropped or demoted per format, deliberately:
 
 - **All formats:** `ParseStatus` (describes the stream, not the document)
-  and its warnings. A block's `role` survives only as a custom field.
+  and its warnings. A block's `role` is the item's `label_raw`.
   Everything else the typed wire carries has a first-class slot on this
   plane.
 - **HTML:** anything derived from a rendered page (provenance
@@ -447,15 +447,17 @@ Dropped or demoted per format, deliberately:
   (text items at their own labels, nested tables, pictures) parented to
   the group and the group parented to the owning table. A plain cell's
   text is the cell as before.
-- **AsciiDoc:** attribute entries live only on the body meta.
+- **AsciiDoc:** attribute entries live in `source_meta.front_matter`, with
+  no `front_matter_format` because an AsciiDoc header is not a fenced
+  block.
 - **LaTeX:** everything TeX (macro definitions, spacing, counters, page
   furniture) dissolves; tikz survives only as its source; description-term
   structure survives only as a `term: ` prefix.
-- **Markdown:** `DocItemLabel` has no quote member, so a quoted paragraph
-  is a `TEXT` item under a quotation group with the quotation fact also on
-  the item's custom fields, which is what an item read on its own can say; an unknown code language
-  survives only as `code_language_raw`; image `alt` / `title` become custom
-  fields, not caption items; thematic breaks are gone entirely (warned on
+- **Markdown:** a quoted paragraph is a `DOC_ITEM_LABEL_QUOTE` text item
+  under a quotation group, so an item read on its own still says it is a
+  quotation; an unknown code language survives only as
+  `code_language_raw`; image `alt` / `title` are `PictureMeta.alt_text` /
+  `accessibility_title`, not caption items; thematic breaks are gone entirely (warned on
   the trailer), and an HTML block's own markup is kept in `raw` rather
   than lost with its tags.
 - **VTT:** cue order is document order, the cue's own timings live in the
@@ -480,8 +482,8 @@ in it, so what remains is two deliberate calls rather than five gaps.
   `heuristic`), so a consumer reading `text/markdown` off a document can
   tell a stated fact from a classified guess without the stream's trailer.
 - **A block's `role`** is an open refinement (`html`, `admonition`, a
-  footnote label) with no closed vocabulary to type it against, and stays a
-  custom field.
+  footnote label) with no closed vocabulary to type it against, so it is
+  the item's `label_raw`, verbatim.
 
 Two things still do not survive a round trip back to the *typed wire*,
 which is a gap in this wire rather than in the Document plane, and stating

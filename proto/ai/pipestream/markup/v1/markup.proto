@@ -337,6 +337,23 @@ message MarkupInfo {
   // and Docling JSON identity are naturally flat scalars. Empty when the
   // format carries none.
   map<string, MetaValue> metadata = 4;
+
+  // The syntax `metadata` was written in, when it came from a fenced front
+  // matter block: Markdown's `---` YAML or `+++` TOML. Unspecified for every
+  // other source of metadata, which has no front matter syntax to name.
+  FrontMatterSyntax front_matter_syntax = 5;
+}
+
+// FrontMatterSyntax is the syntax of a fenced front matter block.
+enum FrontMatterSyntax {
+  // Not front matter, or no metadata at all.
+  FRONT_MATTER_SYNTAX_UNSPECIFIED = 0;
+
+  // YAML between `---` fences.
+  FRONT_MATTER_SYNTAX_YAML = 1;
+
+  // TOML between `+++` fences.
+  FRONT_MATTER_SYNTAX_TOML = 2;
 }
 
 // MetaValue is one metadata value, holding the shape the source declared.

@@ -506,6 +506,22 @@ impl<'a> Emitter<'a> {
         title: Option<String>,
         metadata: std::collections::HashMap<String, pb::MetaValue>,
     ) -> Result<(), ParseError> {
+        self.info_with_syntax(title, metadata, pb::FrontMatterSyntax::Unspecified)
+    }
+
+    /// Send the `MarkupInfo` header for metadata read from a fenced front
+    /// matter block, naming the block's syntax. Must be the fold's first
+    /// emission.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::ConsumerGone`] when the client stopped reading.
+    pub fn info_with_syntax(
+        &mut self,
+        title: Option<String>,
+        metadata: std::collections::HashMap<String, pb::MetaValue>,
+        syntax: pb::FrontMatterSyntax,
+    ) -> Result<(), ParseError> {
         assert!(!self.info_sent, "MarkupInfo is sent exactly once");
         self.info_sent = true;
         self.send(pb::parse_markup_response::Event::Info(pb::MarkupInfo {
@@ -513,6 +529,7 @@ impl<'a> Emitter<'a> {
             evidence: self.evidence.to_proto() as i32,
             title,
             metadata,
+            front_matter_syntax: syntax as i32,
         }))
     }
 
